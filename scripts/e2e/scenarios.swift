@@ -77,7 +77,9 @@ extension String {
 @discardableResult
 func launchVelocity(_ environment: Environment, files: [String], background: Bool = false,
                     extra: [String] = []) -> pid_t {
-    var arguments = ["--data-dir", environment.dataDir.path, "--width", "1100", "--height", "760"]
+    // The runner's display is 1024x768; a window wider than the screen would put
+    // drop targets off-screen.
+    var arguments = ["--data-dir", environment.dataDir.path, "--width", "900", "--height", "620"]
     if background { arguments.insert("-b", at: 0) }
     arguments.append(contentsOf: extra)
     arguments.append(contentsOf: files)
@@ -251,9 +253,9 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     dismissAlerts(report: report)
     report.info("pid", detail: "\(pid) windows=\(windowTitles(pid)) tabs=\(tabSummary(velocityWindow(pid)!))")
 
-    let pinyin = useInputSource(pinyinIds)
-    report.check(!pinyin.isEmpty, "Pinyin input source available", detail: "\(pinyinIds) -> \(currentInputSourceId())")
-    guard !pinyin.isEmpty else { report.finish() }
+    let pinyin = switchToPinyin(report)
+    report.check(pinyin, "Pinyin is the current input source", detail: currentInputSourceId())
+    guard pinyin else { report.finish() }
 
     guard let window = velocityWindow(pid), let editor = editorNode(window) else { fail("no editor element") }
     bringToFront(pid, report: report)
@@ -365,7 +367,7 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
 
     // 1f. Rename-tab field composes immediately.
     guard let window = velocityWindow(pid) else { fail("no window") }
-    _ = useInputSource(pinyinIds)
+    _ = switchToPinyin(report)
     if let tabInfo = tab(window, named: "b.txt") {
         let point = CGPoint(x: tabInfo.frame.midX, y: tabInfo.frame.midY)
         _ = guardedClick(point, pid: pid, report: report, label: "tab title", clicks: 2)

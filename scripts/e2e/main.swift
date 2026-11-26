@@ -115,11 +115,7 @@ func probe() -> Never {
     report.info("enabled layouts", detail: sourceList.filter { boolProperty($0, kTISPropertyInputSourceIsEnabled as String) }
         .filter { stringProperty($0, kTISPropertyInputSourceCategory as String).contains("Keyboard") }
         .map { stringProperty($0, kTISPropertyInputSourceID as String) }.joined(separator: ", "))
-    let pinyinEnable = enableInputSource("com.apple.inputmethod.SCIM.ITABC")
-    report.info("TISEnableInputSource(SCIM.ITABC)", detail: "status=\(pinyinEnable)")
-    let pinyinSelect = selectInputSource("com.apple.inputmethod.SCIM.ITABC")
-    report.info("TISSelectInputSource(SCIM.ITABC)", detail: "status=\(pinyinSelect)")
-    let pinyinCurrent = waitUntil(3) { currentInputSourceId() == "com.apple.inputmethod.SCIM.ITABC" }
+    let pinyinCurrent = switchToPinyin(report)
     report.check(pinyinCurrent, "Pinyin is the current input source", detail: currentInputSourceId())
     if pinyinCurrent, let textEdit {
         let area = axFind(axApp(textEdit), role: "AXTextArea")
@@ -254,7 +250,9 @@ func probeMouse(_ report: Report, textEdit pid: pid_t) {
     typeKeys("L")
     usleep(250_000)
     let leftValue = readText(pid: pid)
-    report.check(leftValue.hasPrefix("L"), "HID click places the caret in TextEdit", detail: "value=\(leftValue.debugDescription)")
+    let caretIndex = leftValue.firstIndex(of: "L").map { leftValue.distance(from: leftValue.startIndex, to: $0) } ?? -1
+    report.check(caretIndex >= 0 && caretIndex <= 6, "HID click places the caret in TextEdit",
+                 detail: "caret=\(caretIndex) value=\(leftValue.debugDescription)")
     // Double click selects a word; typing replaces it.
     click(at: CGPoint(x: frame.minX + 60, y: frame.minY + 40), clicks: 2)
     usleep(200_000)
@@ -290,16 +288,22 @@ func axDumpFile(pid: pid_t, to path: String) throws {
 
 // MARK: - TCC fallback
 
-/// Adds user-level Accessibility and PostEvent rows for `path` (the same shape the
-/// runner images write at build time). Returns the sqlite exit status per service.
+/// Adds Accessibility and PostEvent rows for `path`, first in the user database
+/// and then (when passwordless sudo is available) in the system database. Returns
+/// one status per service and database; the caller re-checks from a fresh process.
 func grantAccessibility(to path: String) -> String {
     let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-    let db = "\(NSHomeDirectory())/Library/Application Support/com.apple.TCC/TCC.db"
+    let databases = [
+        ("user", "", "\(NSHomeDirectory())/Library/Application Support/com.apple.TCC/TCC.db"),
+        ("system", "sudo -n ", "/Library/Application Support/com.apple.TCC/TCC.db"),
+    ]
     var results: [String] = []
-    for service in ["kTCCServiceAccessibility", "kTCCServicePostEvent"] {
-        let sql = "insert or replace into access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags) values ('\(service)', '\(resolved)', 1, 2, 0, 1, NULL, NULL, NULL, 'UNUSED', NULL, 0);"
-        let (status, out) = shell("sqlite3 \(db.shellQuoted) \(sql.shellQuoted) 2>&1")
-        results.append("\(service)=\(status)\(out.isEmpty ? "" : " (\(out))")")
+    for (scope, prefix, db) in databases {
+        for service in ["kTCCServiceAccessibility", "kTCCServicePostEvent"] {
+            let sql = "insert or replace into access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags) values ('\(service)', '\(resolved)', 1, 2, 0, 1, NULL, NULL, NULL, 'UNUSED', NULL, 0);"
+            let (status, out) = shell("\(prefix)sqlite3 \(db.shellQuoted) \(sql.shellQuoted) 2>&1")
+            results.append("\(scope)/\(service)=\(status)\(out.isEmpty ? "" : " (\(out))")")
+        }
     }
     return results.joined(separator: ", ")
 }

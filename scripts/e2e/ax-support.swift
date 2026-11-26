@@ -494,23 +494,38 @@ func findInputSource(_ id: String) -> TISInputSource? {
     return list?.first
 }
 
+/// Only sources in the *enabled* list can be selected; a stale handle from the
+/// "all installed" list is refused with paramErr (-50) even right after enabling.
+func findEnabledInputSource(_ id: String) -> TISInputSource? {
+    let properties = [kTISPropertyInputSourceID as String: id] as CFDictionary
+    let list = TISCreateInputSourceList(properties, false).takeRetainedValue() as? [TISInputSource]
+    return list?.first
+}
+
+func inputSourceInfo(_ id: String) -> String {
+    guard let source = findInputSource(id) else { return "\(id): missing" }
+    return "\(id) enabled=\(boolProperty(source, kTISPropertyInputSourceIsEnabled as String)) selectable=\(boolProperty(source, kTISPropertyInputSourceIsSelectCapable as String)) category=\(stringProperty(source, kTISPropertyInputSourceCategory as String)) type=\(stringProperty(source, kTISPropertyInputSourceType as String))"
+}
+
 func enableInputSource(_ id: String) -> OSStatus {
     guard let source = findInputSource(id) else { return -1 }
     return TISEnableInputSource(source)
 }
 
 func selectInputSource(_ id: String) -> OSStatus {
-    guard let source = findInputSource(id) else { return -1 }
-    if !boolProperty(source, kTISPropertyInputSourceIsEnabled as String) {
-        _ = TISEnableInputSource(source)
+    if let source = findEnabledInputSource(id) {
+        return TISSelectInputSource(source)
     }
+    guard let source = findInputSource(id) else { return -1 }
+    _ = TISEnableInputSource(source)
+    if let enabled = findEnabledInputSource(id) { return TISSelectInputSource(enabled) }
     return TISSelectInputSource(source)
 }
 
 let pinyinIds = [
     "com.apple.inputmethod.SCIM.ITABC",
-    "com.apple.inputmethod.SCIM",
     "com.apple.inputmethod.SCIM.SimplifiedPinyin",
+    "com.apple.inputmethod.SCIM",
 ]
 let abcIds = [
     "com.apple.keylayout.ABC",
@@ -529,4 +544,47 @@ func useInputSource(_ ids: [String]) -> String {
         log("select \(id) failed status=\(status)")
     }
     return ""
+}
+
+/// Pinyin is an input *mode* of the SCIM input method. The runner image enables
+/// neither, so the harness enables the method and its mode, then selects the mode;
+/// when TIS still refuses, it falls back to the system's own input-source shortcut
+/// and then to the HIToolbox preference the shortcut reads.
+func switchToPinyin(_ report: Report?) -> Bool {
+    let target = "com.apple.inputmethod.SCIM.ITABC"
+    if currentInputSourceId() == target { return true }
+    report?.note("IME before", detail: (["com.apple.inputmethod.SCIM"] + pinyinIds).map(inputSourceInfo).joined(separator: " | "))
+
+    // 1. Enable the input method, then its mode, then select the mode.
+    let parent = enableInputSource("com.apple.inputmethod.SCIM")
+    let mode = enableInputSource(target)
+    report?.note("IME enable", detail: "method=\(parent) mode=\(mode) enabled(shows)=\(findInputSource(target).map { boolProperty($0, kTISPropertyInputSourceIsEnabled as String) } ?? false)")
+    for attempt in 1...3 {
+        let status = selectInputSource(target)
+        report?.note("IME select attempt \(attempt)", detail: "status=\(status) current=\(currentInputSourceId())")
+        if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == target }) { return true }
+    }
+
+    // 2. Select the method itself first (some macOS builds launch the input
+    //    method server only on a method-level selection).
+    let parentStatus = selectInputSource("com.apple.inputmethod.SCIM")
+    report?.note("IME method-level select", detail: "status=\(parentStatus) current=\(currentInputSourceId())")
+    _ = waitUntil(1) { currentInputSourceId().contains("SCIM") }
+    if selectInputSource(target) == 0, waitUntil(1.5, interval: 0.1, { currentInputSourceId() == target }) { return true }
+
+    // 3. The system shortcut: Control+Space selects the previous input source.
+    for _ in 0..<4 {
+        postKey("space", flags: .maskControl)
+        sleep(seconds: 0.6)
+        if currentInputSourceId() == target { return true }
+    }
+    report?.note("IME ctrl+space", detail: "current=\(currentInputSourceId()) enabled=\(inputSourceInfo(target))")
+
+    // 4. Write the preference the shortcut and login read, then restart the agent.
+    let list = "[{InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
+    let enabled = "[{InputSourceKind = \"Keyboard Layout\"; \"KeyboardLayout ID\" = 252; \"KeyboardLayout Name\" = ABC; }, {InputSourceKind = \"Input Method\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; }, {InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
+    _ = shell("defaults write com.apple.HIToolbox AppleEnabledInputSources -array \(enabled) && defaults write com.apple.HIToolbox AppleSelectedInputSources -array \(list) && killall TextInputMenuAgent 2>/dev/null; true")
+    _ = waitUntil(3) { currentInputSourceId() == target }
+    report?.note("IME defaults", detail: "current=\(currentInputSourceId())")
+    return currentInputSourceId() == target
 }

@@ -38,25 +38,27 @@ build() {
 }
 
 # run_with_timeout SECONDS command...
+# A foreground poll keeps no orphan watchdog behind: GitHub waits for every
+# descendant, so a stray `sleep` would hold the step open for the full limit.
 run_with_timeout() {
     local limit=$1
     shift
     "$@" &
     local child=$!
-    (
-        sleep "$limit"
-        if kill -0 "$child" 2>/dev/null; then
+    local started
+    started=$(date +%s)
+    while kill -0 "$child" 2>/dev/null; do
+        if [ $(( $(date +%s) - started )) -ge "$limit" ]; then
             echo "TIMEOUT after ${limit}s: $*"
             kill -TERM "$child" 2>/dev/null || true
             sleep 5
             kill -KILL "$child" 2>/dev/null || true
+            break
         fi
-    ) &
-    local watchdog=$!
+        sleep 1
+    done
     local status=0
-    wait "$child" || status=$?
-    kill "$watchdog" 2>/dev/null || true
-    wait "$watchdog" 2>/dev/null || true
+    wait "$child" 2>/dev/null || status=$?
     return "$status"
 }
 
