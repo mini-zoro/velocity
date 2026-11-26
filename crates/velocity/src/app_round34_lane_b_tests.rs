@@ -182,6 +182,70 @@ fn r34_sidebar_cross_group_and_right_geometry() {
     }
 }
 
+/// The GUI scenario: three tabs, the last current, another app frontmost, one click on the
+/// first tab. The click both switches the tab and asks the platform to activate Velocity once;
+/// the same click in the text only activates through AppKit and so asks for nothing.
+#[test]
+fn r34_first_mouse_on_a_tab_switches_and_requests_activation_once() {
+    use vel_platform::first_mouse::{Down, FirstMouse, accepts};
+    let mut a = app("editor", None, None);
+    a.run_named(None, "new_file", &json!({}));
+    a.run_named(None, "new_file", &json!({}));
+    a.scene();
+    assert_eq!(a.workspace.tabs.len(), 3);
+    let (first, tab) = a
+        .tab_hits
+        .first()
+        .copied()
+        .expect("the first tab is painted");
+    let current = a.workspace.tabs[a.workspace.active].sheet;
+    assert_ne!(first, current, "the click must change the tab");
+    let text = a.sheet_bounds[&current];
+    let middle = |r: Rect| Point {
+        x: r.x + r.width / 2.,
+        y: r.y + r.height / 2.,
+    };
+    let inactive = |timestamp| Down {
+        timestamp,
+        left: true,
+        command: false,
+        app_active: false,
+    };
+    let mut answer = FirstMouse::default();
+    answer.answered(accepts(&a, Some(middle(text))), 1.);
+    assert!(
+        !answer.take(inactive(1.)),
+        "text clicks stay AppKit's activation click"
+    );
+
+    answer.answered(accepts(&a, Some(middle(tab))), 2.);
+    assert!(
+        answer.take(inactive(2.)),
+        "the accepted tab click finishes activation"
+    );
+    for kind in [MouseKind::Down, MouseKind::Up] {
+        a.handle_mouse_event(
+            None,
+            MouseEvent {
+                kind,
+                position: middle(tab),
+                button: 0,
+                click_count: 1,
+                modifiers: Modifiers(0),
+                timestamp: 2.,
+            },
+        );
+    }
+    assert_eq!(a.workspace.tabs[a.workspace.active].sheet, first);
+    assert!(!answer.take(inactive(2.)), "one request per click");
+    // Once Velocity is active, a tab click in another of its windows is AppKit's alone.
+    answer.answered(accepts(&a, Some(middle(tab))), 3.);
+    assert!(!answer.take(Down {
+        app_active: true,
+        ..inactive(3.)
+    }));
+}
+
 #[test]
 fn r34_typing_chrome_and_native_pointer_policy() {
     let mut a = app("editor", None, None);

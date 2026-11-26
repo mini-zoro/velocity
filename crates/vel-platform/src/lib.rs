@@ -8,6 +8,7 @@ pub mod accessibility;
 mod display;
 #[cfg(any(target_os = "macos", test))]
 mod drawable_pool;
+pub mod first_mouse;
 pub mod fonts;
 pub mod fullscreen;
 #[cfg(target_os = "macos")]
