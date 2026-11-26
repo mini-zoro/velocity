@@ -7,6 +7,10 @@ use vel_config::keymap::Key;
 use vel_text::Text;
 
 pub(super) fn app(text: &str) -> (tempfile::TempDir, App) {
+    app_in(text, Rc::new(RefCell::new(Sessions::new(None))))
+}
+
+fn app_in(text: &str, sessions: Rc<RefCell<Sessions>>) -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new_with_preferred_languages(
         Text::from(text),
@@ -23,7 +27,7 @@ pub(super) fn app(text: &str) -> (tempfile::TempDir, App) {
         Reporter::for_options(&options, now).unwrap(),
         workspace,
         Arc::new(AtomicBool::new(false)),
-        Rc::new(RefCell::new(Sessions::new(None))),
+        sessions,
     );
     (dir, app)
 }
@@ -486,4 +490,157 @@ fn tabs_click_drag_close_and_deactivation_discard_editor_preedit() {
     assert!(a.text_input_state().marked.is_none());
     assert!(a.prepare_quit(None));
     assert_eq!(a.workspace.editor().buffer.text().to_string(), "first");
+}
+
+/// Two tabs: an untitled one ("first") and a new empty untitled one that is
+/// composing "zhong wen". Returns the composing sheet, the other sheet and the
+/// composing tab's name before the composition started.
+fn composing_in_second_tab() -> (tempfile::TempDir, App, u64, u64, String) {
+    let (dir, mut a) = app("first");
+    let other = a.workspace.tabs[a.workspace.active].sheet;
+    a.workspace.new_file().unwrap();
+    let composing = a.workspace.tabs[a.workspace.active].sheet;
+    let name = a.workspace.tabs[a.workspace.active].ui_name(&a.workspace.ui);
+    assert!(!a.workspace.tabs[a.workspace.active].dirty());
+    a.scene();
+    mark(&mut a, "zhong wen", Utf16Range::new(9, 0));
+    assert_eq!(a.workspace.editor().text.to_string(), "zhong wen");
+    assert!(a.ime_owner.is_some());
+    (dir, a, composing, other, name)
+}
+
+/// The left sheet keeps no trace of the preedit: same text, not edited, same
+/// name, nothing left to undo.
+fn assert_preedit_discarded(a: &App, sheet: u64, name: &str) {
+    let Some(index) = a.workspace.sheet_index(sheet) else {
+        return; // closed: nothing could have been committed into it
+    };
+    let tab = &a.workspace.tabs[index];
+    assert!(tab.editor.marked.is_none());
+    assert_eq!(tab.editor.buffer.text().to_string(), "");
+    assert_eq!(tab.editor.text.to_string(), "");
+    assert!(!tab.dirty(), "left tab marked edited");
+    assert_eq!(tab.ui_name(&a.workspace.ui), name);
+    assert!(a.text_input_state().marked.is_none());
+    assert!(a.ime_owner.is_none());
+}
+
+#[test]
+fn tab_switch_by_command_name_discards_editor_preedit() {
+    let (_dir, mut a, composing, other, name) = composing_in_second_tab();
+    let group = &a.workspace.workbench.groups[a.workspace.workbench.active];
+    let target = group.sheets.iter().position(|s| *s == other).unwrap();
+    command(&mut a, "select_by_index", json!({"index": target}));
+    assert_eq!(a.workspace.tabs[a.workspace.active].sheet, other);
+    assert_preedit_discarded(&a, composing, &name);
+    assert_eq!(a.workspace.editor().buffer.text().to_string(), "first");
+}
+
+#[test]
+fn leaving_the_sheet_by_command_name_discards_editor_preedit() {
+    let files = tempfile::tempdir().unwrap();
+    let file = files.path().join("other.txt");
+    std::fs::write(&file, "other\n").unwrap();
+    for (name, args) in [
+        ("next_view", json!({})),
+        ("prev_view", json!({})),
+        ("next_view_in_stack", json!({})),
+        ("prev_view_in_stack", json!({})),
+        ("close", json!({})),
+        ("close_file", json!({})),
+        ("new_file", json!({})),
+        ("open_file", json!({"file": file.to_string_lossy()})),
+        ("clone_file", json!({})),
+        ("show_panel", json!({"panel": "find"})),
+        ("show_overlay", json!({"overlay": "goto", "text": "@"})),
+        ("show_overlay", json!({"overlay": "command_palette"})),
+    ] {
+        let (_dir, mut a, composing, _other, before) = composing_in_second_tab();
+        command(&mut a, name, args.clone());
+        assert_preedit_discarded(&a, composing, &before);
+        let closing = matches!(name, "close" | "close_file");
+        assert_eq!(
+            a.workspace.sheet_index(composing).is_none(),
+            closing,
+            "{name} {args}"
+        );
+    }
+}
+
+#[test]
+fn focusing_another_group_by_command_name_discards_editor_preedit() {
+    for (name, args) in [
+        ("focus_group", json!({"group": 1})),
+        ("focus_neighboring_group", json!({})),
+    ] {
+        let (_dir, mut a) = app("first");
+        command(
+            &mut a,
+            "set_layout",
+            json!({
+                "cols": [0.0, 0.5, 1.0],
+                "rows": [0.0, 1.0],
+                "cells": [[0, 0, 1, 1], [1, 0, 2, 1]],
+            }),
+        );
+        command(&mut a, "focus_group", json!({"group": 1}));
+        a.workspace.new_file().unwrap();
+        command(&mut a, "focus_group", json!({"group": 0}));
+        a.workspace.new_file().unwrap();
+        let composing = a.workspace.tabs[a.workspace.active].sheet;
+        let before = a.workspace.tabs[a.workspace.active].ui_name(&a.workspace.ui);
+        a.scene();
+        mark(&mut a, "zhong wen", Utf16Range::new(9, 0));
+        command(&mut a, name, args);
+        assert_eq!(a.workspace.workbench.active, 1, "{name}");
+        assert_preedit_discarded(&a, composing, &before);
+    }
+}
+
+#[test]
+fn moving_a_composing_tab_to_another_window_discards_preedit() {
+    let sessions = Rc::new(RefCell::new(Sessions::new(None)));
+    let (_source_dir, mut source) = app_in("first", sessions.clone());
+    let (_dest_dir, mut dest) = app_in("dest", sessions);
+    source.workspace.new_file().unwrap();
+    let sheet = source.workspace.tabs[source.workspace.active].sheet;
+    let before = source.workspace.tabs[source.workspace.active].ui_name(&source.workspace.ui);
+    source.scene();
+    mark(&mut source, "zhong wen", Utf16Range::new(9, 0));
+    command(
+        &mut source,
+        "move_tab_to_window",
+        json!({"sheet": sheet, "window": dest.session_id}),
+    );
+    assert!(source.workspace.sheet_index(sheet).is_none());
+    assert!(source.ime_owner.is_none());
+    assert!(source.text_input_state().marked.is_none());
+    assert!(dest.receive_tabs());
+    assert_eq!(dest.workspace.tabs[dest.workspace.active].sheet, sheet);
+    dest.scene();
+    assert_preedit_discarded(&dest, sheet, &before);
+}
+
+#[test]
+fn window_command_that_keeps_the_sheet_leaves_preedit_to_the_input_method() {
+    let (_dir, mut a, composing, _other, before) = composing_in_second_tab();
+    command(&mut a, "toggle_setting", json!({"setting": "word_wrap"}));
+    let tab = &a.workspace.tabs[a.workspace.active];
+    assert_eq!(tab.sheet, composing);
+    assert!(tab.editor.marked.is_some());
+    assert_eq!(tab.editor.buffer.text().to_string(), "");
+    assert!(!tab.dirty());
+    assert!(a.text_input_state().marked.is_some());
+    // The candidate the input method commits afterwards still lands here.
+    commit(&mut a, "中文");
+    assert_eq!(a.workspace.editor().buffer.text().to_string(), "中文");
+    assert!(a.workspace.editor().marked.is_none());
+    // A text command on the composing sheet still commits the preedit first.
+    let (_dir, mut a, _composing, _other, _before) = composing_in_second_tab();
+    command(&mut a, "insert", json!({"characters": "!"}));
+    assert_eq!(a.workspace.editor().buffer.text().to_string(), "zhong wen!");
+    assert_ne!(
+        a.workspace.tabs[a.workspace.active].ui_name(&a.workspace.ui),
+        before
+    );
 }
