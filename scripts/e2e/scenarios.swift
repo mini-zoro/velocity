@@ -245,6 +245,11 @@ func dismissAlerts(report: Report) {
     }
 }
 
+/// Dumps the accessibility tree and a screen shot for the uploaded artifacts.
+func capture(_ report: Report, pid: pid_t, label: String) {
+    dumpOnFailure(report, pid: pid, label: label)
+}
+
 func dumpOnFailure(_ report: Report, pid: pid_t, label: String) {
     guard let dir = ProcessInfo.processInfo.environment["E2E_ARTIFACTS"] else { return }
     let path = "\(dir)/ax-\(label)-\(pid).txt"
@@ -328,7 +333,32 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
 
     // 1d. Two carets (Ctrl+Shift+Down), then ceshi + space inserts 测试 at both and
     // one Cmd+Z removes both.
-    guard let window = velocityWindow(pid), let editor = editorNode(window) else { fail("no editor element") }
+    // The accessibility tree can be empty right after a composition is dropped by a
+    // tab switch; wait, then say exactly what the tree contains if it stays empty.
+    var imeWindow = velocityWindow(pid)
+    if imeWindow.flatMap({ axFindAll($0, role: "AXTextArea").first }) == nil {
+        _ = waitUntil(10) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
+        imeWindow = velocityWindow(pid)
+    }
+    var textAreas = imeWindow.map { axFindAll($0, role: "AXTextArea").count } ?? -1
+    if textAreas <= 0, let frame = imeWindow.flatMap(axRect) {
+        // A click into the window (and Escape, which cancels a stuck composition)
+        // should restore focus if the app itself is alive.
+        click(at: CGPoint(x: frame.midX, y: frame.midY))
+        postKey("escape")
+        _ = waitUntil(5) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
+        imeWindow = velocityWindow(pid)
+        textAreas = imeWindow.map { axFindAll($0, role: "AXTextArea").count } ?? -1
+    }
+    let tabCount = imeWindow.map { tabs($0).count } ?? -1
+    if imeWindow == nil || textAreas <= 0 {
+        dumpOnFailure(report, pid: pid, label: "ime-empty-tree")
+        report.check(false, "the editor is exposed after switching tabs while composing",
+                     detail: "windows=\(windowTitles(pid)) textAreas=\(textAreas) tabs=\(tabCount) state=\(output("ps -o stat=,pcpu= -p \(pid)") ?? "gone")")
+        killVelocity(at: environment.launcher)
+        report.finish()
+    }
+    guard let window = imeWindow, let editor = editorNode(window) else { fail("no editor element") }
     _ = AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     postKey("a", flags: .maskCommand)
     postKey("delete")
