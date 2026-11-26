@@ -194,6 +194,20 @@ func selectedRange(_ window: AXUIElement) -> NSRange? {
 }
 
 /// Comma-joined selected text ranges, for multi-caret logs.
+/// On-screen windows Velocity's process owns above layer 0 (input-method candidate
+/// panels and indicators live there), plus what AXWindows lists.
+func imeWindowSummary(_ pid: pid_t) -> String {
+    let raw = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? []
+    let floating = raw.compactMap { entry -> String? in
+        guard entry[kCGWindowOwnerPID as String] as? pid_t == pid,
+              let layer = entry[kCGWindowLayer as String] as? Int, layer != 0,
+              let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return nil }
+        return "layer \(layer) \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height))"
+    }
+    return "on-screen above layer 0: [\(floating.joined(separator: "; "))] AX: \(axWindowSummary(pid))"
+}
+
 /// Pinyin shows the preedit with syllable separators ("ni hao", "zhong'wen");
 /// compare without them. Either the Latin preedit or a candidate's characters count.
 func isComposing(_ text: String, pinyin: String = "zhongwen", hanzi: String = "中文") -> Bool {
@@ -423,6 +437,23 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     let bLabelAfter = tab(window, named: "b.txt")?.label ?? ""
     report.check(!bLabel.isEmpty && bLabelAfter == bLabel, "b.txt is not marked edited after being left mid-composition",
                  detail: "before=\(bLabel.debugDescription) after=\(bLabelAfter.debugDescription)")
+    // What the input method itself still holds. Velocity's preedit is gone (above),
+    // but the candidate panel was seen lingering after the click; the next key shows
+    // whether the abandoned composition is still alive and follows into c.txt.
+    sleep(seconds: 1.5)
+    report.info("IME windows 2 s after the click", detail: imeWindowSummary(pid))
+    capture(report, pid: pid, label: "ime-2s-after-tab-click")
+    typeKeys("a", gap: 55_000)
+    _ = waitUntil(2) { editorText(window) != cText }
+    let afterKey = editorText(window)
+    report.check(afterKey != cText, "the next key in c.txt shows a preedit", detail: afterKey.debugDescription)
+    if afterKey != cText {
+        report.check(!isComposing(afterKey), "the abandoned composition does not follow into c.txt",
+                     detail: "\(afterKey.debugDescription) \(imeWindowSummary(pid))")
+    }
+    postKey("escape")
+    let cRestored = waitUntil(3) { editorText(window) == cText }
+    report.check(cRestored, "Escape then leaves c.txt exactly as it was", detail: editorText(window).debugDescription)
     postKey("2", flags: .maskCommand)
     let backOnB = waitUntil(3) { tab(window, named: "b.txt")?.selected == true }
     let bAfter = editorValue(window)

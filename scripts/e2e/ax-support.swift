@@ -290,13 +290,16 @@ func axFind(_ root: AXUIElement, role: String? = nil, label: String? = nil, pref
         let r = axRole(child)
         if r == "AXMenuBar" { continue }
         if role == nil || r == role {
+            // Labels are read only when asked for: some apps (TextEdit) answer
+            // AXDescription with kAXErrorFailure, which must not fail a role-only search.
+            guard let label else { return child }
             let l = axString(child, kAXTitleAttribute) ?? axString(child, kAXDescriptionAttribute)
-            if label == nil || l == label || (prefix && (l?.hasPrefix(label!) ?? false)) {
+            if l == label || (prefix && (l?.hasPrefix(label) ?? false)) {
                 return child
             }
             // AXTextField tab-rename field has a generic title; its description carries "Rename".
-            if role == "AXTextField", let want = label,
-               (axString(child, kAXDescriptionAttribute) ?? axString(child, kAXHelpAttribute))?.contains(want) == true {
+            if role == "AXTextField",
+               (axString(child, kAXDescriptionAttribute) ?? axString(child, kAXHelpAttribute))?.contains(label) == true {
                 return child
             }
         }
@@ -657,6 +660,10 @@ func typeUnicode(_ text: String, gap: UInt32 = 20_000) {
               let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
         down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
         up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
+        // Explicitly no modifiers: a .hidSystemState event otherwise inherits the HID
+        // modifier state, and after a Cmd+click that turned "XY" into Cmd+X, Cmd+Y.
+        down.flags = []
+        up.flags = []
         down.post(tap: .cghidEventTap)
         usleep(8_000)
         up.post(tap: .cghidEventTap)
@@ -689,6 +696,19 @@ func click(at point: CGPoint, clicks: Int = 1, flags: CGEventFlags = []) {
         mouseEvent(.leftMouseDown, point, clicks: clickState, flags: flags)
         mouseEvent(.leftMouseUp, point, clicks: clickState, flags: flags)
         usleep(clicks > 1 ? 40_000 : 80_000)
+    }
+    // A modifier carried on HID mouse events stays in the HID modifier state; release
+    // it so later events built from .hidSystemState do not inherit it.
+    if !flags.isEmpty {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for (flag, key) in [(CGEventFlags.maskCommand, CGKeyCode(55)), (.maskShift, 56), (.maskAlternate, 58), (.maskControl, 59)]
+        where flags.contains(flag) {
+            guard let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { continue }
+            up.type = .flagsChanged
+            up.flags = []
+            up.post(tap: .cghidEventTap)
+            usleep(20_000)
+        }
     }
 }
 
