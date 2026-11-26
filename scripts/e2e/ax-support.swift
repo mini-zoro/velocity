@@ -204,6 +204,19 @@ func axDescribe(_ element: AXUIElement) -> String {
     return parts.joined(separator: " ")
 }
 
+/// Places and sizes a window through the accessibility API (standard NSWindow
+/// attributes), so two windows can be arranged without a title-bar drag.
+@discardableResult
+func moveWindow(_ window: AXUIElement, to rect: CGRect) -> Bool {
+    var origin = CGPoint(x: rect.minX, y: rect.minY)
+    var size = CGSize(width: rect.width, height: rect.height)
+    let position = AXValueCreate(.cgPoint, &origin)!
+    let extent = AXValueCreate(.cgSize, &size)!
+    let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+    let sized = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, extent)
+    return moved == .success && sized == .success
+}
+
 func axDump(_ element: AXUIElement, depth: Int = 0, maxDepth: Int = 12, into lines: inout [String]) {
     lines.append(String(repeating: "  ", count: depth) + axDescribe(element))
     guard depth < maxDepth else { return }
@@ -507,6 +520,12 @@ func inputSourceInfo(_ id: String) -> String {
     return "\(id) enabled=\(boolProperty(source, kTISPropertyInputSourceIsEnabled as String)) selectable=\(boolProperty(source, kTISPropertyInputSourceIsSelectCapable as String)) category=\(stringProperty(source, kTISPropertyInputSourceCategory as String)) type=\(stringProperty(source, kTISPropertyInputSourceType as String))"
 }
 
+/// The same fields one at a time, for breadcrumbs around a suspect property.
+func inputSourceBasics(_ id: String) -> String {
+    guard let source = findInputSource(id) else { return "\(id): missing" }
+    return "\(id) enabled=\(boolProperty(source, kTISPropertyInputSourceIsEnabled as String)) selectable=\(boolProperty(source, kTISPropertyInputSourceIsSelectCapable as String))"
+}
+
 func enableInputSource(_ id: String) -> OSStatus {
     guard let source = findInputSource(id) else { return -1 }
     return TISEnableInputSource(source)
@@ -546,45 +565,74 @@ func useInputSource(_ ids: [String]) -> String {
     return ""
 }
 
-/// Pinyin is an input *mode* of the SCIM input method. The runner image enables
-/// neither, so the harness enables the method and its mode, then selects the mode;
-/// when TIS still refuses, it falls back to the system's own input-source shortcut
-/// and then to the HIToolbox preference the shortcut reads.
+let pinyinTarget = "com.apple.inputmethod.SCIM.ITABC"
+
+/// Breadcrumb before a risky call: a trap leaves the last trace line in the log.
+func trace(_ message: String) {
+    print("LOG [ime] \(message)")
+    fflush(stdout)
+}
+
+/// Enables and selects Pinyin. Runs in its own process (see `switch-ime`): the
+/// input source APIs trapped once on a runner, and a child keeps the probe alive.
+@discardableResult
 func switchToPinyin(_ report: Report?) -> Bool {
-    let target = "com.apple.inputmethod.SCIM.ITABC"
-    if currentInputSourceId() == target { return true }
-    report?.note("IME before", detail: (["com.apple.inputmethod.SCIM"] + pinyinIds).map(inputSourceInfo).joined(separator: " | "))
-
-    // 1. Enable the input method, then its mode, then select the mode.
-    let parent = enableInputSource("com.apple.inputmethod.SCIM")
-    let mode = enableInputSource(target)
-    report?.note("IME enable", detail: "method=\(parent) mode=\(mode) enabled(shows)=\(findInputSource(target).map { boolProperty($0, kTISPropertyInputSourceIsEnabled as String) } ?? false)")
-    for attempt in 1...3 {
-        let status = selectInputSource(target)
-        report?.note("IME select attempt \(attempt)", detail: "status=\(status) current=\(currentInputSourceId())")
-        if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == target }) { return true }
+    if currentInputSourceId() == pinyinTarget { return true }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = ["switch-ime"]
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.standardOutput
+    process.standardError = FileHandle.standardError
+    do {
+        try process.run()
+    } catch {
+        report?.note("IME child", detail: "spawn failed: \(error)")
+        return false
     }
+    _ = waitUntil(30, interval: 0.2) { !process.isRunning }
+    if process.isRunning { process.terminate() }
+    report?.note("IME child exit", detail: "\(process.terminationStatus)")
+    return waitUntil(2) { currentInputSourceId() == pinyinTarget }
+}
 
-    // 2. Select the method itself first (some macOS builds launch the input
-    //    method server only on a method-level selection).
+/// The switching itself: every step is traced before it runs, so a crash names
+/// the call that caused it.
+func switchInputMethodToPinyin() {
+    trace("start target=\(pinyinTarget) current=\(currentInputSourceId())")
+    trace("info-basics \(inputSourceBasics(pinyinTarget))")
+    trace("info-extra \(inputSourceInfo(pinyinTarget))")
+    trace("enable method")
+    let parent = enableInputSource("com.apple.inputmethod.SCIM")
+    trace("enable method status=\(parent)")
+    trace("enable mode")
+    let mode = enableInputSource(pinyinTarget)
+    trace("enable mode status=\(mode) now=\(inputSourceInfo(pinyinTarget))")
+    for attempt in 1...3 {
+        trace("select mode attempt \(attempt)")
+        let status = selectInputSource(pinyinTarget)
+        trace("select mode attempt \(attempt) status=\(status) current=\(currentInputSourceId())")
+        if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == pinyinTarget }) { return }
+    }
+    trace("select method")
     let parentStatus = selectInputSource("com.apple.inputmethod.SCIM")
-    report?.note("IME method-level select", detail: "status=\(parentStatus) current=\(currentInputSourceId())")
+    trace("select method status=\(parentStatus) current=\(currentInputSourceId())")
     _ = waitUntil(1) { currentInputSourceId().contains("SCIM") }
-    if selectInputSource(target) == 0, waitUntil(1.5, interval: 0.1, { currentInputSourceId() == target }) { return true }
-
-    // 3. The system shortcut: Control+Space selects the previous input source.
-    for _ in 0..<4 {
+    trace("select mode after method")
+    let again = selectInputSource(pinyinTarget)
+    trace("select mode after method status=\(again) current=\(currentInputSourceId())")
+    if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == pinyinTarget }) { return }
+    for step in 1...4 {
+        trace("control+space \(step)")
         postKey("space", flags: .maskControl)
         sleep(seconds: 0.6)
-        if currentInputSourceId() == target { return true }
+        trace("control+space \(step) current=\(currentInputSourceId())")
+        if currentInputSourceId() == pinyinTarget { return }
     }
-    report?.note("IME ctrl+space", detail: "current=\(currentInputSourceId()) enabled=\(inputSourceInfo(target))")
-
-    // 4. Write the preference the shortcut and login read, then restart the agent.
+    trace("defaults write")
     let list = "[{InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
     let enabled = "[{InputSourceKind = \"Keyboard Layout\"; \"KeyboardLayout ID\" = 252; \"KeyboardLayout Name\" = ABC; }, {InputSourceKind = \"Input Method\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; }, {InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
     _ = shell("defaults write com.apple.HIToolbox AppleEnabledInputSources -array \(enabled) && defaults write com.apple.HIToolbox AppleSelectedInputSources -array \(list) && killall TextInputMenuAgent 2>/dev/null; true")
-    _ = waitUntil(3) { currentInputSourceId() == target }
-    report?.note("IME defaults", detail: "current=\(currentInputSourceId())")
-    return currentInputSourceId() == target
+    _ = waitUntil(3) { currentInputSourceId() == pinyinTarget }
+    trace("end current=\(currentInputSourceId())")
 }

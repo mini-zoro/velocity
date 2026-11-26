@@ -215,6 +215,14 @@ func windowUnder(_ point: CGPoint) -> String {
     return hit.map { "\($0.owner)#\($0.id)" } ?? "none"
 }
 
+/// Places two windows side by side so neither covers the other's tab strip.
+func arrangeSideBySide(_ first: AXUIElement, _ second: AXUIElement, report: Report) {
+    let ok = moveWindow(first, to: CGRect(x: 10, y: 20, width: 480, height: 460))
+        && moveWindow(second, to: CGRect(x: 520, y: 20, width: 480, height: 460))
+    report.note("window arrangement", detail: ok ? "side by side" : "AX refused the move")
+    sleep(seconds: 0.4)
+}
+
 func dismissAlerts(report: Report) {
     // A runner session can show a TCC or "bypass the window picker" alert; it takes
     // focus away from every app under test.
@@ -416,6 +424,8 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
     if frontmostPid() != pid, let frame = axRect(source) {
         _ = guardedClick(CGPoint(x: frame.midX, y: frame.minY + 120), pid: pid, report: report, label: "focus")
     }
+    _ = moveWindow(source, to: CGRect(x: 20, y: 30, width: 900, height: 640))
+    sleep(seconds: 0.3)
     let initialTabs = tabs(source)
     report.info("start", detail: "tabs=\(tabSummary(source)) windows=\(onScreenWindows(pid).count)")
     report.check(initialTabs.count == 3, "three tabs in one window", detail: tabSummary(source))
@@ -444,11 +454,19 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
                      "the source window lost c.txt", detail: tabSummary(source))
     }
 
+    // The torn-off window opens on top of the source; separate them before a drag
+    // between their strips, or the pointer lands on the wrong window.
+    if let newWindow, let mainWindow = axWindows(pid).first(where: { win in !sameWindow(win, newWindow) }) {
+        arrangeSideBySide(mainWindow, newWindow, report: report)
+    }
     // 2b. Drag the tab from the new window into the source strip: merge, source closes.
     if let newWindow, let mainWindow = axWindows(pid).first(where: { win in !sameWindow(win, newWindow) }),
-       let moved = tab(newWindow, named: "c.txt"), let target = axRect(mainWindow) {
+       let moved = tab(newWindow, named: "c.txt"),
+       // Dropping on an existing tab lands inside the strip; the window's top edge
+       // is the title bar, not the strip.
+       let target = tabs(mainWindow).first?.frame {
         let from = CGPoint(x: moved.frame.midX, y: moved.frame.midY)
-        let to = CGPoint(x: target.minX + 120, y: target.minY + 18)
+        let to = CGPoint(x: target.midX, y: target.midY)
         drag(from: from, to: to, steps: 18, pause: 0.06)
         usleep(600_000)
         let windowsNow = axWindows(pid).filter { isOnScreen($0, pid: pid) }
@@ -505,7 +523,11 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
     let pid = launchVelocity(environment, files: [a, b, c])
     dismissAlerts(report: report)
     guard let window = velocityWindow(pid) else { fail("no window") }
-    report.check(tabs(window).first?.selected ?? false, "first tab is current", detail: tabSummary(window))
+    _ = moveWindow(window, to: CGRect(x: 20, y: 20, width: 900, height: 640))
+    sleep(seconds: 0.3)
+    // The last file named on the command line is the current tab.
+    report.check(tab(window, named: "c.txt")?.selected ?? false, "the last launched file is current",
+                 detail: tabSummary(window))
 
     // Another app takes the front, then one click on a non-current Velocity tab.
     let other = environment.fixture("other.txt", contents: "other\n")
@@ -513,16 +535,20 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
     guard let otherPid = waitForApp(bundleId: "com.apple.TextEdit", timeout: 15) else {
         report.check(false, "TextEdit came to the front"); report.finish()
     }
+    // Keep TextEdit clear of Velocity's tab strip, or the click below hits TextEdit.
+    if let editWindow = axWindows(otherPid).first {
+        _ = moveWindow(editWindow, to: CGRect(x: 560, y: 430, width: 440, height: 320))
+    }
     _ = waitUntil(8) { frontmostPid() == otherPid }
     report.check(frontmostPid() == otherPid, "another app is frontmost", detail: frontmostName())
-    guard let target = tab(window, named: "c.txt") else { report.check(false, "c.txt tab"); report.finish() }
+    guard let target = tab(window, named: "a.txt") else { report.check(false, "a.txt tab"); report.finish() }
     let point = CGPoint(x: target.frame.midX, y: target.frame.midY)
     _ = guardedClick(point, pid: pid, report: report, label: "inactive tab", clicks: 1)
     let activated = waitUntil(3) { frontmostPid() == pid }
     report.check(activated, "one click on the inactive window activates Velocity", detail: frontmostName())
     let switched = waitUntil(2) {
         guard let window = velocityWindow(pid) else { return false }
-        return tabs(window).first { $0.label.hasPrefix("c.txt") }?.selected ?? false
+        return tabs(window).first { $0.label.hasPrefix("a.txt") }?.selected ?? false
     }
     report.check(switched, "the same click selects the clicked tab",
                  detail: velocityWindow(pid).map { tabSummary($0) } ?? "no window")

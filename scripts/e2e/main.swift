@@ -226,7 +226,8 @@ func probeTextEdit(_ report: Report) -> pid_t? {
     }
     selectAll(pid: pid)
     typeKeys("abc def")
-    let typed = waitUntil(4) { readText(pid: pid).contains("abc def") }
+    // TextEdit capitalizes the first word of a paragraph; the keys are what matter.
+    let typed = waitUntil(4) { readText(pid: pid).lowercased().contains("abc def") }
     report.check(typed, "HID keyboard into TextEdit", detail: "value=\(readText(pid: pid).debugDescription)")
     if !typed {
         try? axDumpFile(pid: pid, to: "/tmp/e2e-probe-textedit.txt")
@@ -313,6 +314,19 @@ func grantAccessibility(to path: String) -> String {
 switch command {
 case "probe":
     probe()
+case "switch-ime":
+    switchInputMethodToPinyin()
+case "move-window":  // move-window <pid> <title-substring> <x> <y> <w> <h>
+    guard options.count >= 6, let pid = pid_t(options[0]) else { fail("move-window <pid> <title> x y w h") }
+    guard let window = velocityWindow(pid, title: options[1]) else { fail("window \(options[1]) not found") }
+    let rect = CGRect(x: Double(options[2]) ?? 0, y: Double(options[3]) ?? 0,
+                      width: Double(options[4]) ?? 800, height: Double(options[5]) ?? 600)
+    print("moved=\(moveWindow(window, to: rect))")
+case "ime-info":  // read-only inspection of installed input sources
+    for id in (options.isEmpty ? ["com.apple.inputmethod.SCIM"] + pinyinIds : options) {
+        print(inputSourceInfo(id))
+    }
+    print("current=\(currentInputSourceId())")
 case "trust":
     print("ax_trusted=\(AXIsProcessTrusted())")
 case "grant":  // grant <path>
