@@ -320,6 +320,10 @@ impl WindowHandle {
     pub fn invalidate_character_coordinates(&self) {
         self.0.ime_anchor_dirty.set(true);
     }
+    /// Ends conversion after the app clears its preedit and releases its borrow.
+    pub fn discard_marked_text(&self) {
+        self.0.ime_discard_pending.set(true);
+    }
 }
 
 enum Event {
@@ -374,6 +378,8 @@ struct Host {
     chars: RefCell<model::Utf16Input>,
     ime: RefCell<model::Composition>,
     ime_anchor_dirty: Cell<bool>,
+    ime_discard_pending: Cell<bool>,
+    ime_discarding: Cell<bool>,
 }
 
 impl Host {
@@ -416,6 +422,8 @@ impl Host {
             chars: RefCell::new(model::Utf16Input::default()),
             ime: RefCell::new(model::Composition::default()),
             ime_anchor_dirty: Cell::new(false),
+            ime_discard_pending: Cell::new(false),
+            ime_discarding: Cell::new(false),
         })
     }
 
@@ -443,7 +451,10 @@ impl Host {
     ) -> Option<T> {
         let mut slot = self.app.try_borrow_mut().ok()?;
         let app = slot.as_deref_mut()?;
-        Some(call(app, &self.handle()))
+        let window = self.handle();
+        let result = call(app, &window);
+        app.update_text_input_focus(&window);
+        Some(result)
     }
 
     fn drain(self: &Rc<Self>) {
@@ -478,9 +489,7 @@ impl Host {
                 }
                 Event::FocusLost => {
                     app.on_pointer_cancel(w);
-                    if app.inline_text_input() {
-                        app.on_inline_text_focus_lost(w);
-                    }
+                    app.on_text_input_focus_lost(w);
                 }
                 Event::Open(paths) => app.on_open_paths(w, &paths),
                 Event::Close => {
@@ -489,6 +498,7 @@ impl Host {
                     }
                 }
             });
+            self.flush_ime_discard();
             if self.runtime.upgrade().is_none_or(|r| r.stop.get()) {
                 break;
             }
@@ -505,6 +515,11 @@ impl Host {
             })
         })
         .unwrap_or(Ok(()))?;
+        self.flush_ime_discard();
+        // Resize and panel layout can change field bounds during the frame.
+        if self.ime.borrow().active {
+            self.ime_anchor_dirty.set(true);
+        }
         self.flush_ime_anchor();
         Ok(())
     }
@@ -562,6 +577,7 @@ impl Host {
         self.closing.set(true);
         let hwnd = self.hwnd.replace(null_mut());
         if !hwnd.is_null() {
+            self.discard_ime(hwnd);
             // SAFETY: This thread created the HWND and the runtime still retains
             // a strong reference to the Host through the last native callback.
             // Its app (including any renderer) has already been dropped.
@@ -1238,7 +1254,7 @@ impl Host {
                 self.request(FrameReason::Resize);
             }
             WM_KILLFOCUS => {
-                self.finish_ime(hwnd);
+                self.discard_ime(hwnd);
                 self.context.borrow_mut().cancel();
                 self.enqueue(Event::FocusLost);
                 self.request(FrameReason::Resize);

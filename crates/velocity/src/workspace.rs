@@ -2969,8 +2969,8 @@ impl Workspace {
         {
             if index != self.active {
                 self.editor_mut().completion.hide();
+                self.editor_mut().cancel_composition();
             }
-            self.editor_mut().unmark();
             self.editor_mut().keymap.cancel();
             self.activate_sheet(index);
             self.refresh_appearance(index);

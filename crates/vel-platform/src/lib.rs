@@ -105,6 +105,21 @@ impl Rect {
             height,
         }
     }
+
+    /// Clips a native IME anchor to its field or viewport, without moving a
+    /// visible leading edge to make room for an offscreen trailing edge.
+    pub fn ime_anchor_in(self, bounds: Self) -> Self {
+        let right = bounds.x + bounds.width.max(1.);
+        let bottom = bounds.y + bounds.height.max(1.);
+        let x = self.x.clamp(bounds.x, right - 1.);
+        let y = self.y.clamp(bounds.y, bottom - 1.);
+        Self {
+            x,
+            y,
+            width: (self.x + self.width).clamp(x + 1., right) - x,
+            height: (self.y + self.height).clamp(y + 1., bottom) - y,
+        }
+    }
 }
 /// Effective system appearance.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -439,13 +454,16 @@ pub trait AppHandler: 'static {
     fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) -> bool {
         false
     }
-    /// A transient field owns Command shortcuts and accepts marked text on blur.
-    /// Other AppKit input and editing selectors still go through NSTextInputClient.
-    fn inline_text_input(&self) -> bool {
+    /// Finish logical text input even when a resigned window will not draw.
+    fn on_text_input_focus_lost(&mut self, window: &WindowHandle) {
+        self.on_text_input(window, TextInput::Discard);
+    }
+    /// Do not start a native conversion in a non-editing editor mode.
+    fn suppress_native_composition(&self) -> bool {
         false
     }
-    /// Allow transient input to finish even when a resigned window will not draw.
-    fn on_inline_text_focus_lost(&mut self, _window: &WindowHandle) {}
+    /// Reconcile logical input focus before publishing native text geometry.
+    fn update_text_input_focus(&mut self, _window: &WindowHandle) {}
     /// Execute a command selected from a resource-defined native menu.
     fn on_named_command(&mut self, _window: &WindowHandle, _name: &str, _args: &str) {}
     /// Open files or add folders delivered by Finder, the Dock, or a window drop.

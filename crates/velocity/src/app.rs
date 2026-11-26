@@ -10,6 +10,11 @@ mod context_adapter;
 #[cfg(target_os = "macos")]
 #[path = "app_finder.rs"]
 mod finder;
+#[path = "app_ime.rs"]
+mod ime;
+#[cfg(test)]
+#[path = "app_ime_tests.rs"]
+mod ime_tests;
 #[cfg(test)]
 #[path = "app_lane_c_round20_tests.rs"]
 mod lane_c_round20_tests;
@@ -258,6 +263,7 @@ pub struct App {
     /// pointer, and the second click of a double click still means the same tab.
     tab_click: Option<(Point, u64)>,
     tab_rename: Option<Box<tab_rename::TabRename>>,
+    ime_owner: Option<ime::Owner>,
     /// The last image status message ("W × H" or the decode failure note): it describes the
     /// document it was shown for and goes away with it.
     image_status: Option<String>,
@@ -523,6 +529,7 @@ impl App {
             tab_close_hits: Vec::new(),
             tab_click: None,
             tab_rename: None,
+            ime_owner: None,
             image_status: None,
             hovered_close: None,
             hovered_tab_button: None,
@@ -922,6 +929,7 @@ impl App {
         true
     }
     fn prepare_quit(&mut self, window: Option<&WindowHandle>) -> bool {
+        self.finish_ime_focus(window);
         if self.options.mode != Mode::Interactive {
             let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
             return true;
@@ -2283,6 +2291,7 @@ impl App {
         } else {
             self.validate_region_focus();
         }
+        self.reconcile_ime_focus(window);
         if !self.workspace.recent_files.is_empty()
             || !self.workspace.recent_folders.is_empty()
             || !self.workspace.recent_projects.is_empty()
@@ -2298,6 +2307,7 @@ impl App {
         }
     }
     fn named_changed(&mut self, window: Option<&WindowHandle>, reveal: bool) {
+        self.reconcile_ime_focus(window);
         if let Some(window) = window {
             self.changed(window, Instant::now(), reveal);
         } else {
@@ -4237,6 +4247,7 @@ impl App {
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
         self.ensure_startup_services();
+        self.reconcile_ime_focus(None);
         let scene = self.render_scene();
         self.publish_tab_strips(None);
         scene
@@ -5147,11 +5158,31 @@ impl App {
     }
     fn input(&mut self, w: &WindowHandle, input: TextInput, received: Instant) {
         self.log_input("text", &input);
+        let reveal = !matches!(&input, TextInput::Discard)
+            && !matches!(&input, TextInput::Marked { text, .. } if text.is_empty());
         self.workspace.editor_mut().text_input(input);
         self.view.reset_caret_after_input(Instant::now());
-        self.changed(w, received, true);
+        self.changed(w, received, reveal);
     }
     fn handle_text_input(&mut self, window: Option<&WindowHandle>, event: TextInput) {
+        self.reconcile_ime_focus(window);
+        if self.suppress_native_composition()
+            && matches!(&event, TextInput::Marked { text, .. } if !text.is_empty())
+        {
+            if let Some(window) = window {
+                window.discard_marked_text();
+            }
+            return;
+        }
+        // These callbacks end composition themselves; do not reset the native
+        // context (an IME may immediately start the next clause in the same key).
+        if !matches!(&event, TextInput::Marked { text, .. } if !text.is_empty()) {
+            self.ime_owner = None;
+        }
+        self.route_text_input(window, event);
+        self.ime_owner = self.composing_ime_owner();
+    }
+    fn route_text_input(&mut self, window: Option<&WindowHandle>, event: TextInput) {
         if self.options.mode.automatic() {
             self.external_input += 1;
             return;
@@ -5199,9 +5230,11 @@ impl App {
             if let Some(w) = window {
                 self.input(w, event, Instant::now());
             } else {
+                let reveal = !matches!(&event, TextInput::Discard)
+                    && !matches!(&event, TextInput::Marked { text, .. } if text.is_empty());
                 self.workspace.editor_mut().text_input(event);
                 self.view.reset_caret_after_input(Instant::now());
-                self.changed_state(Instant::now(), true);
+                self.changed_state(Instant::now(), reveal);
             }
         }
     }
@@ -5664,22 +5697,16 @@ impl AppHandler for App {
             }
             return true;
         }
+        if self.composing_ime_owner().is_some() {
+            return event.state == KeyState::Down && event.modifiers.command();
+        }
+        let suppress =
+            self.suppress_native_composition() && crate::vintage::skip_native_composition(&event);
         let Some(key) = crate::editor::binding_key(&event) else {
-            return false;
+            return suppress;
         };
         if self.tab_rename.is_some() {
             return self.tab_rename_key(Some(w), &key);
-        }
-        let input = if self.settings_page_has_focus() {
-            self.workspace
-                .settings_page
-                .as_ref()
-                .and_then(|page| page.input())
-        } else {
-            self.panels.input()
-        };
-        if input.is_some_and(vel_ui::input::Input::composing) {
-            return false;
         }
         let viewport = self.viewport();
         if self.workspace.editor().vintage.is_some() {
@@ -5699,7 +5726,7 @@ impl AppHandler for App {
                 .set_viewport(top, rows);
             self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
         }
-        self.dispatch_key_binding(Some(w), &key, event.received, viewport)
+        self.dispatch_key_binding(Some(w), &key, event.received, viewport) || suppress
     }
     fn accepts_first_mouse(&self) -> bool {
         self.workspace.settings.bool("click_through", false)
@@ -5716,11 +5743,18 @@ impl AppHandler for App {
                 .iter()
                 .any(|(_, _, rect)| vel_ui::contains(*rect, point))
     }
-    fn inline_text_input(&self) -> bool {
-        self.tab_rename.is_some()
-    }
-    fn on_inline_text_focus_lost(&mut self, w: &WindowHandle) {
+    fn on_text_input_focus_lost(&mut self, w: &WindowHandle) {
+        self.finish_ime_focus(Some(w));
         self.finish_tab_rename(Some(w));
+    }
+    fn suppress_native_composition(&self) -> bool {
+        self.ime_editor_has_focus() && {
+            let editor = self.workspace.editor();
+            editor.command_mode() || editor.read_only || editor.binary.is_some()
+        }
+    }
+    fn update_text_input_focus(&mut self, window: &WindowHandle) {
+        self.reconcile_ime_focus(Some(window));
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {
@@ -5995,6 +6029,9 @@ impl AppHandler for App {
         self.handle_text_input(Some(w), event);
     }
     fn on_command(&mut self, w: &WindowHandle, command: Command) {
+        if self.ime_command(Some(w), command) {
+            return;
+        }
         if command == Command::Cancel && self.cancel_tab_drag(Some(w)) {
             return;
         }
@@ -6049,11 +6086,6 @@ impl AppHandler for App {
                 return;
             }
         }
-        if command == Command::Cancel && self.workspace.editor().marked.is_some() {
-            self.workspace.editor_mut().cancel_composition();
-            self.changed(w, Instant::now(), true);
-            return;
-        }
         self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
@@ -6081,12 +6113,14 @@ impl AppHandler for App {
             );
         }
         w.request_frame();
+        w.invalidate_character_coordinates();
     }
     fn on_move(&mut self, w: &WindowHandle) {
         if let Some(frame) = w.frame() {
             self.window_frame = Some([frame.x, frame.y, frame.width, frame.height]);
         }
         self.publish_tab_strips(Some(w));
+        w.invalidate_character_coordinates();
     }
     fn on_appearance(&mut self, w: &WindowHandle, appearance: Appearance) {
         crate::field_chrome::refresh_system_accent();
@@ -6103,6 +6137,7 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
+        self.reconcile_ime_focus(Some(ctx.window));
         let minimum = if self.settings_window {
             settings_window::SETTINGS_MINIMUM
         } else {
@@ -6642,6 +6677,7 @@ impl AppHandler for App {
         }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        self.finish_ime_focus(Some(w));
         if self.settings_window {
             self.close_settings_window();
             return true;
@@ -6662,29 +6698,24 @@ impl AppHandler for App {
         self.prepare_window_close(Some(w))
     }
     fn text_input_state(&self) -> TextInputState {
-        if let Some(rename) = &self.tab_rename {
-            return rename.input.state();
+        if let Some(input) = self.ime_field() {
+            let mut state = input.state();
+            state.caret = state.caret.ime_anchor_in(input.bounds);
+            if let Some(rename) = &self.tab_rename {
+                state.caret.y = rename.field.y;
+                state.caret.height = rename.field.height;
+            }
+            return state;
         }
-        if self.settings_page_has_focus() {
-            return self
-                .workspace
-                .settings_page
-                .as_ref()
-                .and_then(|p| p.input())
-                .map_or_else(TextInputState::default, |input| input.state());
+        if !self.ime_editor_has_focus() || self.workspace.editor().binary.is_some() {
+            return TextInputState::default();
         }
-        if let Some(input) = self.panels.input() {
-            return input.state();
-        }
-        let mut caret = self
-            .view
-            .rect_at(self.workspace.editor(), self.workspace.editor().caret);
-        caret.x += self.content.x;
-        caret.y += self.content.y;
+        let editor = self.workspace.editor();
+        let caret = self.editor_ime_anchor(self.view.rect_at(editor, editor.caret));
         TextInputState {
-            text: self.workspace.editor().text.clone(),
-            selected: self.workspace.editor().selected_utf16(),
-            marked: self.workspace.editor().marked_utf16(),
+            text: editor.text.clone(),
+            selected: editor.selected_utf16(),
+            marked: editor.marked_utf16(),
             caret,
         }
     }
@@ -6692,56 +6723,35 @@ impl AppHandler for App {
         if let Some(rename) = &self.tab_rename {
             return rename.range_rect(range);
         }
-        if self.settings_page_has_focus() {
-            return self
-                .workspace
-                .settings_page
-                .as_ref()
-                .and_then(|p| p.input())
-                .map_or_else(|| (Rect::default(), range), |input| input.range_rect(range));
+        if let Some(input) = self.ime_field() {
+            let (rect, actual) = input.range_rect(range);
+            return (rect.ime_anchor_in(input.bounds), actual);
         }
-        if let Some(input) = self.panels.input() {
-            return input.range_rect(range);
+        if !self.ime_editor_has_focus() || self.workspace.editor().binary.is_some() {
+            return (Rect::default(), Utf16Range::default());
         }
-        let (mut rect, range) = self.view.range_rect(self.workspace.editor(), range);
-        rect.x += self.content.x;
-        rect.y += self.content.y;
-        (rect, range)
+        let (rect, actual) = self.view.range_rect(self.workspace.editor(), range);
+        (self.editor_ime_anchor(rect), actual)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
-        if let Some(rename) = &self.tab_rename {
-            return Some(rename.input.utf16_at_point(point));
+        if let Some(input) = self.ime_field() {
+            return input.character_index_for_point(point);
         }
-        if self.settings_page_has_focus() {
-            return self
-                .workspace
-                .settings_page
-                .as_ref()?
-                .input()
-                .map(|input| input.utf16_at_point(point));
-        }
-        if self.panels.input().is_none() && self.workspace.editor().binary.is_some() {
+        if !self.ime_editor_has_focus() || !vel_ui::contains(self.content, point) {
             return None;
         }
-        if let Some(input) = self.panels.input() {
-            return Some(input.utf16_at_point(point));
-        }
-        #[cfg(windows)]
-        if !vel_ui::contains(self.content, point) {
+        let editor = self.workspace.editor();
+        if editor.binary.is_some() {
             return None;
         }
-        Some(
-            self.workspace
-                .editor()
-                .text
-                .byte_to_utf16(self.view.hit_test(
-                    self.workspace.editor(),
-                    Point {
-                        x: point.x - self.content.x,
-                        y: point.y - self.content.y,
-                    },
-                )),
-        )
+        let point = Point {
+            x: point.x - self.content.x,
+            y: point.y - self.content.y,
+        };
+        let nearest = self.view.hit_test(editor, point);
+        vel_ui::input::character_index(&editor.text, nearest, point, |range| {
+            self.view.range_rect(editor, range)
+        })
     }
     fn cursor_at(&self, point: Point) -> CursorShape {
         self.pointer_cursor(point)

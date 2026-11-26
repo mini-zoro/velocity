@@ -59,6 +59,48 @@ impl TextInputState {
         let actual = Utf16Range::from_bytes(&self.text, bytes.clone());
         Some((self.text.slice(bytes).to_string(), actual))
     }
+
+    /// Converts AppKit's mark-relative replacement to a visible document range.
+    /// Without a mark, setMarkedText uses the current selection.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn marked_replacement(&self, relative: Option<Utf16Range>) -> Option<Utf16Range> {
+        let (mark, relative) = (self.marked?, relative?);
+        let start = relative.location.min(mark.length);
+        let end = relative.end().min(mark.length);
+        Some(Utf16Range::new(mark.location + start, end - start))
+    }
+}
+
+/// Applies an explicit edit in a visible snapshot that contains one preedit.
+/// Returns the replacement in the committed document, the text to substitute,
+/// and the UTF-16 length of any preserved preedit before the incoming text.
+pub fn replace_in_preedit(
+    visible: &Text,
+    marked: Range<usize>,
+    original: Range<usize>,
+    replacement: Utf16Range,
+    mut text: String,
+) -> (Range<usize>, String, usize) {
+    let edit = replacement.bytes(visible);
+    if edit.end <= marked.start && edit.start < marked.start {
+        return (edit, text, 0);
+    }
+    if edit.start >= marked.end && edit.end > marked.end {
+        let map = |byte| original.end + (byte - marked.end);
+        return (map(edit.start)..map(edit.end), text, 0);
+    }
+    let prefix = visible.slice(marked.start..edit.start.max(marked.start));
+    let suffix = visible.slice(edit.end.min(marked.end)..marked.end);
+    let ahead = prefix.len_utf16();
+    if !prefix.is_empty() {
+        text.insert_str(0, &prefix.to_string());
+    }
+    if !suffix.is_empty() {
+        text.push_str(&suffix.to_string());
+    }
+    let start = original.start.min(edit.start);
+    let end = original.end + edit.end.saturating_sub(marked.end);
+    (start..end, text, ahead)
 }
 /// Native text input. Explicit replacements address the current visible document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,3 +446,7 @@ mod tests {
         assert!(!flags.sides()[0]);
     }
 }
+
+#[cfg(test)]
+#[path = "input_ime_tests.rs"]
+mod ime_tests;

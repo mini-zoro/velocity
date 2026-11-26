@@ -347,7 +347,7 @@ fn click_away_tab_switch_and_key_window_loss_commit() {
             }
             "window" => {
                 // Same commit path as the platform's InlineTextFocusLost event.
-                assert!(app.inline_text_input());
+                assert!(app.ime_field().is_some());
                 assert!(app.finish_tab_rename(None));
             }
             _ => unreachable!(),

@@ -2,7 +2,6 @@
 use super::{Event, Host, WindowHandle, model};
 use crate::{
     CursorShape, FrameReason, KeyEvent, KeyState, MouseEvent, MouseKind, ScrollEvent, TextInput,
-    Utf16Range,
 };
 use std::{ptr::null_mut, rc::Rc, time::Instant};
 use windows_sys::Win32::{
@@ -26,11 +25,26 @@ impl Host {
             return false;
         }
         crate::memory_guard::note_input();
-        let vk = message.wParam as u16;
-        if vk == VK_PROCESSKEY || vk == VK_PACKET || self.ime.borrow().active {
-            // IMM processes these keys. VK_PACKET carries Unicode input,
-            // including the touch keyboard's injected UTF-16.
+        let mut vk = message.wParam as u16;
+        if vk == VK_PACKET || self.ime.borrow().active {
             return false;
+        }
+        let process_key = vk == VK_PROCESSKEY;
+        if process_key {
+            if !down
+                || !self.app.try_borrow().is_ok_and(|slot| {
+                    slot.as_ref()
+                        .is_some_and(|app| app.suppress_native_composition())
+                })
+            {
+                return false;
+            }
+            // SAFETY: This is a VK_PROCESSKEY keydown and TranslateMessage has
+            // not run yet. Preserve the key for Vintage instead of starting IME.
+            vk = unsafe { ImmGetVirtualKey(message.hwnd) } as u16;
+            if vk == VK_PROCESSKEY || vk == 0 {
+                return true;
+            }
         }
         let scan = (message.lParam >> 16) as u8;
         let extended = message.lParam & (1 << 24) != 0;
@@ -83,6 +97,7 @@ impl Host {
             },
         };
         let consumed = self.with_app(|app, w| app.on_key(w, key)).unwrap_or(false);
+        self.flush_ime_discard();
         self.flush_ime_anchor();
         if modifier.is_some() || !down {
             return false;
@@ -97,7 +112,7 @@ impl Host {
             return true;
         }
         // With Ctrl held, an unbound printable control code is not an insert.
-        flags.command() && !flags.option()
+        process_key || flags.command() && !flags.option()
     }
 
     pub(super) fn input_message(
@@ -107,8 +122,19 @@ impl Host {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<LRESULT> {
+        if (self.ime_discard_pending.get() || self.ime_discarding.get())
+            && matches!(
+                message,
+                WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_CHAR
+            )
+        {
+            return Some(0);
+        }
         match message {
             WM_CHAR | WM_SYSCHAR | WM_IME_CHAR => {
+                if message != WM_IME_CHAR && self.ime.borrow().active {
+                    return Some(0);
+                }
                 if message == WM_SYSCHAR && !model::alt_graph(&keyboard_state()) {
                     return None;
                 }
@@ -167,8 +193,18 @@ impl Host {
                     let result = (flags & GCS_RESULTSTR != 0)
                         .then(|| ime.string(GCS_RESULTSTR))
                         .flatten();
-                    let marked = if flags & (GCS_COMPSTR | GCS_CURSORPOS | GCS_COMPATTR) != 0 {
-                        ime.string(GCS_COMPSTR).map(|text| (text, ime.cursor()))
+                    let marked = if flags
+                        & (GCS_COMPSTR | GCS_CURSORPOS | GCS_COMPATTR | GCS_COMPCLAUSE)
+                        != 0
+                    {
+                        ime.string(GCS_COMPSTR).map(|text| {
+                            let selected = model::composition_selection(
+                                &text,
+                                ime.cursor(),
+                                &ime.attributes(),
+                            );
+                            (text, selected)
+                        })
                     } else {
                         None
                     };
@@ -195,13 +231,15 @@ impl Host {
                 self.ime_anchor_dirty.set(true);
             }
             WM_IME_ENDCOMPOSITION => {
-                let event = self.ime.borrow_mut().end(false);
+                let event = self.ime.borrow_mut().end();
                 if let Some(event) = event {
                     self.text(event);
                 }
             }
             WM_INPUTLANGCHANGE => {
-                self.finish_ime(hwnd);
+                if let Some(event) = self.discard_ime(hwnd) {
+                    self.text(event);
+                }
                 return None;
             }
             WM_MOUSEACTIVATE => {
@@ -422,32 +460,25 @@ impl Host {
         self.request(FrameReason::Input);
     }
 
-    pub(super) fn finish_ime(&self, hwnd: HWND) {
+    pub(super) fn flush_ime_discard(&self) {
+        if self.ime_discard_pending.replace(false) {
+            self.discard_ime(self.hwnd.get());
+        }
+    }
+
+    pub(super) fn discard_ime(&self, hwnd: HWND) -> Option<TextInput> {
         self.chars.replace(model::Utf16Input::default());
-        if !self.ime.borrow().active {
-            return;
+        let active = self.ime.borrow().active;
+        let event = self.ime.borrow_mut().end();
+        if active && let Some(ime) = Ime::acquire(hwnd) {
+            // The app has chosen whether to keep its preview. Drop native
+            // conversion without routing any synchronous IMM callbacks.
+            self.ime_discarding.set(true);
+            // SAFETY: The context is held by Ime for this synchronous call.
+            unsafe { ImmNotifyIME(ime.context, NI_COMPOSITIONSTR, CPS_CANCEL, 0) };
+            self.ime_discarding.set(false);
         }
-        let inline = self
-            .app
-            .try_borrow()
-            .ok()
-            .is_some_and(|slot| slot.as_ref().is_some_and(|app| app.inline_text_input()));
-        if let Some(ime) = Ime::acquire(hwnd) {
-            // SAFETY: Finish IME composition without holding any borrow: the
-            // system may synchronously send the result and end messages.
-            unsafe {
-                ImmNotifyIME(
-                    ime.context,
-                    NI_COMPOSITIONSTR,
-                    if inline { CPS_COMPLETE } else { CPS_CANCEL },
-                    0,
-                )
-            };
-        }
-        let end = self.ime.borrow_mut().end(inline);
-        if let Some(end) = end {
-            self.text(end);
-        }
+        event
     }
 
     pub(super) fn flush_ime_anchor(&self) {
@@ -455,15 +486,12 @@ impl Host {
             return;
         }
         let Some(state) = self.app.try_borrow().ok().and_then(|slot| {
-            slot.as_ref().map(|app| {
+            slot.as_ref().and_then(|app| {
                 let state = app.text_input_state();
-                let caret = if state.caret.height > 0. {
-                    state.caret
-                } else {
-                    app.text_input_rect(Utf16Range::new(state.selected.end(), 0))
-                        .0
-                };
-                caret.clamped(self.size.get())
+                let rect = state
+                    .marked
+                    .map_or(state.caret, |mark| app.text_input_rect(mark).0);
+                (rect.height > 0.).then(|| rect.clamped(self.size.get()))
             })
         }) else {
             return;
@@ -599,6 +627,26 @@ impl Ime {
         // SAFETY: GCS_CURSORPOS returns a UTF-16 code-unit offset, not buffer data.
         unsafe { ImmGetCompositionStringW(self.context, GCS_CURSORPOS, null_mut(), 0) }.max(0)
             as usize
+    }
+
+    fn attributes(&self) -> Vec<u8> {
+        // SAFETY: Query the required byte length, then pass that much writable storage.
+        let bytes = unsafe { ImmGetCompositionStringW(self.context, GCS_COMPATTR, null_mut(), 0) };
+        if bytes <= 0 {
+            return Vec::new();
+        }
+        let mut attrs = vec![0; bytes as usize];
+        // SAFETY: attrs contains the byte count requested by IMM above.
+        let copied = unsafe {
+            ImmGetCompositionStringW(
+                self.context,
+                GCS_COMPATTR,
+                attrs.as_mut_ptr().cast(),
+                bytes as u32,
+            )
+        };
+        attrs.truncate(copied.max(0) as usize);
+        attrs
     }
 }
 

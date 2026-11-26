@@ -311,6 +311,9 @@ impl App {
     }
 
     pub(super) fn tab_rename_command(&mut self, window: Option<&WindowHandle>, command: Command) {
+        if self.ime_command(window, command) {
+            return;
+        }
         let Some(rename) = self.tab_rename.as_mut() else {
             return;
         };

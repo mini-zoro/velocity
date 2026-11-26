@@ -7,6 +7,17 @@ use vel_config::{
 };
 use vel_vintage::{Mode, Outcome, Settings, Vintage};
 
+/// An unbound printable normal-mode key must not reach the input context.
+pub(crate) fn skip_native_composition(event: &vel_platform::KeyEvent) -> bool {
+    event.state == vel_platform::KeyState::Down
+        && !event.modifiers.command()
+        && !event.modifiers.control()
+        && event
+            .characters_ignoring_modifiers
+            .chars()
+            .any(|ch| !ch.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&ch))
+}
+
 /// One vi engine per view; settings changes do not alter document preferences.
 #[derive(Debug)]
 pub struct State {
