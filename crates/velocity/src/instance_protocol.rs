@@ -13,7 +13,9 @@ type ReplyStream = crate::instance_pipe::Pipe;
 pub(crate) const MAX_REQUEST: u64 = 64 * 1024 * 1024;
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const ENQUEUED: u8 = 1;
+pub(crate) const REJECTED: u8 = 3;
 pub(crate) const BUSY: u8 = 4;
+const BUSY_RETRY: Duration = Duration::from_secs(3);
 
 /// Serialized CLI request. All paths are made absolute at the sending process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +38,12 @@ pub struct Request {
     pub command: Option<crate::cli::Named>,
     #[serde(default)]
     pub return_pid: Option<i32>,
+    /// New clients wait for the window, not just the transport queue.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) confirm_delivery: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -59,6 +67,14 @@ impl From<&str> for Stdin {
 }
 impl Request {
     pub fn new(options: &Options, stdin: Option<Stdin>) -> Result<Self, String> {
+        let background = options.background
+            || (options
+                .command
+                .as_ref()
+                .is_some_and(|command| command.name == "new_window")
+                && options.files.is_empty()
+                && options.project.is_none()
+                && stdin.is_none());
         #[cfg(unix)]
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -94,10 +110,11 @@ impl Request {
             add: options.add_to_window,
             wait: options.wait || stdin.is_some(),
             stdin,
-            background: options.background,
+            background,
             stay: options.stay,
             command: options.command.clone(),
             return_pid: None,
+            confirm_delivery: false,
         });
         #[cfg(unix)]
         Ok(Self {
@@ -117,10 +134,11 @@ impl Request {
             add: options.add_to_window,
             wait: options.wait || stdin.is_some(),
             stdin,
-            background: options.background,
+            background,
             stay: options.stay,
             command: options.command.clone(),
             return_pid: None,
+            confirm_delivery: false,
         })
     }
 }
@@ -148,9 +166,8 @@ pub(crate) fn submit(
         }
         let until = Instant::now() + timeout;
         let busy = || io::Error::other("the editor is busy; request was not accepted");
-        // Once the primary has explicitly answered BUSY, a later timeout or
-        // failed reconnect still means "busy", not an opaque I/O error.
-        let mut was_busy = false;
+        let mut busy_until = None;
+        let mut backoff = Duration::from_millis(25);
         loop {
             let attempt = (|| {
                 let remaining = until
@@ -164,24 +181,34 @@ pub(crate) fn submit(
                 stream.read_exact(&mut ack)?;
                 Ok::<u8, io::Error>(ack[0])
             })();
-            let ack = match attempt {
-                Ok(ack) => ack,
-                Err(_) if was_busy => return Err(busy()),
-                Err(error) => return Err(error),
-            };
-            match ack {
+            match attempt? {
                 ENQUEUED => break,
+                REJECTED => {
+                    let mut message = String::new();
+                    stream.take(4096).read_to_string(&mut message)?;
+                    return Err(io::Error::other(if message.is_empty() {
+                        "the editor did not accept the request".into()
+                    } else {
+                        message
+                    }));
+                }
                 BUSY => {
-                    was_busy = true;
-                    let remaining = until.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(busy());
-                    }
-                    std::thread::sleep(remaining.min(Duration::from_millis(50)));
-                    if Instant::now() >= until {
-                        return Err(busy());
-                    }
-                    stream = reopen().ok_or_else(busy)?;
+                    let now = Instant::now();
+                    let deadline = *busy_until.get_or_insert((now + BUSY_RETRY).min(until));
+                    stream = loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(busy());
+                        }
+                        std::thread::sleep(remaining.min(backoff));
+                        backoff = (backoff * 2).min(Duration::from_millis(400));
+                        if Instant::now() >= deadline {
+                            return Err(busy());
+                        }
+                        if let Some(stream) = reopen() {
+                            break stream;
+                        }
+                    };
                 }
                 _ => return Err(io::Error::other("invalid enqueue acknowledgement")),
             }
@@ -253,4 +280,19 @@ fn invalid_timeout(error: &io::Error) -> bool {
     {
         error.kind() == io::ErrorKind::InvalidInput
     }
+}
+
+#[cfg(test)]
+#[test]
+fn background_flags_do_not_change_foreground_file_opens() {
+    let request = |args: &[&str]| {
+        let opts = Options::parse(args.iter().map(|arg| (*arg).to_owned()))
+            .unwrap()
+            .unwrap();
+        Request::new(&opts, None).unwrap()
+    };
+    assert!(request(&["--command", "new_window"]).background);
+    let background = request(&["-b", "-n", "test.txt"]);
+    assert!(background.background && background.new_window);
+    assert!(!request(&["-n", "test.txt"]).background);
 }

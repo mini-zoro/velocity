@@ -231,6 +231,8 @@ impl WindowHandle {
     }
     /// Brings this window forward for an interactive file/project request.
     pub fn focus(&self) {
+        let nsapp = NSApplication::sharedApplication(self.0.mtm);
+        promote_to_regular(&nsapp);
         if let Some(window) = self.0.window() {
             if window.isMiniaturized() {
                 window.deminiaturize(None);
@@ -238,7 +240,7 @@ impl WindowHandle {
             window.makeKeyAndOrderFront(None);
         }
         #[allow(deprecated)]
-        NSApplication::sharedApplication(self.0.mtm).activateIgnoringOtherApps(true);
+        nsapp.activateIgnoringOtherApps(true);
     }
     /// Reads native full-screen state, including changes from the green window control.
     pub fn is_full_screen(&self) -> bool {
@@ -785,6 +787,7 @@ enum Event {
     Appearance(Appearance),
     InlineTextFocusLost,
     CloseRequested,
+    Idle,
     Accessibility(accessibility::Id, accessibility::Request),
     AccessibilityPreferences,
     ScrollerStyle,
@@ -800,6 +803,7 @@ struct NativeWindow {
 struct Host {
     /// Unique for the process lifetime, unlike the Rc address.
     id: u64,
+    utility: bool,
     mtm: MainThreadMarker,
     app: RefCell<Option<Box<dyn AppHandler>>>,
     pending: RefCell<VecDeque<Event>>,
@@ -1040,6 +1044,7 @@ impl Host {
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
                 Event::InlineTextFocusLost => app.on_inline_text_focus_lost(&w),
+                Event::Idle => app.on_idle(&w),
                 Event::CloseRequested => {
                     if app.on_window_close_requested(&w) {
                         w.close();
@@ -1708,6 +1713,11 @@ define_class!(
     unsafe impl NSObjectProtocol for ApplicationDelegate {}
     // SAFETY: methods implement the documented NSApplicationDelegate signatures.
     unsafe impl NSApplicationDelegate for ApplicationDelegate {
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn became_active(&self, _n: &NSNotification) {
+            promote_to_regular(&NSApplication::sharedApplication(self.mtm()));
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn launched(&self, _n: &NSNotification) {
             let initial = WINDOWS.with(|windows| windows.borrow().owners().next().cloned());
@@ -1919,6 +1929,7 @@ define_class!(
                 h.dirty.set(true);
             }
             h.pace();
+            lifecycle::update_idle_timer();
         }
         // Focus is applied on the next frame: the application menu is reinstalled for the
         // key window (menu items target the installing window), selections switch between
@@ -1987,7 +1998,13 @@ impl Delegate {
             window.setContentMinSize(minimum);
         }
         window.setTitle(&NSString::from_str(&self.ivars().options.title));
-        let key = NSApplication::sharedApplication(mtm).keyWindow();
+        let nsapp = NSApplication::sharedApplication(mtm);
+        let activate = h
+            .app
+            .borrow()
+            .as_ref()
+            .is_none_or(|app| app.activate_on_open());
+        let key = nsapp.keyWindow();
         if utility {
             // A utility window (Settings) opens over the window it was invoked from, near its
             // top, and stays inside that screen's visible frame.
@@ -2028,15 +2045,31 @@ impl Delegate {
                 )
             });
             window.setFrameTopLeftPoint(NSPoint::new(x, top));
-        } else if let Some(previous) = key {
-            // ST4 build 4152: cascade from the front window's top-left corner.
-            // https://www.sublimetext.com/download
+        } else if activate && let Some(previous) = key {
             let frame = previous.frame();
             let next = window.cascadeTopLeftFromPoint(NSPoint::new(
                 frame.origin.x,
                 frame.origin.y + frame.size.height,
             ));
             window.cascadeTopLeftFromPoint(next);
+        } else if let Some(previous) = lifecycle::live_hosts()
+            .into_iter()
+            .rev()
+            .filter(|other| other.id != h.id && !other.utility)
+            .find_map(|other| other.window())
+        {
+            let frame = previous.frame();
+            let point = NSPoint::new(
+                frame.origin.x + CASCADE_STEP,
+                frame.origin.y + frame.size.height - CASCADE_STEP,
+            );
+            let top_left = previous
+                .screen()
+                .or_else(|| NSScreen::mainScreen(mtm))
+                .map_or(point, |screen| {
+                    cascade_top_left(point, window.frame().size, screen.visibleFrame())
+                });
+            window.setFrameTopLeftPoint(top_left);
         }
         // ST4 4126/4131 added fixes for native tabs (https://www.sublimetext.com/download).
         // Keep them off until native tab groups participate in Velocity's window/session model.
@@ -2140,11 +2173,6 @@ impl Delegate {
             return Ok(());
         }
         h.ready.set(true);
-        let activate = h
-            .app
-            .borrow()
-            .as_ref()
-            .is_none_or(|app| app.activate_on_open());
         let prepared = startup_frame(activate, |step| {
             match step {
                 StartupStep::Prepare => {
@@ -2154,7 +2182,10 @@ impl Delegate {
                     }
                     h.phase("first_frame_prepared_before_order_front");
                 }
-                StartupStep::OrderFront => window.makeKeyAndOrderFront(None),
+                StartupStep::OrderFront => {
+                    promote_to_regular(&nsapp);
+                    window.makeKeyAndOrderFront(None);
+                }
                 StartupStep::OrderBack => window.orderBack(None),
                 StartupStep::Activate => {
                     #[allow(deprecated)]
@@ -2182,6 +2213,66 @@ impl Delegate {
         h.handle().request_frame();
         lifecycle::launched();
         Ok(())
+    }
+}
+
+const CASCADE_STEP: f64 = 22.;
+
+fn cascade_top_left(mut point: NSPoint, size: NSSize, screen: NSRect) -> NSPoint {
+    let max_x = (screen.origin.x + screen.size.width - size.width).max(screen.origin.x);
+    let max_y = screen.origin.y + screen.size.height;
+    let min_y = (screen.origin.y + size.height).min(max_y);
+    point.x = if point.x > max_x {
+        screen.origin.x
+    } else {
+        point.x.max(screen.origin.x)
+    };
+    point.y = if point.y < min_y {
+        max_y
+    } else {
+        point.y.min(max_y)
+    };
+    point
+}
+
+fn startup_activation_policy(activate: bool) -> NSApplicationActivationPolicy {
+    if activate {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn background_startup_and_cascade_do_not_need_a_key_window() {
+    assert_eq!(
+        startup_activation_policy(false),
+        NSApplicationActivationPolicy::Accessory
+    );
+    assert_eq!(
+        startup_activation_policy(true),
+        NSApplicationActivationPolicy::Regular
+    );
+    let screen = NSRect::new(NSPoint::new(100., 50.), NSSize::new(1200., 800.));
+    let size = NSSize::new(600., 400.);
+    assert_eq!(
+        cascade_top_left(
+            NSPoint::new(150. + CASCADE_STEP, 760. - CASCADE_STEP),
+            size,
+            screen
+        ),
+        NSPoint::new(172., 738.)
+    );
+    assert_eq!(
+        cascade_top_left(NSPoint::new(720., 430.), size, screen),
+        NSPoint::new(100., 850.)
+    );
+}
+
+fn promote_to_regular(nsapp: &NSApplication) {
+    if nsapp.activationPolicy() != NSApplicationActivationPolicy::Regular {
+        nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     }
 }
 
@@ -2576,8 +2667,9 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     {
         return Err("invalid window size".into());
     }
-    let host = create_host(mtm, &options, app)?;
     let nsapp = NSApplication::sharedApplication(mtm);
+    nsapp.setActivationPolicy(startup_activation_policy(app.activate_on_open()));
+    let host = create_host(mtm, &options, app)?;
     host.phase("nsapplication_ready");
     let id = host.id;
     WINDOWS.with(|windows| {
@@ -2589,7 +2681,6 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     // SAFETY: NSObject initializer after all Rust ivars were installed.
     let delegate: Retained<ApplicationDelegate> = unsafe { msg_send![super(delegate), init] };
     lifecycle::set_delegate(delegate.clone());
-    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     let apple_events = NSAppleEventManager::sharedAppleEventManager();
@@ -2706,6 +2797,7 @@ fn create_host(
 fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHandler>) -> Rc<Host> {
     Rc::new(Host {
         id: NEXT_HOST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        utility: options.kind == crate::WindowKind::Utility,
         mtm,
         app: RefCell::new(Some(app)),
         pending: RefCell::new(VecDeque::new()),

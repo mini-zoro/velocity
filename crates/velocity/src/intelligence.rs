@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -84,7 +84,7 @@ impl OpenSymbols {
 #[derive(Debug)]
 enum Publication {
     Publish(
-        Arc<ProjectIndex>,
+        Vec<Arc<ProjectIndex>>,
         PathBuf,
         u64,
         Arc<vel_highlight::ScopeSnapshot>,
@@ -95,7 +95,7 @@ enum Publication {
         u64,
         Option<Arc<vel_complete::BufferWords>>,
     ),
-    Close(Arc<ProjectIndex>, PathBuf),
+    Close(Vec<Arc<ProjectIndex>>, PathBuf),
     Flush(Vec<Arc<ProjectIndex>>, mpsc::Sender<Result<(), String>>),
 }
 #[derive(Debug, Default)]
@@ -125,10 +125,12 @@ pub struct Intelligence {
     pub status_source: Arc<Mutex<StatusSource>>,
     key: String,
     loading: Option<mpsc::Receiver<(Vec<Project>, Vec<String>)>>,
-    tx: mpsc::Sender<Work>,
-    publisher: mpsc::Sender<Publication>,
-    publication_errors: mpsc::Receiver<String>,
-    rx: mpsc::Receiver<(u64, ResultSet)>,
+    tx: vel_mailbox::Sender<Work>,
+    publisher: mpsc::SyncSender<Publication>,
+    publication_errors: vel_mailbox::Receiver<String>,
+    publication_stopped: Arc<AtomicBool>,
+    publication_pending: bool,
+    rx: vel_mailbox::Receiver<(u64, ResultSet)>,
     generation: Arc<AtomicU64>,
     published: BTreeMap<PathBuf, (BufferId, ChangeId)>,
     words: BTreeMap<u64, ChangeId>,
@@ -139,8 +141,8 @@ pub struct Intelligence {
 }
 impl Default for Intelligence {
     fn default() -> Self {
-        let (tx, jobs) = mpsc::channel();
-        let (results, rx) = mpsc::channel();
+        let (tx, jobs) = vel_mailbox::channel();
+        let (results, rx) = vel_mailbox::channel();
         let generation = Arc::new(AtomicU64::new(0));
         let latest = generation.clone();
         std::thread::Builder::new()
@@ -241,26 +243,33 @@ impl Default for Intelligence {
                 }
             })
             .expect("project navigation worker");
-        let (publisher, publications) = mpsc::channel();
-        let (errors, publication_errors) = mpsc::channel();
+        let (publisher, publications) = mpsc::sync_channel(PUBLICATION_LIMIT);
+        let (errors, publication_errors) = vel_mailbox::channel();
+        let publication_stopped = Arc::new(AtomicBool::new(false));
+        let stopped = publication_stopped.clone();
         std::thread::Builder::new()
             .name("velocity-project-publish".into())
             .spawn(move || {
                 while let Ok(work) = publications.recv() {
+                    if stopped.load(Ordering::Acquire) {
+                        break;
+                    }
                     match work {
-                        Publication::Publish(index, path, version, scopes, symbols) => {
-                            if index.status().cancelled {
-                                continue;
-                            }
-                            match vel_index::analyze_scopes(&scopes, &symbols) {
-                                Ok(analysis) => index.update_buffer_analysis(
-                                    path,
-                                    version,
-                                    scopes.text.clone(),
-                                    analysis,
-                                ),
-                                Err(error) => {
-                                    let _ = errors.send(format!("index overlay: {error}"));
+                        Publication::Publish(indices, path, version, scopes, symbols) => {
+                            for index in indices {
+                                if stopped.load(Ordering::Acquire) || index.status().cancelled {
+                                    continue;
+                                }
+                                match vel_index::analyze_scopes(&scopes, &symbols) {
+                                    Ok(analysis) => index.update_buffer_analysis(
+                                        &path,
+                                        version,
+                                        scopes.text.clone(),
+                                        analysis,
+                                    ),
+                                    Err(error) => {
+                                        let _ = errors.send(format!("index overlay: {error}"));
+                                    }
                                 }
                             }
                         }
@@ -273,7 +282,11 @@ impl Default for Intelligence {
                                 }
                             }
                         }
-                        Publication::Close(index, path) => index.close_buffer(path),
+                        Publication::Close(indices, path) => {
+                            for index in indices {
+                                index.close_buffer(&path);
+                            }
+                        }
                         Publication::Flush(indices, done) => {
                             let result = indices
                                 .iter()
@@ -292,6 +305,8 @@ impl Default for Intelligence {
             tx,
             publisher,
             publication_errors,
+            publication_stopped,
+            publication_pending: false,
             rx,
             generation,
             published: BTreeMap::new(),
@@ -303,7 +318,32 @@ impl Default for Intelligence {
         }
     }
 }
+const PUBLICATION_LIMIT: usize = 8;
+
+impl Drop for Intelligence {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.tx.cancel();
+        self.publication_stopped.store(true, Ordering::Release);
+        for project in &self.projects {
+            project.index.cancel();
+        }
+    }
+}
+
 impl Intelligence {
+    /// On saturation, leave the old publication identity unchanged. The next
+    /// poll offers the live snapshot again rather than replaying obsolete edits.
+    fn offer(&mut self, publication: Publication) -> bool {
+        match self.publisher.try_send(publication) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.publication_pending = true;
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        }
+    }
     pub(crate) fn rescan(&self) {
         for project in &self.projects {
             project.index.rescan();
@@ -327,10 +367,11 @@ impl Intelligence {
             Arc::as_ptr(&workspace.assets)
         );
         let mut changed = false;
-        for error in self.publication_errors.try_iter() {
+        if let Ok(error) = self.publication_errors.try_recv() {
             workspace.messages.push(error);
             changed = true;
         }
+        self.publication_pending = false;
         if self.key != key {
             if !self.key.is_empty() {
                 self.generation.fetch_add(1, Ordering::AcqRel);
@@ -485,30 +526,37 @@ impl Intelligence {
             // rope that produced these scopes, symbols and words.
             let snapshot = scopes.clone();
             let id = tab.shared_view.0;
-            if self.words.get(&id) != Some(&analysis.version) {
-                self.words.insert(id, analysis.version);
-                let _ = self.publisher.send(Publication::Words(
+            if self.words.get(&id) != Some(&analysis.version)
+                && self.offer(Publication::Words(
                     engines.clone(),
                     id,
                     Some(analysis.words.clone()),
-                ));
+                ))
+            {
+                self.words.insert(id, analysis.version);
             }
             if let Some(path) = &tab.path {
                 live.insert(path.clone());
                 let identity = (tab.document, analysis.version);
                 if self.published.get(path) != Some(&identity) {
-                    self.published.insert(path.clone(), identity);
-                    self.revision += 1;
-                    for project in &self.projects {
-                        if path.starts_with(&project.root) {
-                            let _ = self.publisher.send(Publication::Publish(
-                                project.index.clone(),
-                                path.clone(),
-                                self.revision,
-                                snapshot.clone(),
-                                analysis.index_symbols.clone(),
-                            ));
-                        }
+                    let indices: Vec<_> = self
+                        .projects
+                        .iter()
+                        .filter(|project| path.starts_with(&project.root))
+                        .map(|project| project.index.clone())
+                        .collect();
+                    let revision = self.revision + 1;
+                    if indices.is_empty()
+                        || self.offer(Publication::Publish(
+                            indices,
+                            path.clone(),
+                            revision,
+                            snapshot,
+                            analysis.index_symbols.clone(),
+                        ))
+                    {
+                        self.published.insert(path.clone(), identity);
+                        self.revision = revision;
                     }
                 }
             }
@@ -528,11 +576,13 @@ impl Intelligence {
             .cloned()
             .collect::<Vec<_>>()
         {
-            self.published.remove(&path);
-            for project in &self.projects {
-                let _ = self
-                    .publisher
-                    .send(Publication::Close(project.index.clone(), path.clone()));
+            let indices = self
+                .projects
+                .iter()
+                .map(|project| project.index.clone())
+                .collect();
+            if self.offer(Publication::Close(indices, path.clone())) {
+                self.published.remove(&path);
             }
         }
         for id in self
@@ -542,10 +592,9 @@ impl Intelligence {
             .copied()
             .collect::<Vec<_>>()
         {
-            self.words.remove(&id);
-            let _ = self
-                .publisher
-                .send(Publication::Words(engines.clone(), id, None));
+            if self.offer(Publication::Words(engines.clone(), id, None)) {
+                self.words.remove(&id);
+            }
         }
         if self.last_status.elapsed() >= Duration::from_millis(100) || changed {
             let before = self.percentage;
@@ -589,7 +638,10 @@ impl Intelligence {
         move || tx.send((projects, Vec::new())).unwrap()
     }
     pub fn busy(&self) -> bool {
-        self.loading.is_some() || self.pending || self.percentage.is_some()
+        self.loading.is_some()
+            || self.pending
+            || self.publication_pending
+            || self.percentage.is_some()
     }
     pub fn symbol_source(&self) -> Vec<(PathBuf, usize, usize, usize)> {
         self.projects
@@ -674,9 +726,9 @@ impl Intelligence {
     pub fn result(&mut self) -> Option<ResultSet> {
         let result = self
             .rx
-            .try_iter()
+            .try_recv()
+            .ok()
             .filter(|(id, _)| *id == self.generation.load(Ordering::Acquire))
-            .last()
             .map(|(_, r)| r);
         if result.is_some() {
             self.pending = false;

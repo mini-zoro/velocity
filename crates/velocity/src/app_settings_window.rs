@@ -197,19 +197,15 @@ impl App {
             handle.request_frame();
         }
         self.install_native_menu(w, false);
-        let requests = {
+        let incoming = {
             let sessions = self.sessions.borrow();
             if sessions.has_live_windows() {
-                Vec::new()
+                None
             } else {
-                sessions
-                    .instance
-                    .as_ref()
-                    .map(|i| i.drain())
-                    .unwrap_or_default()
+                sessions.instance.as_ref().and_then(|i| i.next())
             }
         };
-        for mut incoming in requests {
+        if let Some(mut incoming) = incoming {
             incoming.request.new_window = true;
             if let Err(error) = self.receive_request(w, incoming) {
                 self.named_error(Some(w), &error);

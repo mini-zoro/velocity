@@ -334,6 +334,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     };
     let instance = if options.mode == Mode::Interactive {
         let mut request = instance::Request::new(&options, stdin.clone())?;
+        request.confirm_delivery = !launch_services;
         if launch_services {
             // This startup probe may focus an existing window, but cannot substitute
             // for the Apple event that LaunchServices has yet to deliver to us.
@@ -390,7 +391,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     let mut command = gui_launch::gui_command(&exe, gui_launch::log_path(&path))
                         .map_err(|e| e.to_string())?;
                     claim.pass_to(&mut command);
-                    if options.background {
+                    if request.background {
                         command.arg("--background");
                     }
                     if options.safe_mode {

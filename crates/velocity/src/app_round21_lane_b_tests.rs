@@ -295,6 +295,54 @@ fn cli_command_runs_on_the_opened_document() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn command_reply_waits_for_dispatch_and_full_queue_explicitly_rejects() {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    let workspace = Workspace::new(Text::from("buffer"), None, None, false).unwrap();
+    let mut app = fixture(workspace, sessions());
+    let options = Options::parse([
+        "--command".to_owned(),
+        r#"insert {"characters":"x"}"#.to_owned(),
+    ])
+    .unwrap()
+    .unwrap();
+    let request = Request::new(&options, None).unwrap();
+    for _ in 0..super::CLI_COMMAND_LIMIT {
+        app.accept_request(crate::instance::Incoming::local(request.clone()))
+            .unwrap();
+    }
+    let (server, mut client) = UnixStream::pair().unwrap();
+    let deadline = Duration::from_secs(5);
+    app.accept_request(crate::instance::Incoming::confirmed_fixture(
+        request.clone(),
+        server,
+        deadline,
+    ))
+    .unwrap();
+    let mut ack = [0];
+    client.read_exact(&mut ack).unwrap();
+    assert_eq!(ack, [crate::instance_protocol::BUSY]);
+    app.poll_cli_commands(None);
+    let before = app.workspace.editor().text.len_bytes();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    app.accept_request(crate::instance::Incoming::confirmed_fixture(
+        request, server, deadline,
+    ))
+    .unwrap();
+    client.set_nonblocking(true).unwrap();
+    assert_eq!(
+        client.read(&mut ack).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    app.poll_cli_commands(None);
+    client.read_exact(&mut ack).unwrap();
+    assert_eq!(ack, [crate::instance_protocol::ENQUEUED]);
+    assert_eq!(app.workspace.editor().text.len_bytes(), before + 1);
+}
+
 #[test]
 fn switch_compound_file_and_round21_menu_rows_resolve() {
     let dir = tempfile::tempdir().unwrap();

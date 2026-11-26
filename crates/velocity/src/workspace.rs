@@ -3120,7 +3120,7 @@ impl Workspace {
                     decode,
                     background || workers != 0,
                     false,
-                    (workers != 0).then_some((&self.io_workers, workers)),
+                    Some((&self.io_workers, workers)),
                 )?;
             }
         }
@@ -3807,8 +3807,12 @@ impl Workspace {
                 tab.decode_options(),
                 background || workers != 0,
                 true,
-                (workers != 0).then_some((&self.io_workers, workers)),
+                Some((&self.io_workers, workers)),
             ) {
+                if error == fileio::IO_QUEUE_FULL {
+                    tab.reload_deferred = true;
+                    continue;
+                }
                 self.resource_reports
                     .push(fileio::regular::error(&path, error));
                 if !tab.dirty() {

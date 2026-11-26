@@ -36,7 +36,7 @@ use std::{
 use vel_buffer::{Buffer, Change, ChangeSet, Edit, EditKind, ViewId};
 use vel_config::settings::EditorSettings;
 use vel_text::Text;
-pub use workers::IoWorkers;
+pub use workers::{IO_QUEUE_FULL, IoWorkers};
 
 /// Detected/selected line-ending convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

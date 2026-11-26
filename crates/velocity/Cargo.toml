@@ -15,6 +15,7 @@ workspace = true
 highlight-profile = ["vel-highlight/profile", "vel-syntax/matcher-profile"]
 
 [dependencies]
+vel-mailbox = { path = "../vel-mailbox" }
 vel-crash = { path = "../vel-crash" }
 vel-packages = { path = "../vel-packages" }
 vel-vintage = { path = "../vel-vintage" }

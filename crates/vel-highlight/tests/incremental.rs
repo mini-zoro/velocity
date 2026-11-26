@@ -36,6 +36,55 @@ fn spans(engine: &mut DocumentHighlighter) -> Vec<Vec<StyleSpan>> {
         .map(|l| l.spans.to_vec())
         .collect()
 }
+
+#[test]
+fn edit_and_palette_bursts_converge_to_the_latest_snapshot() {
+    let set = set();
+    let mut text = Text::from("fn");
+    let mut worker = HighlightService::new(engine(set.clone(), text.clone(), 0)).unwrap();
+    let schemes = [
+        Arc::new(ColorScheme::velocity_light()),
+        Arc::new(ColorScheme::velocity_dark()),
+    ];
+    for version in 1..=257 {
+        let next = Text::from(format!("fn {}\n", "let ".repeat(version as usize)).as_str());
+        let changes = ChangeSet::new(vec![Change {
+            old_range: 0..text.len_bytes(),
+            new_len: next.len_bytes(),
+        }]);
+        worker
+            .apply_change(next.clone(), ChangeId(version), changes)
+            .unwrap();
+        worker
+            .set_color_scheme(schemes[version as usize % 2].clone())
+            .unwrap();
+        text = next;
+    }
+    let wanted = ChangeId(257);
+    let expected = spans(&mut engine(set, text.clone(), wanted.0));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let batch = worker.request_lines(wanted, 0..text.len_lines()).unwrap();
+        if batch.complete {
+            assert_eq!(batch.scheme_revision, wanted.0);
+            assert_eq!(batch.scopes.text, text);
+            assert_eq!(
+                batch
+                    .highlighted
+                    .iter()
+                    .map(|line| line.spans.to_vec())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            break;
+        }
+        if let Some(Err(error)) = worker.try_recv() {
+            panic!("{error}");
+        }
+        assert!(Instant::now() < until, "latest snapshot did not converge");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
 #[test]
 fn edits_converge_and_match_fresh_including_utf8_and_newlines() {
     let set = set();

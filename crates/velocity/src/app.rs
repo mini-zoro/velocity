@@ -169,11 +169,14 @@ struct Sample {
     present_call_ms: f64,
     timer_lateness_ms: Option<f64>,
 }
-type PendingCliCommand = (
-    crate::cli::Named,
-    std::collections::BTreeSet<u64>,
-    Option<u64>,
-);
+const CLI_COMMAND_LIMIT: usize = 16;
+#[derive(Debug)]
+struct PendingCliCommand {
+    command: crate::cli::Named,
+    sheets: std::collections::BTreeSet<u64>,
+    target: Option<u64>,
+    incoming: crate::instance::Incoming,
+}
 
 #[derive(Debug)]
 pub struct App {
@@ -277,6 +280,8 @@ pub struct App {
     restored_windows: Vec<(vel_session::Window, u64)>,
     waiters: Vec<crate::instance::Waiter>,
     cli_commands: std::collections::VecDeque<PendingCliCommand>,
+    opening_request: Option<crate::instance::Incoming>,
+    cli_background: bool,
     restore_safety: crate::safe_mode::Startup,
     skipped_recovery: Option<std::sync::mpsc::Receiver<vel_session::Recovery>>,
     view_buffer: Option<u64>,
@@ -450,6 +455,8 @@ impl App {
             restored_windows: Vec::new(),
             waiters: Vec::new(),
             cli_commands: Default::default(),
+            opening_request: None,
+            cli_background: false,
             restore_safety: Default::default(),
             skipped_recovery: None,
             exact_scene: false,
@@ -754,15 +761,40 @@ impl App {
         {
             return Ok(());
         }
+        self.switch_workspace(|app| {
+            app.open_project_for_session(path.clone())
+                .map_err(|error| format!("{}: {error}", path.display()))
+        })?;
+        self.panels.reset(&self.workspace);
+        Ok(())
+    }
+    fn switch_workspace(
+        &mut self,
+        switch: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
         self.checkpoint_reason(false, true)?;
-        self.sessions.borrow().flush()?;
         let retain = self.retain_switching_project();
-        self.open_project_for_session(path.clone())
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let layout = self.session_policy(false, true).remember_layout;
+        let staged = {
+            let mut sessions = self.sessions.borrow_mut();
+            sessions.flush()?;
+            sessions.stage_departure(self.session_id, retain, layout)?
+        };
+        if let Err(error) = switch(self) {
+            if let Some(path) = staged
+                && let Err(cleanup) = std::fs::remove_file(&path)
+            {
+                return Err(format!(
+                    "{error}; retained recovery draft at {}: {cleanup}",
+                    path.display()
+                ));
+            }
+            return Err(error);
+        }
         self.sessions
             .borrow_mut()
-            .retain_departing(self.session_id, retain);
-        self.panels.reset(&self.workspace);
+            .finish_departure(self.session_id)?;
+        self.session_due = Some(Instant::now());
         Ok(())
     }
     fn checkpoint(&mut self, quitting: bool) -> Result<(), String> {
@@ -930,9 +962,11 @@ impl App {
         reserved_id: Option<u64>,
         use_new_window_settings: bool,
     ) -> Result<(WindowHandle, u64), String> {
-        let app = self.window_app(restored, reserved_id, use_new_window_settings)?;
+        let mut app = self.window_app(restored, reserved_id, use_new_window_settings)?;
+        app.options.background |= self.cli_background;
         let id = app.session_id;
-        w.new_window(
+        self.launch_child(
+            w,
             WindowOptions {
                 title: "Velocity".into(),
                 size: Size {
@@ -944,6 +978,19 @@ impl App {
             app,
         )
         .map(|window| (window, id))
+    }
+    fn launch_child(
+        &self,
+        w: &WindowHandle,
+        options: WindowOptions,
+        app: Self,
+    ) -> Result<WindowHandle, String> {
+        let id = app.session_id;
+        let result = w.new_window(options, app);
+        if result.is_err() {
+            self.sessions.borrow_mut().release_route(id);
+        }
+        result
     }
     fn window_app(
         &self,
@@ -994,6 +1041,7 @@ impl App {
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         self.poll_restore_safety(w);
         self.publish_open_route();
+        self.sessions.borrow_mut().ready(self.session_id);
         self.sessions
             .borrow_mut()
             .handles
@@ -1015,25 +1063,19 @@ impl App {
                 .global_bool("update_system_recent_files", true),
             |path| w.system_recent_document(path),
         );
-        let requests = {
+        let incoming = {
             let sessions = self.sessions.borrow();
-            if sessions
-                .active_window
-                .is_none_or(|id| id == self.session_id)
-            {
-                sessions
-                    .instance
-                    .as_ref()
-                    .map(|i| i.drain())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            }
+            (sessions.cli_destination() == Some(self.session_id))
+                .then(|| sessions.instance.as_ref()?.next())
+                .flatten()
         };
-        for incoming in requests {
+        if let Some(incoming) = incoming {
             if let Err(e) = self.receive_request(w, incoming) {
                 self.workspace.messages.push(format!("CLI request: {e}"));
             }
+            // Return to the platform between IPC requests so a queued close
+            // or focus change takes effect before selecting the next destination.
+            w.request_frame();
         }
         for (window, id) in std::mem::take(&mut self.restored_windows) {
             if let Err(e) = self.open_native_window(w, Some(window), Some(id), false) {
@@ -1089,16 +1131,32 @@ impl App {
         &self,
         mut incoming: crate::instance::Incoming,
     ) -> Result<Option<(crate::open_requests::Route, crate::instance::Incoming)>, String> {
-        let route = self.route_open(&mut incoming.request);
+        if incoming.expired() {
+            incoming.reject(crate::instance::DELIVERY_EXPIRED);
+            return Ok(None);
+        }
+        let confirmed = incoming.confirmed();
+        let route = if confirmed {
+            self.route_open_filtered(&mut incoming.request, true)
+        } else {
+            self.route_open(&mut incoming.request)
+        };
         if let crate::open_requests::Route::Window(id) = route
             && id != self.session_id
         {
             let mut sessions = self.sessions.borrow_mut();
             let inbox = sessions.open_inbox.entry(id).or_default();
             if inbox.len() >= 16 {
+                if confirmed {
+                    incoming.busy();
+                    return Ok(None);
+                }
                 return Err("target window's open queue is full".into());
             }
             inbox.push(incoming);
+            if let Some(handle) = sessions.handles.get(&id) {
+                handle.request_frame();
+            }
             return Ok(None);
         }
         Ok(Some((route, incoming)))
@@ -1119,7 +1177,12 @@ impl App {
             Arc::new(AtomicBool::new(false)),
             self.sessions.clone(),
         );
-        app.accept_request(incoming)?;
+        if incoming.confirmed() {
+            app.opening_request = Some(incoming);
+        } else if let Err(error) = app.accept_request(incoming) {
+            self.sessions.borrow_mut().release_route(app.session_id);
+            return Err(error);
+        }
         Ok(app)
     }
     fn open_request_in_new_window(
@@ -1128,7 +1191,8 @@ impl App {
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         let app = self.app_for_new_window(incoming)?;
-        w.new_window(app.new_window_options(None), app).map(|_| ())
+        self.launch_child(w, app.new_window_options(None), app)
+            .map(|_| ())
     }
     fn new_window_options(&self, position: Option<Point>) -> WindowOptions {
         WindowOptions {
@@ -1161,7 +1225,7 @@ impl App {
         if let Some(window) = window {
             // A native launch can fail. Do not take the live editor out of its
             // source window until the destination is ready to receive it.
-            let target = window.new_window(app.new_window_options(position), app)?;
+            let target = self.launch_child(window, app.new_window_options(position), app)?;
             self.move_tab_to_window(Some(window), sheet, destination, 0)?;
             target.request_frame();
             return Ok(());
@@ -1195,11 +1259,27 @@ impl App {
         Ok(Some(crate::instance::Incoming::local(request)))
     }
     fn route_open(&self, incoming: &mut crate::instance::Request) -> crate::open_requests::Route {
-        use crate::open_requests::{OpenWindow, RouteRequest, route};
+        self.route_open_filtered(incoming, false)
+    }
+    fn route_open_filtered(
+        &self,
+        incoming: &mut crate::instance::Request,
+        ready_only: bool,
+    ) -> crate::open_requests::Route {
+        use crate::open_requests::{OpenWindow, RouteRequest, route, route_ready};
         let policy = OpenWindow::setting(self.workspace.settings.get("open_files_in_new_window"));
         let request = RouteRequest::prepare(incoming, policy);
         let sessions = self.sessions.borrow();
-        route(&request, &sessions.open_windows, Some(self.session_id))
+        if ready_only {
+            route_ready(
+                &request,
+                &sessions.open_windows,
+                Some(self.session_id),
+                |id| sessions.is_ready(id),
+            )
+        } else {
+            route(&request, &sessions.open_windows, Some(self.session_id))
+        }
     }
     fn publish_open_route(&self) {
         if self.settings_window {
@@ -1242,11 +1322,26 @@ impl App {
     }
     pub(super) fn accept_request(
         &mut self,
-        incoming: crate::instance::Incoming,
+        mut incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
+        if incoming.expired() {
+            incoming.reject(crate::instance::DELIVERY_EXPIRED);
+            return Ok(());
+        }
+        if incoming.request.command.is_some() && self.cli_commands.len() >= CLI_COMMAND_LIMIT {
+            if incoming.confirmed() {
+                incoming.busy();
+                return Ok(());
+            }
+            return Err("CLI command queue is full".into());
+        }
         self.ensure_startup_services();
         self.receive_file_renames();
         if !self.finish_tab_rename(None) {
+            if incoming.confirmed() {
+                incoming.reject("finish the current tab rename before sending a CLI request");
+                return Ok(());
+            }
             // Keep the field on errors, but complete the external client's protocol.
             crate::instance::Waiter::acknowledge(
                 incoming,
@@ -1283,13 +1378,10 @@ impl App {
                 {
                     return Err("Save changes before switching projects".to_owned());
                 }
-                self.checkpoint_reason(false, true)?;
-                self.sessions.borrow().flush()?;
-                self.open_project_for_session(project.clone())
-                    .map_err(|error| format!("{}: {error}", project.display()))?;
-                self.sessions
-                    .borrow_mut()
-                    .retain_departing(self.session_id, retain);
+                self.switch_workspace(|app| {
+                    app.open_project_for_session(project.clone())
+                        .map_err(|error| format!("{}: {error}", project.display()))
+                })?;
                 self.panels.reset(&self.workspace);
                 Ok::<_, String>(())
             })();
@@ -1328,17 +1420,23 @@ impl App {
             ids.insert(self.workspace.tabs[self.workspace.active].sheet);
         }
         if !errors.is_empty() {
-            self.panels.message = errors.join("\n").into();
+            let error = errors.join("\n");
+            self.panels.message = error.clone().into();
+            if incoming.confirmed() {
+                incoming.reject(&error);
+                return Ok(());
+            }
         }
-        if let Some(command) = &request.command
-            && self.cli_commands.len() < 16
-        {
-            self.cli_commands.push_back((
-                command.clone(),
-                ids.clone(),
-                (!self.workspace.is_empty())
+        if let Some(command) = incoming.request.command.take() {
+            incoming.discard_payload();
+            self.cli_commands.push_back(PendingCliCommand {
+                command,
+                sheets: ids,
+                target: (!self.workspace.is_empty())
                     .then(|| self.workspace.tabs[self.workspace.active].sheet),
-            ));
+                incoming,
+            });
+            return Ok(());
         }
         // Path failures do not suppress the accepted/closed protocol or later paths.
         if let Some(waiter) =
@@ -1351,18 +1449,42 @@ impl App {
     fn poll_cli_commands(&mut self, w: Option<&WindowHandle>) {
         // Build 4200 delays CLI commands until the requested files/plugins are loaded.
         // https://www.sublimetext.com/download
-        while let Some((_, sheets, _)) = self.cli_commands.front() {
+        while let Some(command) = self.cli_commands.front() {
+            if command.incoming.expired() {
+                let command = self.cli_commands.pop_front().unwrap();
+                command
+                    .incoming
+                    .reject("CLI command did not become ready before the deadline");
+                continue;
+            }
             if self.workspace.tabs.iter().any(|tab| {
-                sheets.contains(&tab.sheet)
+                command.sheets.contains(&tab.sheet)
                     && (tab.loading.is_some() || tab.binary_loading.is_some())
             }) {
                 break;
             }
-            let (command, _, target) = self.cli_commands.pop_front().unwrap();
+            let PendingCliCommand {
+                command,
+                sheets,
+                target,
+                incoming,
+            } = self.cli_commands.pop_front().unwrap();
             if let Some(index) = target.and_then(|sheet| self.workspace.sheet_index(sheet)) {
                 self.workspace.activate_sheet(index);
             }
-            self.run_named(w, &command.name, &command.args);
+            self.cli_background = incoming.request.background || command.name == "new_window";
+            let result = self.run_named_result(w, &command.name, &command.args);
+            self.cli_background = false;
+            if let Err(error) = result {
+                incoming.reject(&error);
+            } else if let Ok(Some(waiter)) =
+                crate::instance::Waiter::acknowledge(incoming, &mut self.workspace, sheets)
+            {
+                self.waiters.push(waiter);
+            }
+            if command.name == "close_window" || command.name == "exit" {
+                break;
+            }
         }
     }
     fn status_error(&mut self, mut message: UiText) {
@@ -2110,13 +2232,22 @@ impl App {
         }
     }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
+        let _ = self.run_named_result(window, name, args);
+    }
+    fn run_named_result(
+        &mut self,
+        window: Option<&WindowHandle>,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
         if self.settings_window && !self.settings_window_runs(name) {
             self.forward_from_settings(window, name, args);
-            return;
+            return Ok(());
         }
         let overlay = self.panels.overlay;
-        if let Err(error) = self.run_named_depth(window, name, args, 0) {
-            self.named_error(window, &error);
+        let result = self.run_named_depth(window, name, args, 0);
+        if let Err(error) = &result {
+            self.named_error(window, error);
         }
         if self.panels.overlay.is_some() && self.panels.overlay != overlay {
             self.accessibility_focus = None;
@@ -2129,6 +2260,7 @@ impl App {
         {
             self.sync_recents();
         }
+        result
     }
     fn named_error(&mut self, window: Option<&WindowHandle>, message: &str) {
         self.status_error(UiText::command_error(message));
@@ -3499,13 +3631,7 @@ impl App {
                 {
                     return Ok(());
                 }
-                self.checkpoint_reason(false, true)?;
-                self.sessions.borrow().flush()?;
-                let retain = self.retain_switching_project();
-                self.workspace.close_project()?;
-                self.sessions
-                    .borrow_mut()
-                    .retain_departing(self.session_id, retain);
+                self.switch_workspace(|app| app.workspace.close_project())?;
                 self.panels.reset(&self.workspace);
                 return Ok(());
             }
@@ -5416,6 +5542,7 @@ impl AppHandler for App {
         self.fonts = Some(fonts);
         self.initialize_view_metrics();
         if self.options.mode == Mode::Interactive
+            && !self.options.background
             && (self.workspace.fullscreen || self.workspace.distraction_free)
         {
             w.toggle_full_screen_with_mode(
@@ -5424,6 +5551,9 @@ impl AppHandler for App {
                     .settings
                     .bool("use_simple_full_screen", false),
             );
+        }
+        if let Some(request) = self.opening_request.take() {
+            self.accept_request(request)?;
         }
         Ok(())
     }
@@ -5631,28 +5761,29 @@ impl AppHandler for App {
         if self.options.mode != Mode::Interactive {
             return;
         }
-        #[cfg(windows)]
         if !w.is_closed() {
-            // A minimized HWND cannot present, but must still service the pipe
-            // and any outstanding CLI wait replies.
+            // A minimized or occluded window cannot rely on its display link.
             self.ensure_startup_services();
             if self.settings_window {
                 self.poll_settings_window(w);
-            } else if let Err(error) = self.poll_workbench(w) {
-                self.named_error(Some(w), &error);
+            } else {
+                let _ = self.poll_workspace_model();
+                if let Err(error) = self.poll_workbench(w) {
+                    self.named_error(Some(w), &error);
+                }
             }
             self.builds.poll(&mut self.panels);
+            #[cfg(windows)]
             w.set_taskbar_build_active(self.builds.task.is_some());
             return;
         }
-        let requests = self
+        let incoming = self
             .sessions
             .borrow()
             .instance
             .as_ref()
-            .map(|i| i.drain())
-            .unwrap_or_default();
-        for mut incoming in requests {
+            .and_then(|i| i.next());
+        if let Some(mut incoming) = incoming {
             // There is no live key window; route this request into a fresh one.
             incoming.request.new_window = true;
             if let Err(error) = self.receive_request(w, incoming) {
@@ -7140,9 +7271,11 @@ mod round15_tests {
             .unwrap();
         app.checkpoint(false).unwrap();
         app.sessions.borrow().flush().unwrap();
-        let recovered = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
-        assert_eq!(recovered.session.windows.len(), 2);
-        assert!(recovered.session.documents.iter().any(|d| {
+        let live_session = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert_eq!(live_session.session.windows.len(), 1);
+        let recovered = crate::session::Sessions::new_for_startup(Some(dir.path()));
+        assert_eq!(recovered.restored.windows.len(), 2);
+        assert!(recovered.restored.documents.iter().any(|d| {
             d.history
                 .as_ref()
                 .and_then(|h| h.current_text().ok())

@@ -6,12 +6,11 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
-use vel_buffer::{Bias, ChangeId, ChangeSet};
+use vel_buffer::{Bias, Change, ChangeId, ChangeSet};
 use vel_color_scheme::{ColorScheme, Highlighter, Style};
 use vel_scope::{ScopeStack, ScopeStackOp};
 use vel_syntax::{
@@ -357,7 +356,14 @@ impl DocumentHighlighter {
     }
     /// Swaps the color scheme and recolors parsed operations without running regexes again.
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) -> Result<(), Error> {
-        self.scheme_revision += 1;
+        self.set_scheme_revision(scheme, self.scheme_revision + 1)
+    }
+    fn set_scheme_revision(
+        &mut self,
+        scheme: Arc<ColorScheme>,
+        revision: u64,
+    ) -> Result<(), Error> {
+        self.scheme_revision = revision;
         self.resolver = Highlighter::new(scheme);
         self.scope_interner.invalidate_styles();
         self.render_cache = RenderCache::default();
@@ -1052,20 +1058,19 @@ fn style_line_at(
         text_dependent,
     })
 }
-#[derive(Debug)]
-enum Command {
-    Update(Text, ChangeId, ChangeSet),
-    Request(ChangeId, Range<usize>),
-    Scheme(Arc<ColorScheme>),
-    Stop,
+#[derive(Debug, Default)]
+struct Commands {
+    edit: Option<(Text, ChangeId, Option<ChangeSet>)>,
+    request: Option<(ChangeId, Range<usize>)>,
+    scheme: Option<(Arc<ColorScheme>, u64)>,
 }
-/// Nonblocking editor-facing worker. Commands are ordered, stale results are dropped, and idle
+/// Nonblocking editor-facing worker. Snapshots coalesce, stale results are dropped, and idle
 /// background work runs in short slices with a yield between slices. Drop never joins the worker.
 #[derive(Debug)]
 pub struct HighlightService {
     shared: Arc<Mutex<DocumentHighlighter>>,
-    commands: mpsc::Sender<Command>,
-    results: mpsc::Receiver<Result<HighlightBatch, Error>>,
+    commands: vel_mailbox::Sender<Commands>,
+    results: vel_mailbox::Receiver<Result<HighlightBatch, Error>>,
     current: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     text: Text,
@@ -1085,8 +1090,8 @@ impl HighlightService {
         let scheme_revision = engine.scheme_revision;
         let default_style = engine.resolver.scheme().default_style();
         let shared = Arc::new(Mutex::new(engine));
-        let (tx, rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
+        let (tx, rx) = vel_mailbox::channel();
+        let (result_tx, result_rx) = vel_mailbox::channel();
         let current = Arc::new(AtomicU64::new(version.0));
         let stop = Arc::new(AtomicBool::new(false));
         let state = shared.clone();
@@ -1115,15 +1120,35 @@ impl HighlightService {
         version: ChangeId,
         changes: ChangeSet,
     ) -> Result<(), Error> {
+        self.update(after, version, Some(changes))
+    }
+    /// Installs a snapshot when incremental predecessors were coalesced away.
+    pub fn apply_snapshot(&mut self, after: Text, version: ChangeId) -> Result<(), Error> {
+        self.update(after, version, None)
+    }
+    fn update(
+        &mut self,
+        after: Text,
+        version: ChangeId,
+        mut changes: Option<ChangeSet>,
+    ) -> Result<(), Error> {
         if version <= self.version {
             return Err(Error::Snapshot("version must increase"));
         }
-        self.commands
-            .send(Command::Update(after.clone(), version, changes))
+        self.current.store(version.0, Ordering::Release);
+        let old = self
+            .commands
+            .update(|pending| {
+                if pending.edit.is_some() {
+                    changes = None;
+                }
+                pending.request = None;
+                pending.edit.replace((after.clone(), version, changes))
+            })
             .map_err(|_| Error::Disconnected)?;
+        drop(old);
         self.text = after;
         self.version = version;
-        self.current.store(version.0, Ordering::Release);
         Ok(())
     }
     /// Tries synchronous visible-first work within 2 ms, using try_lock so typing never waits
@@ -1137,7 +1162,7 @@ impl HighlightService {
             return Err(Error::Snapshot("requested version is stale"));
         }
         self.commands
-            .send(Command::Request(version, lines.clone()))
+            .update(|pending| pending.request = Some((version, lines.clone())))
             .map_err(|_| Error::Disconnected)?;
         if let Ok(mut state) = self.shared.try_lock()
             && state.version == version
@@ -1246,23 +1271,31 @@ impl HighlightService {
     }
     /// Changes scheme on the worker, keeping parsing checkpoints.
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) -> Result<(), Error> {
+        self.set_scheme_revision(scheme, self.scheme_revision + 1)
+    }
+    /// Installs the latest palette at its original frontend revision.
+    pub fn set_scheme_revision(
+        &mut self,
+        scheme: Arc<ColorScheme>,
+        revision: u64,
+    ) -> Result<(), Error> {
         self.default_style = scheme.default_style();
-        self.scheme_revision += 1;
+        self.scheme_revision = revision;
         self.commands
-            .send(Command::Scheme(scheme))
+            .update(|pending| pending.scheme = Some((scheme, self.scheme_revision)))
             .map_err(|_| Error::Disconnected)
     }
 }
 impl Drop for HighlightService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = self.commands.send(Command::Stop);
+        self.commands.cancel();
     }
 }
 fn worker(
     shared: Arc<Mutex<DocumentHighlighter>>,
-    rx: mpsc::Receiver<Command>,
-    tx: mpsc::Sender<Result<HighlightBatch, Error>>,
+    rx: vel_mailbox::Receiver<Commands>,
+    tx: vel_mailbox::Sender<Result<HighlightBatch, Error>>,
     latest: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1278,37 +1311,35 @@ fn worker(
         } else {
             rx.try_recv().ok()
         };
-        if let Some(command) = command {
+        if let Some(commands) = command {
             let mut state = shared.lock().unwrap();
-            match command {
-                Command::Stop => return,
-                Command::Update(text, version, changes) => {
-                    match state.apply_change(text, version, &changes) {
-                        Ok(()) => {
-                            complete = false;
-                            viewport = None;
-                            watched = None;
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e));
-                            complete = true;
-                        }
-                    }
-                }
-                Command::Request(version, lines) => {
-                    if version == state.version {
-                        watched = Some((version, lines.clone()));
-                        viewport = Some((version, lines));
+            if let Some((text, version, changes)) = commands.edit {
+                let changes = changes.unwrap_or_else(|| replacement(&state.text, &text));
+                match state.apply_change(text, version, &changes) {
+                    Ok(()) => {
                         complete = false;
+                        viewport = None;
+                        watched = None;
                     }
-                }
-                Command::Scheme(scheme) => {
-                    if let Err(e) = state.set_color_scheme(scheme) {
+                    Err(e) => {
                         let _ = tx.send(Err(e));
+                        complete = true;
                     }
-                    complete = false;
-                    viewport = watched.clone();
                 }
+            }
+            if let Some((scheme, revision)) = commands.scheme {
+                if let Err(e) = state.set_scheme_revision(scheme, revision) {
+                    let _ = tx.send(Err(e));
+                }
+                complete = false;
+                viewport = watched.clone();
+            }
+            if let Some((version, lines)) = commands.request
+                && version == state.version
+            {
+                watched = Some((version, lines.clone()));
+                viewport = Some((version, lines));
+                complete = false;
             }
             continue;
         }
@@ -1361,6 +1392,13 @@ fn worker(
         drop(state);
         thread::yield_now();
     }
+}
+
+fn replacement(before: &Text, after: &Text) -> ChangeSet {
+    ChangeSet::new(vec![Change {
+        old_range: 0..before.len_bytes(),
+        new_len: after.len_bytes(),
+    }])
 }
 
 #[cfg(test)]

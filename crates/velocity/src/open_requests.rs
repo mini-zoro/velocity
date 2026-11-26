@@ -606,10 +606,20 @@ pub fn route(
     windows: &std::collections::BTreeMap<u64, WindowRoute>,
     current: Option<u64>,
 ) -> Route {
+    route_ready(request, windows, current, |_| true)
+}
+
+pub(crate) fn route_ready(
+    request: &RouteRequest,
+    windows: &std::collections::BTreeMap<u64, WindowRoute>,
+    current: Option<u64>,
+    ready: impl Fn(u64) -> bool + Clone,
+) -> Route {
     let mut preferred = current
         .into_iter()
         .filter_map(|id| windows.get_key_value(&id))
-        .chain(windows.iter().filter(|(id, _)| Some(**id) != current));
+        .chain(windows.iter().filter(|(id, _)| Some(**id) != current))
+        .filter(|(id, _)| ready(**id));
     let existing = preferred.clone().find(|(_, window)| {
         if let Some(project) = &request.project {
             return window.project.as_ref() == Some(project);

@@ -52,6 +52,7 @@ pub struct LoadTask {
     pub result: Receiver<Result<Loaded, String>>,
     latest: Arc<Mutex<Option<LoadSnapshot>>>,
     cancel: Cancellation,
+    queued: Option<crate::workers::PendingRead>,
     unchanged: Arc<AtomicBool>,
     binary: Arc<AtomicBool>,
 }
@@ -72,6 +73,9 @@ impl LoadTask {
     /// Requests cancellation without joining or blocking the caller.
     pub fn cancel(&self) {
         self.cancel.cancel();
+        if let Some(queued) = &self.queued {
+            queued.cancel();
+        }
     }
     /// Shared cancellation handle, also useful for lifecycle diagnostics.
     pub fn cancellation(&self) -> Cancellation {
@@ -256,20 +260,22 @@ pub fn load_on_workers(
         }
         let _ = tx.send(loaded.map_err(|error| super::regular::error(&path, error)));
     };
-    if let Some((workers, limit)) = workers {
-        workers.submit(limit, "velocity-file-load", load)?;
+    let queued = if let Some((workers, limit)) = workers {
+        Some(workers.submit(limit, "velocity-file-load", load)?)
     } else {
         std::thread::Builder::new()
             .name("velocity-file-load".into())
             .spawn(load)
             .map_err(|e| e.to_string())?;
-    }
+        None
+    };
     Ok(LoadTask {
         read,
         total,
         result,
         latest,
         cancel,
+        queued,
         unchanged,
         binary,
     })

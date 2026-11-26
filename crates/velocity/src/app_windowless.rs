@@ -70,20 +70,17 @@ impl AppHandler for Controller {
         self.run(|app| app.on_finder_new_text_file(window, directory));
     }
     fn on_idle(&mut self, window: &WindowHandle) {
-        let requests = self
+        let incoming = self
             .sessions
             .borrow()
             .instance
             .as_ref()
-            .map(|instance| instance.drain())
-            .unwrap_or_default();
-        if !requests.is_empty() {
+            .and_then(|instance| instance.next());
+        if let Some(mut incoming) = incoming {
             self.run(|app| {
-                for mut incoming in requests {
-                    incoming.request.new_window = true;
-                    if let Err(error) = app.receive_request(window, incoming) {
-                        app.named_error(Some(window), &error);
-                    }
+                incoming.request.new_window = true;
+                if let Err(error) = app.receive_request(window, incoming) {
+                    app.named_error(Some(window), &error);
                 }
             });
         }
