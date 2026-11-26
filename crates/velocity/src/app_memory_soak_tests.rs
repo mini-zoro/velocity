@@ -250,6 +250,13 @@ fn memory_soak_pressure_releases_cjk_and_image_caches_without_changing_output() 
         }
     }
     let mut a = app_with_text(Text::from(cjk.as_str()));
+    // A blinking caret changes its alpha between the two compared frames whenever the
+    // trim takes longer than a blink phase on a slow CI runner.
+    a.workspace
+        .editor_mut()
+        .settings
+        .set(Layer::View, "caret_style", json!("solid"));
+    a.sync_active_view();
     let original = a.workspace.tabs[a.workspace.active].sheet;
     let size = Size {
         width: 1400.,
