@@ -1,10 +1,12 @@
 //! Buffer-backed panel input with transient native composition and undo.
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use vel_buffer::{Buffer, Region, Selection, ViewId};
+use vel_buffer::{Buffer, ChangeId, Region, Selection, ViewId};
 use vel_commands::{Host, Registry};
 use vel_config::{Value, settings::EditorSettings};
-use vel_platform::{Command, Point, Rect, TextInput, TextInputState, Utf16Range};
+use vel_platform::{
+    Command, Point, Rect, TextInput, TextInputState, Utf16Range, replace_in_preedit,
+};
 use vel_text::Text;
 
 /// Monospace display cells, keeping combining sequences and emoji graphemes together.
@@ -58,6 +60,7 @@ pub struct Input {
     registry: Registry,
     clipboard: String,
     composition: Option<Composition>,
+    last_ime_commit: Option<ChangeId>,
 }
 impl Default for Input {
     fn default() -> Self {
@@ -89,6 +92,7 @@ impl Input {
             registry: Registry::standard(),
             clipboard: String::new(),
             composition: None,
+            last_ime_commit: None,
         }
     }
     /// Creates an empty single-line input with a UTF-8 byte limit.
@@ -304,52 +308,37 @@ impl Input {
         match input {
             TextInput::Marked {
                 mut text,
-                selected,
+                mut selected,
                 replacement,
             } => {
                 if text.is_empty() {
-                    self.composition = None;
+                    self.cancel_composition();
                     return;
                 }
-                let state = self.state();
-                let range = replacement
-                    .map(|r| r.bytes(&state.text))
-                    .unwrap_or_else(|| {
-                        self.composition.as_ref().map_or_else(
-                            || {
-                                self.buffer
-                                    .view(self.view)
-                                    .sel()
-                                    .primary()
-                                    .expect("selection")
-                                    .to_range()
-                            },
-                            |c| c.range.clone(),
-                        )
-                    });
-                // Native replacement coordinates refer to the preview. Clamp to the original selected span.
-                let range = if let Some(c) = &self.composition {
-                    let end = c.range.start + c.text.len();
-                    let map = |p: usize| {
-                        if p <= c.range.start {
-                            p
-                        } else if p >= end {
-                            c.range.end + p - end
-                        } else {
-                            c.range.start
-                        }
-                    };
-                    if replacement.is_some() {
-                        map(range.start)..if range.end > c.range.start && range.end < end {
-                            c.range.end
-                        } else {
-                            map(range.end)
-                        }
-                    } else {
-                        c.range.clone()
+                let range = match (&self.composition, replacement) {
+                    (Some(c), Some(r)) => {
+                        let incoming = Text::from(text.as_str());
+                        selected = Utf16Range::from_bytes(&incoming, selected.bytes(&incoming));
+                        let (range, merged, prefix) = replace_in_preedit(
+                            &self.preview_text(),
+                            c.range.start..c.range.start + c.text.len(),
+                            c.range.clone(),
+                            r,
+                            text,
+                        );
+                        text = merged;
+                        selected.location += prefix;
+                        range
                     }
-                } else {
-                    range
+                    (Some(c), None) => c.range.clone(),
+                    (None, Some(r)) => r.bytes(self.buffer.text()),
+                    (None, None) => self
+                        .buffer
+                        .view(self.view)
+                        .sel()
+                        .primary()
+                        .unwrap()
+                        .to_range(),
                 };
                 if self.byte_limit.is_some() {
                     text.truncate(
@@ -357,47 +346,49 @@ impl Input {
                     );
                     text.retain(|c| !matches!(c, '\r' | '\n'));
                 }
+                if text.is_empty() {
+                    self.cancel_composition();
+                    return;
+                }
                 self.composition = Some(Composition {
                     range,
                     text,
                     selected,
                 });
+                self.reveal();
             }
-            TextInput::Insert { text, replacement } => {
-                let state = self.state();
+            TextInput::Insert {
+                mut text,
+                replacement,
+            } => {
+                let visible = self
+                    .composition
+                    .as_ref()
+                    .and(replacement)
+                    .map(|_| self.preview_text());
                 let composition = self.composition.take();
-                let range = replacement
-                    .map(|r| {
-                        let range = r.bytes(&state.text);
-                        if let Some(c) = &composition {
-                            let end = c.range.start + c.text.len();
-                            let map = |p: usize, right: bool| {
-                                if p <= c.range.start {
-                                    p
-                                } else if p >= end {
-                                    c.range.end + p - end
-                                } else if right {
-                                    c.range.end
-                                } else {
-                                    c.range.start
-                                }
-                            };
-                            map(range.start, false)..map(range.end, true)
-                        } else {
-                            range
-                        }
-                    })
-                    .or_else(|| composition.map(|c| c.range));
+                let isolated = composition.is_some() || replacement.is_some();
+                let range = match (composition, replacement) {
+                    (Some(c), Some(r)) => {
+                        let (range, merged, _) = replace_in_preedit(
+                            &visible.expect("visible preedit"),
+                            c.range.start..c.range.start + c.text.len(),
+                            c.range,
+                            r,
+                            text,
+                        );
+                        text = merged;
+                        Some(range)
+                    }
+                    (Some(c), None) => Some(c.range),
+                    (None, Some(r)) => Some(r.bytes(self.buffer.text())),
+                    (None, None) => None,
+                };
                 if let Some(range) = range {
                     self.buffer
                         .set_selection(self.view, Selection::from_regions([Region::from(range)]));
                 }
-                let text = if self.multiline {
-                    normalize_breaks(&text)
-                } else {
-                    text.replace(['\n', '\r'], "")
-                };
-                let _ = self.run("insert", &serde_json::json!({"characters":text}));
+                self.insert_text(&text, isolated);
             }
             TextInput::Unmark => self.commit_composition(),
             TextInput::Discard => self.cancel_composition(),
@@ -407,21 +398,50 @@ impl Input {
         if let Some(c) = self.composition.take() {
             self.buffer
                 .set_selection(self.view, Selection::from_regions([Region::from(c.range)]));
-            let text = if self.multiline {
-                normalize_breaks(&c.text)
-            } else {
-                c.text
-            };
-            let _ = self.run("insert", &serde_json::json!({"characters":text}));
+            self.insert_text(&c.text, true);
         }
+    }
+    fn insert_text(&mut self, text: &str, isolated: bool) {
+        let text = if self.multiline {
+            normalize_breaks(text)
+        } else {
+            text.replace(['\n', '\r'], "")
+        };
+        let before = self.buffer.change_id();
+        if isolated {
+            self.buffer.break_undo_group();
+        }
+        let _ = self.run("insert", &serde_json::json!({"characters":text}));
+        if isolated {
+            self.buffer.break_undo_group();
+            self.reveal();
+            if before != self.buffer.change_id() {
+                self.last_ime_commit = Some(self.buffer.change_id());
+            }
+        }
+    }
+
+    /// Does Undo undo the most recent native composition commit in this field?
+    pub fn ime_commit_is_latest(&self) -> bool {
+        self.last_ime_commit == Some(self.buffer.change_id())
     }
     /// Discards preedit only; Escape's panel-close behavior belongs to the focus router.
     pub fn cancel_composition(&mut self) {
-        self.composition = None;
+        if self.composition.take().is_some() {
+            self.reveal();
+        }
     }
     /// Routes native editing selectors. Newline/Tab acceptance belongs to the panel controller.
     pub fn command(&mut self, command: Command) {
         use Command::*;
+        if self.composing() {
+            match command {
+                Cancel => self.cancel_composition(),
+                Newline | LiteralNewline => self.commit_composition(),
+                _ => {}
+            }
+            return;
+        }
         let (name, args) = match command {
             Cancel => {
                 self.cancel_composition();
@@ -620,19 +640,32 @@ impl Input {
             .text
             .byte_to_utf16(self.byte_at_point(&state.text, point))
     }
+    /// Character bounds, not the nearest insertion point, for NSTextInputClient.
+    pub fn character_index_for_point(&self, point: Point) -> Option<usize> {
+        if !crate::contains(self.bounds, point) {
+            return None;
+        }
+        let text = self.preview_text();
+        let nearest = self.byte_at_point(&text, point);
+        character_index(&text, nearest, point, |range| {
+            self.range_rect_for_text(&text, range)
+        })
+    }
     /// Native range geometry in logical widget coordinates.
     pub fn range_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
-        let state = self.state();
-        let mut bytes = range.bytes(&state.text);
+        self.range_rect_for_text(&self.preview_text(), range)
+    }
+    fn range_rect_for_text(&self, text: &Text, range: Utf16Range) -> (Rect, Utf16Range) {
+        let mut bytes = range.bytes(text);
         if self.multiline {
-            let row = state.text.byte_to_line(bytes.start);
+            let row = text.byte_to_line(bytes.start);
             bytes.end = bytes
                 .end
-                .min(state.text.line_to_byte(row) + state.text.line_len_bytes(row));
+                .min(text.line_to_byte(row) + text.line_len_bytes(row));
         }
         (
-            self.rect_for_bytes(&state.text, bytes.clone()),
-            Utf16Range::from_bytes(&state.text, bytes),
+            self.rect_for_bytes(text, bytes.clone()),
+            Utf16Range::from_bytes(text, bytes),
         )
     }
     fn rect_for_bytes(&self, text: &Text, bytes: std::ops::Range<usize>) -> Rect {
@@ -656,6 +689,26 @@ impl Input {
             height: 18. * scale,
         }
     }
+}
+
+/// Converts a nearest caret hit into a UTF-16 character hit, or no hit in blank space.
+pub fn character_index(
+    text: &Text,
+    nearest: usize,
+    point: Point,
+    rect: impl Fn(Utf16Range) -> (Rect, Utf16Range),
+) -> Option<usize> {
+    for start in [nearest, text.prev_grapheme_boundary(nearest)] {
+        if start == text.len_bytes() {
+            continue;
+        }
+        let end = text.next_grapheme_boundary(start);
+        let (bounds, actual) = rect(Utf16Range::from_bytes(text, start..end));
+        if actual.length > 0 && crate::contains(bounds, point) {
+            return Some(actual.location);
+        }
+    }
+    None
 }
 fn normalize_breaks(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")

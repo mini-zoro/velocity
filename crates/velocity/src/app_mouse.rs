@@ -22,12 +22,8 @@ impl App {
             self.receive_file_renames();
             self.end_mouse_gesture();
             self.cancel_tab_drag(w);
-            if self.workspace.editor().marked.is_some() {
-                // Headless events do not pass through AppKit's discard. Hit-test
-                // the restored document, not offsets in the provisional text.
-                self.workspace.editor_mut().cancel_composition();
-                self.view.apply_style(self.workspace.editor());
-            }
+            // Hit-test the restored document, not provisional text offsets.
+            self.finish_ime_focus(w);
         }
         if self.tab_rename.is_some() && self.tab_rename_mouse(w, &event) {
             return;
@@ -38,6 +34,7 @@ impl App {
         if up {
             self.end_mouse_gesture();
         }
+        self.reconcile_ime_focus(w);
     }
     fn end_mouse_gesture(&mut self) {
         self.view.end_pointer_gesture();

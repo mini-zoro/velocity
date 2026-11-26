@@ -2027,8 +2027,22 @@ impl Panels {
             }
         }
     }
-    fn captured(&self) -> bool {
+    pub(crate) fn captured(&self) -> bool {
         self.overlay.is_some() || self.panel_focused || self.side_focused
+    }
+    pub(crate) fn discard_field_composition(&mut self, id: vel_buffer::BufferId) {
+        if let Some(field) = [
+            &mut self.quick_input,
+            &mut self.query,
+            &mut self.replace,
+            &mut self.where_input,
+        ]
+        .into_iter()
+        .chain(self.build_input.iter_mut())
+        .find(|f| f.buffer.id() == id)
+        {
+            field.cancel_composition();
+        }
     }
     pub fn text_input(
         &mut self,
@@ -2037,8 +2051,20 @@ impl Panels {
         viewport: Range<usize>,
     ) -> bool {
         if let Some(field) = self.input_mut() {
+            let provisional = matches!(input, TextInput::Marked { .. } | TextInput::Discard);
+            let ordinary_insert = !field.composing()
+                && matches!(
+                    input,
+                    TextInput::Insert {
+                        replacement: None,
+                        ..
+                    }
+                );
+            let before = field.buffer.change_id();
             field.text_input(input);
-            self.input_changed(workspace, viewport);
+            if ordinary_insert || (!provisional && before != field.buffer.change_id()) {
+                self.input_changed(workspace, viewport);
+            }
             true
         } else {
             self.captured()
@@ -5260,8 +5286,11 @@ impl Panels {
             return Ok((false, None));
         }
         if self.input().is_some_and(Input::composing) {
-            if command == Command::Cancel {
-                self.input_mut().expect("input").cancel_composition();
+            let field = self.input_mut().expect("input");
+            let before = field.buffer.change_id();
+            field.command(command);
+            if before != field.buffer.change_id() {
+                self.input_changed(workspace, viewport);
             }
             return Ok((true, None));
         }

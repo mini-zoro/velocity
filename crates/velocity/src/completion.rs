@@ -1385,6 +1385,10 @@ fn grow(rect: Rect, by: f64) -> Rect {
 }
 
 #[cfg(test)]
+#[path = "completion_ime_tests.rs"]
+mod ime_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use vel_config::{json, keymap::Key, settings::Layer};

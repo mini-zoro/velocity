@@ -1,7 +1,10 @@
 //! Win32 policy without window handles or native calls.
 use crate::{Command, FrameReason, Modifiers, Point, Size, TextInput, Utf16Range};
 use std::time::{Duration, Instant};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+use windows_sys::Win32::UI::Input::{
+    Ime::{ATTR_TARGET_CONVERTED, ATTR_TARGET_NOTCONVERTED},
+    KeyboardAndMouse::*,
+};
 
 pub(super) const BASE_DPI: u32 = 96;
 
@@ -302,6 +305,27 @@ pub(super) struct Composition {
     marked: bool,
 }
 
+pub(super) fn composition_selection(text: &str, cursor: usize, attrs: &[u8]) -> Utf16Range {
+    let len = text.encode_utf16().count();
+    let cursor = cursor.min(len);
+    if attrs.len() == len {
+        let target = |attr: &u8| {
+            matches!(
+                u32::from(*attr),
+                ATTR_TARGET_CONVERTED | ATTR_TARGET_NOTCONVERTED
+            )
+        };
+        if let Some(start) = attrs.iter().position(target) {
+            let length = attrs[start..]
+                .iter()
+                .take_while(|attr| target(attr))
+                .count();
+            return Utf16Range::new(start, length);
+        }
+    }
+    Utf16Range::new(cursor, 0)
+}
+
 impl Composition {
     pub(super) fn start(&mut self) {
         self.active = true;
@@ -310,7 +334,7 @@ impl Composition {
     pub(super) fn update(
         &mut self,
         result: Option<String>,
-        marked: Option<(String, usize)>,
+        marked: Option<(String, Utf16Range)>,
         cancelled: bool,
     ) -> Vec<TextInput> {
         let mut events = Vec::new();
@@ -323,12 +347,11 @@ impl Composition {
             });
             self.marked = false;
         }
-        if let Some((text, cursor)) = marked.filter(|(text, _)| !text.is_empty()) {
+        if let Some((text, selected)) = marked.filter(|(text, _)| !text.is_empty()) {
             self.active = true;
-            let cursor = cursor.min(text.encode_utf16().count());
             events.push(TextInput::Marked {
                 text,
-                selected: Utf16Range::new(cursor, 0),
+                selected,
                 replacement: None,
             });
             self.marked = true;
@@ -341,13 +364,9 @@ impl Composition {
         events
     }
 
-    pub(super) fn end(&mut self, commit_marked: bool) -> Option<TextInput> {
+    pub(super) fn end(&mut self) -> Option<TextInput> {
         self.active = false;
-        std::mem::take(&mut self.marked).then_some(if commit_marked {
-            TextInput::Unmark
-        } else {
-            TextInput::Discard
-        })
+        std::mem::take(&mut self.marked).then_some(TextInput::Discard)
     }
 }
 
@@ -431,7 +450,11 @@ mod tests {
     fn ime_commit_replaces_marked_once_and_cancel_discards() {
         let mut ime = Composition::default();
         ime.start();
-        let events = ime.update(None, Some(("ni".into(), 20)), false);
+        let events = ime.update(
+            None,
+            Some(("ni".into(), composition_selection("ni", 20, &[]))),
+            false,
+        );
         assert_eq!(
             events,
             [TextInput::Marked {
@@ -447,18 +470,21 @@ mod tests {
                 replacement: None
             }]
         );
-        assert_eq!(ime.end(false), None);
+        assert_eq!(ime.end(), None);
         // The final text may arrive after END. It is still an insert, not
         // a new composition that would swallow subsequent key bindings.
         assert_eq!(ime.update(Some("x".into()), None, false).len(), 1);
         assert!(!ime.active);
-        ime.update(None, Some(("a".into(), 1)), false);
-        assert_eq!(ime.end(false), Some(TextInput::Discard));
-        ime.update(None, Some(("a".into(), 1)), false);
-        assert_eq!(ime.end(true), Some(TextInput::Unmark));
+        ime.update(None, Some(("a".into(), Utf16Range::new(1, 0))), false);
+        assert_eq!(ime.end(), Some(TextInput::Discard));
+        assert_eq!(ime.end(), None);
         let mut chars = Utf16Input::default();
         assert_eq!(chars.push(0xd83e), None);
         assert_eq!(chars.push(0xdd80).as_deref(), Some("\u{1f980}"));
         assert_eq!(chars.push(0x08), None);
     }
 }
+
+#[cfg(test)]
+#[path = "windows_ime_tests.rs"]
+mod ime_tests;

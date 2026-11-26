@@ -917,7 +917,7 @@ impl Workspace {
             self.ensure_shared_view(owner, owner)?;
             let target_view = self.ensure_shared_view(owner, index)?;
             crate::session_restore::step("transfer_buffer");
-            self.tabs[owner].editor.unmark();
+            self.tabs[owner].editor.cancel_composition();
             let source_view = self.tabs[owner].shared_view;
             let source_state = vel_session::ViewState::capture(
                 &self.tabs[owner].editor.buffer,

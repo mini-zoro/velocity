@@ -827,6 +827,11 @@ impl WindowHandle {
         self.0.ime_geometry_dirty.set(true);
         self.0.flush_ime_coordinates();
     }
+    /// Ends the native conversion after the application has cleared preedit.
+    pub fn discard_marked_text(&self) {
+        self.0.ime_discard_pending.set(true);
+        self.0.flush_ime_coordinates();
+    }
     /// Stops run() without calling exit, allowing reports and native teardown.
     pub fn quit(&self) {
         self.0.stopped.set(true);
@@ -852,7 +857,7 @@ enum Event {
     Moved,
     PointerCancel,
     Appearance(Appearance),
-    InlineTextFocusLost,
+    TextInputFocusLost,
     CloseRequested,
     Idle,
     Accessibility(accessibility::Id, accessibility::Request),
@@ -878,6 +883,9 @@ struct Host {
     drawing: Cell<bool>,
     input_depth: Cell<u32>,
     ime_geometry_dirty: Cell<bool>,
+    ime_discard_pending: Cell<bool>,
+    ime_discarding: Cell<bool>,
+    ime_key: Cell<Option<CompositionKey>>,
     ready: Cell<bool>,
     starting: Cell<bool>,
     first_tick: Cell<bool>,
@@ -925,6 +933,11 @@ impl Host {
     }
     fn release_native_window(&self) {
         self.stopped.set(true);
+        if self.input.borrow().marked.is_some() {
+            self.ime_discard_pending.set(true);
+        }
+        self.input.take();
+        self.flush_ime_discard();
         let native = self.native.take();
         if let Some(link) = native.link {
             link.invalidate();
@@ -938,7 +951,6 @@ impl Host {
         self.drawable_pool.set(DrawablePool::default());
         self.pending.borrow_mut().clear();
         self.context.take();
-        self.input.take();
         self.ax_elements.borrow_mut().clear();
         self.ax_cache.clear();
         if let Some(view) = &native.view {
@@ -1113,7 +1125,10 @@ impl Host {
                 Event::Moved => app.on_move(&w),
                 Event::PointerCancel => app.on_pointer_cancel(&w),
                 Event::Appearance(e) => app.on_appearance(&w, e),
-                Event::InlineTextFocusLost => app.on_inline_text_focus_lost(&w),
+                Event::TextInputFocusLost => {
+                    app.on_text_input_focus_lost(&w);
+                    self.ime_discard_pending.set(true);
+                }
                 Event::Idle => app.on_idle(&w),
                 Event::CloseRequested => {
                     if app.on_window_close_requested(&w) {
@@ -1122,11 +1137,19 @@ impl Host {
                 }
             }
             if self.stopped.get() {
+                if self.input.borrow().marked.is_some() {
+                    self.ime_discard_pending.set(true);
+                }
+                self.input.take();
+                drop(slot);
+                self.flush_ime_discard();
                 break;
             }
+            app.update_text_input_focus(&w);
             let current = app.text_input_state();
-            let previous = self.input.replace(current.clone());
+            let previous = self.publish_input_state(current.clone());
             drop(slot);
+            self.flush_ime_discard();
             a11y::notify(self, &previous, &current);
             if self.stopped.get() {
                 break;
@@ -1141,8 +1164,7 @@ impl Host {
         if self.stopped.get()
             || self.dispatching.get()
             || self.drawing.get()
-            || (self.input.borrow().marked.is_some()
-                && !(key.modifiers.command() && self.inline_text_input()))
+            || self.input.borrow().marked.is_some()
         {
             return false;
         }
@@ -1151,8 +1173,10 @@ impl Host {
         self.dispatching.set(true);
         let previous = self.input.borrow().clone();
         let handled = if let Some(app) = self.app.borrow_mut().as_mut() {
-            let handled = app.on_key(&self.handle(), key);
-            *self.input.borrow_mut() = app.text_input_state();
+            let window = self.handle();
+            let handled = app.on_key(&window, key);
+            app.update_text_input_focus(&window);
+            self.publish_input_state(app.text_input_state());
             handled
         } else {
             false
@@ -1163,18 +1187,36 @@ impl Host {
         self.drain();
         handled
     }
-    fn inline_text_input(&self) -> bool {
-        self.app
-            .try_borrow()
-            .is_ok_and(|app| app.as_ref().is_some_and(|app| app.inline_text_input()))
-    }
     fn flush_ime_coordinates(&self) {
-        if self.dispatching.get() || self.drawing.get() || !self.ime_geometry_dirty.replace(false) {
+        if self.dispatching.get() || self.drawing.get() {
+            return;
+        }
+        self.flush_ime_discard();
+        if !self.ime_geometry_dirty.replace(false) {
             return;
         }
         // Query callbacks now see the freshly published text/geometry snapshot.
         if let Some(context) = self.view().and_then(|v| v.inputContext()) {
             context.invalidateCharacterCoordinates();
+        }
+    }
+    fn publish_input_state(&self, state: TextInputState) -> TextInputState {
+        let mut current = self.input.borrow_mut();
+        if state.caret != current.caret
+            || state.marked != current.marked
+            || state.selected != current.selected
+        {
+            self.ime_geometry_dirty.set(true);
+        }
+        std::mem::replace(&mut *current, state)
+    }
+    fn flush_ime_discard(&self) {
+        if self.ime_discard_pending.replace(false) {
+            self.ime_discarding.set(true);
+            if let Some(context) = self.view().and_then(|v| v.inputContext()) {
+                context.discardMarkedText();
+            }
+            self.ime_discarding.set(false);
         }
     }
     fn render(self: &Rc<Self>, reason: FrameReason, force: bool) {
@@ -1218,7 +1260,8 @@ impl Host {
                     received: Instant::now(),
                     reason,
                 });
-                *self.input.borrow_mut() = app.text_input_state();
+                app.update_text_input_focus(&w);
+                self.publish_input_state(app.text_input_state());
                 result
             } else {
                 Ok(())
@@ -1389,6 +1432,31 @@ define_class!(
 struct ViewIvars {
     host: Weak<Host>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompositionKey {
+    Escape,
+    Other,
+}
+impl CompositionKey {
+    fn selector(command: Command, key: Option<Self>, marked: bool) -> Option<Command> {
+        if key.is_none()
+            || marked
+                && matches!(
+                    command,
+                    Command::Cancel | Command::Newline | Command::LiteralNewline
+                )
+        {
+            Some(command)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "macos_ime_tests.rs"]
+mod ime_tests;
 define_class!(
     // SAFETY: NSView is main-thread-only; no ivar borrows cross calls into AppKit.
     #[unsafe(super = NSView)]
@@ -1460,9 +1528,19 @@ define_class!(
         #[unsafe(method(keyDown:))] fn key_down(&self, event: &NSEvent) {
             if let Some(h) = self.ivars().host.upgrade() {
                 let key = key_event(event, KeyState::Down);
+                let marked = h.input.borrow().marked.is_some();
+                if marked && key.modifiers.command() { return; }
                 h.input_depth.set(h.input_depth.get() + 1);
-                let handled=h.offer_key(key);
-                if !handled { self.interpretKeyEvents(&NSArray::from_slice(&[event])); }
+                let handled = !marked && h.offer_key(key);
+                if !handled {
+                    let previous = h.ime_key.replace(marked.then_some(if event.keyCode() == 53 {
+                        CompositionKey::Escape
+                    } else {
+                        CompositionKey::Other
+                    }));
+                    self.interpretKeyEvents(&NSArray::from_slice(&[event]));
+                    h.ime_key.set(previous);
+                }
                 h.input_depth.set(h.input_depth.get() - 1); h.flush();
             }
         }
@@ -1470,6 +1548,9 @@ define_class!(
         fn key_equivalent(&self,event:&NSEvent)->bool {
             if event.modifierFlags().intersects(NSEventModifierFlags::Command|NSEventModifierFlags::Control) {
             self.ivars().host.upgrade().is_some_and(|h| {
+                if h.input.borrow().marked.is_some() {
+                    return event.modifierFlags().contains(NSEventModifierFlags::Command);
+                }
                 h.input_depth.set(h.input_depth.get()+1);
                 let handled=h.offer_key(key_event(event,KeyState::Down));
                 h.input_depth.set(h.input_depth.get()-1);h.flush();handled
@@ -1536,11 +1617,21 @@ define_class!(
         #[unsafe(method(insertText:replacementRange:))]
         unsafe fn insert(&self, value: &AnyObject, replacement: NSRange) { self.text(TextInput::Insert { text: plain_string(value), replacement: from_range(replacement) }); }
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        unsafe fn mark(&self, value: &AnyObject, selected: NSRange, replacement: NSRange) { self.text(TextInput::Marked { text: plain_string(value), selected: from_range(selected).unwrap_or_default(), replacement: from_range(replacement) }); }
+        unsafe fn mark(&self, value: &AnyObject, selected: NSRange, replacement: NSRange) {
+            self.text(TextInput::Marked {
+                text: plain_string(value),
+                selected: from_range(selected).unwrap_or_default(),
+                replacement: self.state().marked_replacement(from_range(replacement)),
+            });
+        }
         #[unsafe(method(unmarkText))] fn unmark(&self) { self.text(TextInput::Unmark); }
         #[unsafe(method(hasMarkedText))] fn has_marked(&self) -> bool { self.state().marked.is_some_and(|r| r.length > 0) }
         #[unsafe(method(markedRange))] fn marked_range(&self) -> NSRange { to_range(self.state().marked) }
-        #[unsafe(method(selectedRange))] fn selected_range(&self) -> NSRange { to_range(Some(self.state().selected)) }
+        #[unsafe(method(selectedRange))] fn selected_range(&self) -> NSRange {
+            let state = self.state();
+            to_range((state.caret.height > 0.).then_some(state.selected))
+        }
+        // Velocity renders its own underline/selection, not attributed runs.
         #[unsafe(method_id(validAttributesForMarkedText))]  fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> { NSArray::new() }
         #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
 
@@ -1555,23 +1646,30 @@ define_class!(
         #[unsafe(method(firstRectForCharacterRange:actualRange:))]
         unsafe fn first_rect(&self, proposed: NSRange, actual: *mut NSRange) -> NSRect {
             let state = self.state();
-            let mut result = (state.caret, state.selected);
-            if let Some(h) = self.ivars().host.upgrade() && let Ok(app) = h.app.try_borrow() && let Some(app) = app.as_ref() { result = app.text_input_rect(from_range(proposed).unwrap_or(state.selected)); }
+            let caret = Utf16Range::new(state.selected.end(), 0);
+            let mut result = (state.caret, caret);
+            if let Some(h) = self.ivars().host.upgrade() && let Ok(app) = h.app.try_borrow() && let Some(app) = app.as_ref() {
+                result = app.text_input_rect(from_range(proposed).or(state.marked).unwrap_or(caret));
+            }
             if !actual.is_null() {
                 // SAFETY: AppKit's optional out-parameter is valid for one NSRange.
-                unsafe { actual.write(to_range(Some(result.1))) };
+                unsafe { actual.write(to_range((result.0.height > 0.).then_some(result.1))) };
             }
-            let r = result.0.clamped(self.ivars().host.upgrade().map_or(Size::default(), |h| h.size.get()));
-            let view_rect = NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height));
+            if result.0.height <= 0. { return NSRect::default(); }
+            let Some(window) = self.window() else { return NSRect::default(); };
+            let r = result.0;
+            let width = if result.1.length == 0 { 0. } else { r.width };
+            let view_rect = NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(width, r.height));
             // convertRect handles the flipped view and Retina without multiplying by scale.
             let window_rect = self.convertRect_toView(view_rect, None);
-            self.window().map_or(window_rect, |w| w.convertRectToScreen(window_rect))
+            window.convertRectToScreen(window_rect)
         }
         #[unsafe(method(characterIndexForPoint:))]
         fn character_index(&self, point: NSPoint) -> usize {
-            let Some(w) = self.window() else { return usize::MAX; };
+            let not_found = isize::MAX as usize;
+            let Some(w) = self.window() else { return not_found; };
             let p = self.convertPoint_fromView(w.convertPointFromScreen(point), None);
-            self.ivars().host.upgrade().and_then(|h| h.app.try_borrow().ok().and_then(|app| app.as_ref().and_then(|a| a.character_index_for_point(Point { x: p.x, y: p.y })))).unwrap_or(usize::MAX)
+            self.ivars().host.upgrade().and_then(|h| h.app.try_borrow().ok().and_then(|app| app.as_ref().and_then(|a| a.character_index_for_point(Point { x: p.x, y: p.y })))).unwrap_or(not_found)
         }
         #[unsafe(method(doCommandBySelector:))]
         unsafe fn do_command(&self, selector: Sel) { if let Some(command) = Command::from_selector(&selector.name().to_string_lossy()) { self.command(command); } }
@@ -1621,28 +1719,24 @@ impl EditorView {
     }
     fn command(&self, c: Command) {
         if let Some(h) = self.ivars().host.upgrade() {
-            h.dispatch(Event::Command(c));
-            h.flush();
+            let marked = h.input.borrow().marked.is_some();
+            if let Some(c) = CompositionKey::selector(c, h.ime_key.get(), marked) {
+                h.dispatch(Event::Command(c));
+                h.flush();
+            }
         }
     }
-    fn text(&self, t: TextInput) {
-        if let Some(h) = self.ivars().host.upgrade() {
+    fn text(&self, mut t: TextInput) {
+        if let Some(h) = self.ivars().host.upgrade()
+            && !h.ime_discard_pending.get()
+            && !h.ime_discarding.get()
+            && self.window().is_some_and(|window| window.isKeyWindow())
+        {
+            if h.ime_key.get() == Some(CompositionKey::Escape) {
+                t = TextInput::Discard;
+            }
             h.dispatch(Event::Text(t));
             h.flush();
-        }
-    }
-    fn finish_marked_text(&self, host: &Rc<Host>, commit: bool) {
-        // Clear our preview before AppKit can call unmarkText. Inline fields
-        // accept the shown text on blur; document and panel preedit still cancels.
-        if host.input.borrow().marked.is_some() {
-            host.dispatch(Event::Text(if commit {
-                TextInput::Unmark
-            } else {
-                TextInput::Discard
-            }));
-        }
-        if let Some(context) = self.inputContext() {
-            context.discardMarkedText();
         }
     }
     fn update_pointer_cursor(&self, e: &NSEvent) {
@@ -1656,11 +1750,10 @@ impl EditorView {
     }
     fn mouse(&self, e: &NSEvent, kind: MouseKind) {
         if let Some(h) = self.ivars().host.upgrade() {
-            if kind == MouseKind::Down {
-                if let Some(w) = self.window() {
-                    w.makeFirstResponder(Some(self));
-                }
-                self.finish_marked_text(&h, h.inline_text_input());
+            if kind == MouseKind::Down
+                && let Some(w) = self.window()
+            {
+                w.makeFirstResponder(Some(self));
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             let event = MouseEvent {
@@ -1912,10 +2005,10 @@ define_class!(
                 && NSApplication::sharedApplication(self.mtm()).currentEvent().is_some_and(|event| {
                     event.r#type() == NSEventType::KeyDown
                         && event.modifierFlags().contains(NSEventModifierFlags::Command)
-                        && !relocated_equivalent(
+                        && (host.input.borrow().marked.is_some() || !relocated_equivalent(
                             &command.installed_equivalent,
                             &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
-                        )
+                        ))
                 })
             {
                 return;
@@ -2040,13 +2133,7 @@ define_class!(
         #[unsafe(method(windowDidResignKey:))]
         fn resigned(&self, _n: &NSNotification) {
             let h = &self.ivars().host;
-            let inline = h.inline_text_input();
-            if let Some(v) = h.view() {
-                v.finish_marked_text(h, inline);
-            }
-            if inline {
-                h.dispatch(Event::InlineTextFocusLost);
-            }
+            h.dispatch(Event::TextInputFocusLost);
             h.dirty.set(true);
             h.pace();
         }
@@ -2936,6 +3023,9 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         drawing: Cell::new(false),
         input_depth: Cell::new(0),
         ime_geometry_dirty: Cell::new(false),
+        ime_discard_pending: Cell::new(false),
+        ime_discarding: Cell::new(false),
+        ime_key: Cell::new(None),
         ready: Cell::new(false),
         starting: Cell::new(true),
         first_tick: Cell::new(false),

@@ -1150,6 +1150,16 @@ mod model {
             }
         }
 
+        pub(crate) fn discard_field_composition(&mut self, id: vel_buffer::BufferId) {
+            if self.search.buffer.id() == id {
+                self.search.cancel_composition();
+            } else if let Some(edit) = &mut self.edit
+                && edit.input.buffer.id() == id
+            {
+                edit.input.cancel_composition();
+            }
+        }
+
         pub(crate) fn text_input(&mut self, tr: &Translator, event: TextInput, now: Instant) {
             if let Some(popup) = &mut self.popup {
                 // Type to select, as in a native popup menu.
@@ -2147,9 +2157,10 @@ mod model {
                 return Navigation::Stay;
             }
             if self.input().is_some_and(Input::composing) {
-                if cmd == Command::Cancel {
-                    self.input_mut().unwrap().cancel_composition();
-                }
+                let input = self.input_mut().unwrap();
+                let before = input.value();
+                input.command(cmd);
+                self.input_changed(&workspace.translations, before, now);
                 return Navigation::Stay;
             }
             match cmd {
@@ -2175,6 +2186,15 @@ mod model {
                     if self.finish_edit(workspace) {
                         self.tab(cmd == Backtab);
                     }
+                }
+                Undo if self.input().is_some_and(Input::ime_commit_is_latest)
+                    && (self.focus == Focus::Search
+                        || self.edit.as_ref().is_some_and(|edit| edit.dirty)) =>
+                {
+                    let input = self.input_mut().unwrap();
+                    let before = input.value();
+                    input.command(Undo);
+                    self.input_changed(&workspace.translations, before, now);
                 }
                 Undo => self.undo(workspace),
                 Up(false) | Down(false) if self.focus == Focus::Sidebar => {
