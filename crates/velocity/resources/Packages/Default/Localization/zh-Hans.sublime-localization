@@ -11,6 +11,7 @@
   "palette_separator": "：",
   "strings": {
     "Settings": "设置",
+    "General": "通用",
     "Editing": "编辑",
     "Appearance": "外观",
     "Fonts and Lines": "字体与行",
