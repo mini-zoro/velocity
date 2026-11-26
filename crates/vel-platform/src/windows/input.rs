@@ -267,7 +267,9 @@ impl Host {
                 return Some(self.mouse(hwnd, message, wparam, lparam));
             }
             WM_CAPTURECHANGED | WM_CANCELMODE => {
-                self.pressed.set(0);
+                if self.pressed.replace(0) != 0 {
+                    self.enqueue(Event::PointerCancel);
+                }
                 return None;
             }
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_POINTERWHEEL | WM_POINTERHWHEEL => {

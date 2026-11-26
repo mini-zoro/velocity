@@ -1,5 +1,6 @@
 //! Single-threaded Win32 host. The message procedure snapshots native data;
 //! app callbacks normally run only after DispatchMessage or at a frame tick.
+mod drag_image;
 mod input;
 mod menu;
 mod model;
@@ -61,6 +62,31 @@ impl fmt::Debug for WindowHandle {
 }
 
 impl WindowHandle {
+    /// Displays a floating drag image without activating or capturing input.
+    pub fn show_drag_image(&self, image: &crate::DragImage, point: Point, grab: Point) {
+        drag_image::show(image, point, grab);
+    }
+    /// Moves an existing drag image, showing it again if paused.
+    pub fn move_drag_image(&self, point: Point) {
+        drag_image::follow(point);
+    }
+    /// Hides the drag image but retains its pixels until the gesture ends.
+    pub fn pause_drag_image(&self) {
+        drag_image::hide(false);
+    }
+    /// Hides the drag image and releases its pixels.
+    pub fn hide_drag_image(&self) {
+        drag_image::hide(true);
+    }
+    /// The topmost native window at the given screen point, ignoring the drag image.
+    pub fn screen_window_at(&self, point: Point) -> Option<usize> {
+        drag_image::window_at(point)
+    }
+    /// Opaque native window identity for screen hit testing.
+    pub fn native_window_id(&self) -> Option<usize> {
+        self.hwnd().map(|hwnd| hwnd.as_ptr() as usize)
+    }
+
     /// A borrowed HWND for initializing a native renderer on this thread.
     /// The renderer must be owned by the window's handler and dropped before
     /// the HWND is destroyed; the raw handle does not extend its lifetime.
@@ -217,6 +243,14 @@ impl WindowHandle {
             y: point.y.into(),
         })
     }
+    /// Adds a logical client offset to a physical virtual-desktop point.
+    pub fn screen_point_offset(&self, screen: Point, offset: Point) -> Point {
+        let scale = self.scale_factor();
+        Point {
+            x: screen.x + offset.x * scale,
+            y: screen.y + offset.y * scale,
+        }
+    }
 
     /// Marks the next display-rate tick dirty.
     pub fn request_frame(&self) {
@@ -294,6 +328,8 @@ enum Event {
     Scroll(ScrollEvent),
     Named(menu::Action),
     Resize,
+    Moved,
+    PointerCancel,
     Appearance,
     Preferences,
     FocusLost,
@@ -433,11 +469,14 @@ impl Host {
                 Event::Scroll(event) => app.on_scroll(w, event),
                 Event::Named(action) => self.run_menu_action(app, w, action),
                 Event::Resize => app.on_resize(w, self.size.get(), w.scale_factor()),
+                Event::Moved => app.on_move(w),
+                Event::PointerCancel => app.on_pointer_cancel(w),
                 Event::Appearance => app.on_appearance(w, w.appearance()),
                 Event::Preferences => {
                     app.on_accessibility_preferences(w, window::accessibility_preferences())
                 }
                 Event::FocusLost => {
+                    app.on_pointer_cancel(w);
                     if app.inline_text_input() {
                         app.on_inline_text_focus_lost(w);
                     }
@@ -1103,6 +1142,7 @@ impl Host {
             }
             WM_MOVE => {
                 self.sync_geometry(true);
+                self.enqueue(Event::Moved);
             }
             WM_DISPLAYCHANGE => {
                 self.monitor.set(null_mut());

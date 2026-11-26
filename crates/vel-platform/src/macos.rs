@@ -3,6 +3,8 @@ use crate::drawable_pool::DrawablePool;
 use crate::*;
 #[path = "macos_a11y.rs"]
 mod a11y;
+#[path = "macos_drag_image.rs"]
+mod drag_image;
 #[path = "macos_finder.rs"]
 pub(super) mod finder;
 #[path = "macos_requests.rs"]
@@ -104,6 +106,32 @@ fn restore_simple_presentation(mtm: MainThreadMarker) {
     }
 }
 impl WindowHandle {
+    /// Displays a floating drag image without activating or capturing input.
+    pub fn show_drag_image(&self, image: &DragImage, point: Point, grab: Point) {
+        drag_image::show(self.0.mtm, image, point, grab);
+    }
+    /// Moves an existing drag image, showing it again if paused.
+    pub fn move_drag_image(&self, point: Point) {
+        drag_image::follow(point);
+    }
+    /// Hides the drag image but retains its pixels until the gesture ends.
+    pub fn pause_drag_image(&self) {
+        drag_image::hide(false);
+    }
+    /// Hides the drag image and releases its pixels.
+    pub fn hide_drag_image(&self) {
+        drag_image::hide(true);
+    }
+    /// The topmost native window at the given screen point, ignoring the drag image.
+    pub fn screen_window_at(&self, point: Point) -> Option<usize> {
+        drag_image::window_at(self.0.mtm, point)
+    }
+    /// Opaque native window identity for screen hit testing.
+    pub fn native_window_id(&self) -> Option<usize> {
+        let number = self.0.window()?.windowNumber();
+        (number > 0).then_some(number as usize)
+    }
+
     /// Font families currently exposed by AppKit's font manager.
     pub fn font_families(&self) -> Vec<String> {
         // SAFETY: a WindowHandle stays on the AppKit thread. Both selectors are
@@ -131,6 +159,32 @@ impl WindowHandle {
         let p = view.convertPoint_toView(NSPoint::new(point.x, point.y), None);
         let p = window.convertPointToScreen(p);
         Some(Point { x: p.x, y: p.y })
+    }
+    /// Applies a flipped client-space offset to an AppKit screen point.
+    pub fn screen_point_offset(&self, screen: Point, offset: Point) -> Point {
+        Point {
+            x: screen.x + offset.x,
+            y: screen.y - offset.y,
+        }
+    }
+    /// Places a client point at the desired screen location, within its visible screen.
+    pub fn position_content_point(&self, local: Point, desired: Point) {
+        let (Some(window), Some(current)) = (self.0.window(), self.screen_point(local)) else {
+            return;
+        };
+        let area = NSScreen::screens(self.0.mtm)
+            .into_iter()
+            .find(|screen| NSPointInRect(NSPoint::new(desired.x, desired.y), screen.frame()))
+            .or_else(|| window.screen())
+            .map(|screen| screen_rect(screen.visibleFrame()));
+        let frame = anchored_window_frame(screen_rect(window.frame()), current, desired, area);
+        window.setFrame_display(
+            NSRect::new(
+                NSPoint::new(frame.x, frame.y),
+                NSSize::new(frame.width, frame.height),
+            ),
+            false,
+        );
     }
     /// Notifies macOS of a completed document open, or clears system recents.
     pub fn system_recent_document(&self, path: Option<&Path>) {
@@ -784,6 +838,8 @@ enum Event {
     FinderNewTextFile(PathBuf),
     Scroll(ScrollEvent),
     Resize,
+    Moved,
+    PointerCancel,
     Appearance(Appearance),
     InlineTextFocusLost,
     CloseRequested,
@@ -1042,6 +1098,8 @@ impl Host {
                 Event::FinderNewTextFile(directory) => app.on_finder_new_text_file(&w, &directory),
                 Event::Scroll(e) => app.on_scroll(&w, e),
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
+                Event::Moved => app.on_move(&w),
+                Event::PointerCancel => app.on_pointer_cancel(&w),
                 Event::Appearance(e) => app.on_appearance(&w, e),
                 Event::InlineTextFocusLost => app.on_inline_text_focus_lost(&w),
                 Event::Idle => app.on_idle(&w),
@@ -1717,6 +1775,13 @@ define_class!(
         fn became_active(&self, _n: &NSNotification) {
             promote_to_regular(&NSApplication::sharedApplication(self.mtm()));
         }
+        #[unsafe(method(applicationDidResignActive:))]
+        fn resigned_active(&self, _n: &NSNotification) {
+            drag_image::hide(true);
+            for host in lifecycle::live_hosts() {
+                host.dispatch(Event::PointerCancel);
+            }
+        }
 
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn launched(&self, _n: &NSNotification) {
@@ -1908,7 +1973,9 @@ define_class!(
         }
         #[unsafe(method(windowDidMove:))]
         fn moved(&self, _n: &NSNotification) {
-            self.ivars().host.resize();
+            let host = &self.ivars().host;
+            host.resize();
+            host.dispatch(Event::Moved);
         }
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn scale_changed(&self, _n: &NSNotification) {

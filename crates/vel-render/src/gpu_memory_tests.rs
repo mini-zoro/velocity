@@ -73,6 +73,51 @@ fn renderer() -> Option<(Renderer, Fonts)> {
 }
 
 #[test]
+fn small_transparent_readback_preserves_the_framebuffer_extent() {
+    let Ok(mut renderer) = Renderer::offscreen(48, 32) else {
+        return;
+    };
+    let mut fonts = Fonts::load().unwrap();
+    let scene = Scene {
+        background: [0.; 4],
+        layers: vec![Layer {
+            rects: vec![SolidRect {
+                rect: Rect {
+                    x: 2.,
+                    y: 2.,
+                    width: 6.,
+                    height: 6.,
+                },
+                clip: Rect {
+                    x: 0.,
+                    y: 0.,
+                    width: 12.,
+                    height: 10.,
+                },
+                radius: 2.5,
+                color: [1., 0., 0., 0.5],
+            }],
+            ..Default::default()
+        }],
+    };
+    let small = renderer
+        .render_rgba_at_size(&scene, &mut fonts, 2., [24, 20])
+        .unwrap();
+    assert_eq!(small.len(), 24 * 20 * 4);
+    let corner = (4 * 24 + 4) * 4;
+    assert_eq!(&small[corner..corner + 4], &[0, 0, 0, 0]);
+    let center = (10 * 24 + 10) * 4;
+    assert_eq!(&small[center..center + 4], &[128, 0, 0, 128]);
+    assert_eq!(renderer.physical_size(), [48, 32]);
+    let full = renderer.render_rgba(&scene, &mut fonts, 2.).unwrap();
+    let center_full = (10 * 48 + 10) * 4;
+    assert_eq!(
+        &full[center_full..center_full + 4],
+        &small[center..center + 4]
+    );
+}
+
+#[test]
 fn frames_dropped_without_a_drawable_release_their_staged_writes() {
     let Some((mut renderer, mut fonts)) = renderer() else {
         return;

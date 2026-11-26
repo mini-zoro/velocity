@@ -157,7 +157,7 @@ fn tab_press_threshold_lift_and_escape_restore_the_original_strip() {
     let scene = a.scene();
     let lifted = tab(&a, order[0]);
     assert!((lifted.x - (original.x + passed.x - start.x)).abs() < 0.01);
-    assert!(lifted.y < original.y);
+    assert_eq!(lifted.y, original.y);
     assert!(scene.layers.iter().any(|layer| !layer.shadows.is_empty()));
     key(&mut a, "escape");
     mouse(
@@ -245,6 +245,236 @@ fn tear_off_inside_or_outside_the_window_moves_the_live_document_and_undo() {
         assert_eq!(
             b.workspace.editor().text.to_string(),
             "first document\nsecond line"
+        );
+    }
+}
+
+fn tab_drag_windows() -> (App, App) {
+    let mut a = app();
+    let options = a.options.clone();
+    let now = Instant::now();
+    let mut b = App::new(
+        options.clone(),
+        Clock::new(now, std::time::SystemTime::now()),
+        Reporter::for_options(&options, now).unwrap(),
+        Workspace::new(Text::from("target"), None, None, false).unwrap(),
+        Arc::new(AtomicBool::new(false)),
+        a.sessions.clone(),
+    );
+    b.workspace.new_file().unwrap();
+    b.window_frame = Some([
+        a.window_size.width + 100.,
+        200.,
+        b.window_size.width,
+        b.window_size.height,
+    ]);
+    a.scene();
+    b.scene();
+    (a, b)
+}
+
+fn second_window_insertion_point(a: &App, b: &App) -> Point {
+    let sessions = a.sessions.borrow();
+    let strip = &sessions.tab_strips[&b.session_id][0];
+    Point {
+        x: strip.origin + strip.step + 2.,
+        y: strip.bounds.y + strip.bounds.height / 2.,
+    }
+}
+
+#[test]
+fn detached_tab_hits_another_headless_window_and_inserts_at_the_published_index() {
+    let (mut a, mut b) = tab_drag_windows();
+    let inserted = format!("unsaved {}\n", "\nlong line".repeat(160));
+    a.run_named(None, "insert", &json!({"characters": inserted}));
+    let sheet = a.workspace.tabs[0].sheet;
+    let doc = a.workspace.tabs[0].session_document;
+    let start = center(tab(&a, sheet));
+    let original_target = b.workspace.workbench.groups[0].sheets.clone();
+    let target_point = second_window_insertion_point(&a, &b);
+    mouse(&mut a, MouseKind::Down, start);
+    a.workspace.editor_mut().set_caret(2, false);
+    a.workspace.editor_mut().set_caret(6, true);
+    let selection = a.workspace.editor().regions();
+    mouse(
+        &mut a,
+        MouseKind::Drag,
+        Point {
+            x: -80.,
+            y: start.y,
+        },
+    );
+    assert!(a.tab_press.as_ref().unwrap().drag.unwrap().detached);
+    assert!(a.drag_image.is_some());
+    a.scene();
+    assert!(a.tab_hits.is_empty());
+    a.view.scroll_y = 64.;
+    mouse(&mut a, MouseKind::Drag, target_point);
+    let shared = a.sessions.borrow().tab_drag.clone().unwrap();
+    assert_eq!(
+        shared.slot,
+        Some(crate::session::DragSlot {
+            window: b.session_id,
+            group: 0,
+            index: 1
+        })
+    );
+    assert_eq!(
+        b.tab_preview_order(0, &original_target).unwrap(),
+        [original_target[0], sheet, original_target[1]]
+    );
+    let preview = b.scene();
+    assert!(
+        preview
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .any(|run| run.text.contains("unsaved"))
+    );
+    assert!(b.tab_slides.is_some());
+    assert!(b.workspace.sheet_index(sheet).is_none());
+    mouse(
+        &mut a,
+        MouseKind::Drag,
+        Point {
+            y: target_point.y + 80.,
+            ..target_point
+        },
+    );
+    assert!(
+        a.sessions
+            .borrow()
+            .tab_drag
+            .as_ref()
+            .unwrap()
+            .slot
+            .is_none()
+    );
+    assert!(b.tab_preview_order(0, &original_target).is_none());
+    mouse(&mut a, MouseKind::Drag, target_point);
+    mouse(&mut a, MouseKind::Up, target_point);
+    assert!(a.tab_press.is_none());
+    assert!(a.drag_image.is_none());
+    assert!(a.sessions.borrow().tab_drag.is_none());
+    assert!(b.receive_tabs());
+    assert_eq!(b.workspace.workbench.groups[0].sheets[1], sheet);
+    assert_eq!(b.workspace.workbench.groups[0].focused, Some(sheet));
+    assert_eq!(b.workspace.tabs[b.workspace.active].session_document, doc);
+    assert!(b.workspace.tabs[b.workspace.active].dirty());
+    assert_eq!(b.workspace.tabs[b.workspace.active].scroll.1, 64.);
+    assert_eq!(b.workspace.editor().regions(), selection);
+    assert!(a.empty_close_requested);
+    assert_eq!(b.sessions.borrow().active_window, Some(b.session_id));
+    b.run_named(None, "undo", &json!({}));
+    assert_eq!(
+        b.workspace.editor().text.to_string(),
+        "first document\nsecond line"
+    );
+}
+
+#[test]
+fn detached_tab_preview_obeys_animation_disabled_in_both_windows() {
+    let (mut a, mut b) = tab_drag_windows();
+    for app in [&mut a, &mut b] {
+        app.workspace
+            .editor_mut()
+            .settings
+            .set(Layer::View, "animation_enabled", json!(false));
+    }
+    let sheet = a.workspace.tabs[0].sheet;
+    let start = center(tab(&a, sheet));
+    let end = second_window_insertion_point(&a, &b);
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, end);
+    b.scene();
+    assert!(a.tab_slides.is_none() && b.tab_slides.is_none());
+    assert!(a.drag_image.is_some() && b.shared_tab_preview().is_some());
+    // The native deactivation and capture-loss callbacks use the same cancellation.
+    assert!(a.cancel_tab_drag(None));
+    assert!(a.drag_image.is_none() && b.shared_tab_preview().is_none());
+    mouse(&mut a, MouseKind::Up, end);
+    assert!(a.torn_off_windows.is_empty());
+    assert_eq!(a.workspace.tabs[0].sheet, sheet);
+}
+
+#[test]
+fn detached_drag_escape_releases_image_and_shared_state_for_repeated_cycles() {
+    let mut a = app();
+    a.scene();
+    let sheet = a.workspace.tabs[0].sheet;
+    let start = center(tab(&a, sheet));
+    for _ in 0..100 {
+        mouse(&mut a, MouseKind::Down, start);
+        mouse(
+            &mut a,
+            MouseKind::Drag,
+            Point {
+                x: -80.,
+                y: start.y,
+            },
+        );
+        assert!(a.drag_image.is_some());
+        key(&mut a, "escape");
+        assert!(a.tab_press.is_none());
+        assert!(a.drag_image.is_none());
+        assert!(a.sessions.borrow().tab_drag.is_none());
+        a.scene();
+    }
+}
+
+#[test]
+fn empty_space_drop_keeps_the_original_grab_offset_in_screen_space() {
+    let mut a = app();
+    a.window_frame = Some([600., 300., a.window_size.width, a.window_size.height]);
+    a.scene();
+    let rect = tab(&a, a.workspace.tabs[0].sheet);
+    let start = Point {
+        x: rect.x + 13.,
+        y: rect.y + 8.,
+    };
+    let end = Point { x: 40., y: -200. };
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, end);
+    mouse(&mut a, MouseKind::Up, end);
+    assert_eq!(
+        a.torn_off_windows[0].tear_off_anchor,
+        Some(Point { x: 627., y: 92. })
+    );
+}
+
+#[test]
+fn closing_either_drag_window_cancels_without_dropping_on_mouse_up() {
+    for source_closes in [false, true] {
+        let (mut a, b) = tab_drag_windows();
+        let sheet = a.workspace.tabs[0].sheet;
+        let start = center(tab(&a, sheet));
+        let end = second_window_insertion_point(&a, &b);
+        mouse(&mut a, MouseKind::Down, start);
+        mouse(&mut a, MouseKind::Drag, end);
+        assert_eq!(
+            a.sessions
+                .borrow()
+                .tab_drag
+                .as_ref()
+                .unwrap()
+                .slot
+                .unwrap()
+                .window,
+            b.session_id
+        );
+        a.sessions.borrow_mut().release_route(if source_closes {
+            a.session_id
+        } else {
+            b.session_id
+        });
+        assert!(a.sessions.borrow().tab_drag.is_none());
+        mouse(&mut a, MouseKind::Up, end);
+        assert!(a.drag_image.is_none() && a.tab_press.is_none());
+        assert!(a.torn_off_windows.is_empty());
+        assert_eq!(a.workspace.workbench.group_of(sheet), Some(0));
+        assert!(
+            b.tab_preview_order(0, &b.workspace.workbench.groups[0].sheets)
+                .is_none()
         );
     }
 }
