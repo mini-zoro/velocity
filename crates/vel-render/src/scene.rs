@@ -247,6 +247,9 @@ pub struct BatchPlan {
     batches: Vec<Batch>,
 }
 impl BatchPlan {
+    pub(crate) fn shrink(&mut self) {
+        self.batches.shrink_to(self.batches.len().saturating_mul(2));
+    }
     /// Drops ranges while retaining their allocation for the next scene.
     pub fn clear(&mut self) {
         self.batches.clear();

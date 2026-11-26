@@ -133,9 +133,26 @@ pub enum ImageSource {
     /// `res://` package resource URL.
     Resource(String),
     /// `data:image/png`, `image/jpeg` or `image/gif` URL.
-    Data(String),
+    Data(DataUri),
     /// HTTPS URL. The host decides whether to fetch it.
     Https(String),
+}
+
+/// Shared data URL payload and its fixed-size cache identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataUri {
+    url: std::sync::Arc<str>,
+    digest: [u8; 32],
+}
+impl DataUri {
+    /// The original encoded URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+    /// BLAKE3 of the complete URL, including its encoding and MIME metadata.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 }
 impl ImageSource {
     /// Rejects unsupported protocols and MIME types; does not perform I/O.
@@ -162,7 +179,10 @@ impl ImageSource {
         .iter()
         .any(|p| source.starts_with(p))
         {
-            Some(Self::Data(source.into()))
+            Some(Self::Data(DataUri {
+                url: source.into(),
+                digest: *blake3::hash(source.as_bytes()).as_bytes(),
+            }))
         } else {
             None
         }

@@ -436,50 +436,101 @@ struct FilesIdentity {
 #[derive(Debug)]
 struct ResultBudget {
     remaining: usize,
+    matches: usize,
     truncated: bool,
-    shown_paths: BTreeMap<Arc<Path>, bool>,
-    hidden_matches: BTreeSet<Arc<Path>>,
+    shown: std::collections::HashSet<Arc<Path>>,
+    last_shown: Option<Arc<Path>>,
 }
 impl ResultBudget {
     fn new(remaining: usize) -> Option<Self> {
-        (remaining != 0).then(|| Self {
-            remaining,
+        const MAX: usize = 16 * 1024 * 1024;
+        Some(Self {
+            remaining: if remaining == 0 {
+                MAX
+            } else {
+                remaining.min(MAX)
+            },
+            matches: 100_000,
             truncated: false,
-            shown_paths: BTreeMap::new(),
-            hidden_matches: BTreeSet::new(),
+            shown: Default::default(),
+            last_shown: None,
         })
     }
-    fn allows(&mut self, line: &files::Line) -> bool {
-        if !self.truncated {
-            let new_file = !self.shown_paths.contains_key(&line.path);
-            // Charge a possible context gap and the displayed file header as
-            // well as the row. Search/footer chrome is outside the budget.
-            let bytes = line
-                .formatted()
-                .len()
-                .saturating_add(12)
-                .saturating_add(if new_file {
-                    line.path.to_string_lossy().len() + 3
-                } else {
-                    0
-                });
-            if let Some(remaining) = self.remaining.checked_sub(bytes) {
-                self.remaining = remaining;
-                self.shown_paths
-                    .entry(line.path.clone())
-                    .and_modify(|matched| {
-                        *matched |= line.match_count > 0;
-                    })
-                    .or_insert(line.match_count > 0);
-                return true;
-            }
+    fn allows(&mut self, line: &mut files::Line) -> bool {
+        if self.truncated {
+            return false;
+        }
+        // Charge the ordered result model and its optional projection into an
+        // editor buffer (text, markers, path keys, and a possible header/gap).
+        let same_file = self
+            .last_shown
+            .as_ref()
+            .is_some_and(|path| Arc::ptr_eq(path, &line.path));
+        let new_file = !same_file && !self.shown.contains(&line.path);
+        let path_bytes = if new_file {
+            256 + line.path.as_os_str().len() * 4
+        } else {
+            0
+        };
+        let bytes = line
+            .text
+            .capacity()
+            .saturating_mul(2)
+            .saturating_add(path_bytes)
+            .saturating_add(384);
+        let Some(available) = self.remaining.checked_sub(bytes) else {
+            self.truncated = true;
+            return false;
+        };
+        const HIT_BYTES: usize = 2 * (size_of::<Range<usize>>() + size_of::<vel_buffer::Region>());
+        let keep = (available / HIT_BYTES)
+            .min(self.matches)
+            .min(line.highlights.len());
+        if line.match_count > 0 && keep == 0 && (!line.highlights.is_empty() || self.matches == 0) {
+            self.truncated = true;
+            return false;
+        }
+        if keep < line.highlights.len() {
+            line.highlights.truncate(keep);
             self.truncated = true;
         }
-        if line.match_count > 0 {
-            self.hidden_matches.insert(line.path.clone());
+        if line.highlights.capacity() > keep.saturating_mul(2) {
+            line.highlights.shrink_to_fit();
         }
-        false
+        self.remaining = available - keep * HIT_BYTES;
+        self.matches -= keep.max(usize::from(line.match_count > 0));
+        if !same_file {
+            if new_file {
+                self.shown.insert(Arc::clone(&line.path));
+            }
+            self.last_shown = Some(Arc::clone(&line.path));
+        }
+        true
     }
+}
+
+#[cfg(test)]
+#[test]
+fn file_result_budget_caps_dense_rows_and_keeps_no_hidden_paths() {
+    let mut budget = ResultBudget::new(0).unwrap();
+    let mut line = files::Line {
+        path: Arc::from(Path::new("dense.txt")),
+        number: 1,
+        text: "x".repeat(200_000),
+        highlights: (0..200_000).map(|i| i..i + 1).collect(),
+        column_offset: 0,
+        match_count: 200_000,
+    };
+    assert!(budget.allows(&mut line));
+    assert_eq!(line.match_count, 200_000);
+    assert_eq!(line.highlights.len(), 100_000);
+    assert!(budget.remaining < 16 * 1024 * 1024);
+    assert!(budget.truncated);
+    let hidden: Arc<Path> = Arc::from(Path::new("hidden.txt"));
+    line.path = hidden.clone();
+    assert!(!budget.allows(&mut line));
+    drop(line);
+    assert_eq!(Arc::strong_count(&hidden), 1);
 }
 #[derive(Clone, Debug)]
 pub struct SideRow {
@@ -551,6 +602,7 @@ pub struct Panels {
     pub search_results_active: bool,
     result_cursor: Option<usize>,
     result_budget: Option<ResultBudget>,
+    result_origin: Option<u64>,
     result_error: Option<UiText>,
     files_searched: usize,
     file_matches: usize,
@@ -602,6 +654,7 @@ pub struct Panels {
     files_context: bool,
     pub in_selection: bool,
     pub highlights: Vec<Range<usize>>,
+    find_match_count: usize,
     pub message: UiText,
     pub result_view: files::Results,
     pub result_selected: usize,
@@ -751,6 +804,7 @@ impl Default for Panels {
             search_results_active: false,
             result_cursor: None,
             result_budget: None,
+            result_origin: None,
             result_error: None,
             find_pasteboard: None,
             files_searched: 0,
@@ -805,6 +859,7 @@ impl Default for Panels {
             files_context: true,
             in_selection: false,
             highlights: vec![],
+            find_match_count: 0,
             message: UiText::default(),
             result_selected: 0,
             result_navigated: false,
@@ -3030,6 +3085,40 @@ impl Panels {
             &[]
         }
     }
+    pub(crate) fn release_closed_matches(&mut self, workspace: &Workspace) {
+        if self
+            .search_identity
+            .as_ref()
+            .is_some_and(|key| workspace.sheet_index(key.snapshot.sheet).is_none())
+        {
+            self.search_worker.cancel();
+            let _ = self.search_worker.poll();
+            self.highlights = Vec::new();
+            self.find_match_count = 0;
+            self.search_identity = None;
+            self.all_matches_ready = false;
+        }
+        if self
+            .goto_highlights
+            .as_ref()
+            .is_some_and(|hits| workspace.sheet_index(hits.snapshot.sheet).is_none())
+        {
+            self.goto_highlights = None;
+        }
+        if self
+            .results_tab
+            .as_ref()
+            .is_some_and(|results| workspace.sheet_index(results.sheet).is_none())
+        {
+            self.results_tab = None;
+            self.file_task = None;
+            self.result_view = files::Results::default();
+            self.result_untitled.clear();
+            self.result_budget = None;
+            self.result_destination = None;
+            self.file_complete = false;
+        }
+    }
     /// Refuse to paint an older snapshot even before the next worker poll.
     pub fn current_highlights(&self, workspace: &Workspace) -> &[Range<usize>] {
         if self.overlay == Some(Overlay::Goto)
@@ -3063,7 +3152,9 @@ impl Panels {
             .settings
             .usize("find_scroll_highlights_limit", 4096);
         // A dense result should not leave an apparently complete, partial map.
-        if limit != 0 && highlights.len() > limit {
+        if (limit != 0 && highlights.len() > limit)
+            || (self.goto_highlights.is_none() && self.find_match_count > highlights.len())
+        {
             &[]
         } else {
             highlights
@@ -3258,7 +3349,8 @@ impl Panels {
             self.set_message(String::new());
         }
         self.search_worker.cancel();
-        self.highlights.clear();
+        self.highlights = Vec::new();
+        self.find_match_count = 0;
         self.all_matches_ready = false;
         self.find_deferred = false;
         self.find_status.clear();
@@ -3278,6 +3370,7 @@ impl Panels {
                     // Keep tiny literal searches immediate. A viewport may include
                     // an arbitrarily long logical line; never scan it as a preview.
                     self.highlights = search.find(&editor.text, &self.scope());
+                    self.find_match_count = self.highlights.len();
                     self.all_matches_ready = true;
                 } else {
                     self.find_status = UiText::tr("Searching…");
@@ -3346,7 +3439,7 @@ impl Panels {
                 UiText::tr("No matches")
             }
         } else {
-            let n = self.highlights.len();
+            let n = self.find_match_count;
             if n == 1 {
                 UiText::tr("1 match")
             } else {
@@ -3364,7 +3457,8 @@ impl Panels {
             && let Some(search) = &self.search
             && !search.uses_perl()
         {
-            self.highlights = search.find(&workspace.editor().text, &self.scope());
+            (self.highlights, self.find_match_count) =
+                search.find_preview(&workspace.editor().text, &self.scope());
             self.search_worker.cancel();
             self.all_matches_ready = true;
             self.update_find_status();
@@ -3490,7 +3584,7 @@ impl Panels {
                         "{index} of {count}",
                         [
                             ("index", (index + 1).to_string()),
-                            ("count", self.highlights.len().to_string()),
+                            ("count", self.find_match_count.to_string()),
                         ],
                     );
                 }
@@ -5188,26 +5282,17 @@ impl Panels {
         }
         Ok((true, None))
     }
-    fn start_files(&mut self, workspace: &mut Workspace) -> Result<(), String> {
-        self.remember_search(false);
-        let search = match Search::new(&self.query.value(), self.options) {
-            Ok(search) => search,
-            Err(error) => {
-                self.set_message(error);
-                return Ok(());
-            }
-        };
+    fn files_request(
+        &self,
+        workspace: &Workspace,
+        search: Search,
+        origin: Option<u64>,
+    ) -> Result<(files::Request, files::Limits, BTreeMap<PathBuf, u64>), String> {
         let base = workspace
             .folders
             .first()
             .map_or(Path::new("."), |f| f.path.as_path());
-        let mut scope = match files::Where::parse(&self.where_input.value(), base) {
-            Ok(scope) => scope,
-            Err(error) => {
-                self.set_message(error);
-                return Ok(());
-            }
-        };
+        let mut scope = files::Where::parse(&self.where_input.value(), base)?;
         #[cfg(windows)]
         for root in &mut scope.roots {
             if let Ok(canonical) = std::fs::canonicalize(&*root) {
@@ -5215,24 +5300,21 @@ impl Panels {
             }
         }
         scope.use_gitignore = self.files_use_gitignore;
-        self.cancel_files(workspace);
-        self.file_signature = Some(self.files_identity(workspace));
-        self.replace_rx = None;
-        self.replacement_plan = None;
         let mut untitled = BTreeMap::new();
+        let active = origin.and_then(|sheet| workspace.sheet_index(sheet));
         let open = workspace
             .tabs
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i == workspace.active)
+            .filter(|(i, _)| Some(*i) == active)
             .chain(
                 workspace
                     .tabs
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| *i != workspace.active),
+                    .filter(|(i, _)| Some(*i) != active),
             )
-            .filter(|(i, tab)| !tab.find_results && (scope.open_files || *i == workspace.active))
+            .filter(|(i, tab)| !tab.find_results && (scope.open_files || Some(*i) == active))
             .map(|(i, tab)| {
                 let path = tab.path.clone().unwrap_or_else(|| {
                     let path = PathBuf::from(format!("Untitled {}", i + 1));
@@ -5245,9 +5327,8 @@ impl Panels {
                 }
             })
             .collect();
-        let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
         let settings = &workspace.settings;
-        let task = files::Task::start_with_limits(
+        Ok((
             files::Request {
                 search,
                 scope,
@@ -5259,13 +5340,34 @@ impl Panels {
                     0
                 },
             },
-            decode,
             files::Limits {
                 max_file_size: settings.usize("find_in_files_max_file_size", 0) as u64,
                 context_characters: settings.usize("find_in_files_context_characters", 0),
                 suppress_errors: settings.bool("find_in_files_suppress_errors", false),
             },
-        );
+            untitled,
+        ))
+    }
+
+    fn start_files(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        self.remember_search(false);
+        let origin = Some(workspace.tabs[workspace.active].sheet);
+        let (request, limits, untitled) = match Search::new(&self.query.value(), self.options)
+            .and_then(|search| self.files_request(workspace, search, origin))
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.set_message(error);
+                return Ok(());
+            }
+        };
+        self.cancel_files(workspace);
+        self.file_signature = Some(self.files_identity(workspace));
+        self.replace_rx = None;
+        self.replacement_plan = None;
+        self.result_origin = origin;
+        let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
+        let task = files::Task::start_with_limits(request, decode, limits);
         let task = match task {
             Ok(task) => task,
             Err(error) => {
@@ -5411,7 +5513,7 @@ impl Panels {
             );
         }
         let search = Search::new(&self.query.value(), self.options)?;
-        let mut paths: BTreeSet<_> = self
+        let paths: BTreeSet<_> = self
             .result_view
             .rows
             .iter()
@@ -5420,9 +5522,6 @@ impl Panels {
                 _ => None,
             })
             .collect();
-        if let Some(budget) = &self.result_budget {
-            paths.extend(budget.hidden_matches.iter().cloned());
-        }
         for path in &paths {
             if workspace
                 .tabs
@@ -5434,13 +5533,54 @@ impl Panels {
         }
         let replacement = self.replace.value();
         let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
+        let rescan = if self
+            .result_budget
+            .as_ref()
+            .is_some_and(|budget| budget.truncated)
+        {
+            let (request, limits, _) =
+                self.files_request(workspace, search.clone(), self.result_origin)?;
+            Some(files::Task::start_matching_files(
+                request,
+                decode.clone(),
+                limits,
+            )?)
+        } else {
+            None
+        };
+        let dirty: BTreeSet<_> = if rescan.is_some() {
+            workspace
+                .tabs
+                .iter()
+                .filter(|t| t.dirty())
+                .filter_map(|t| t.path.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let (tx, rx) = mpsc::channel();
         self.replace_signature = Some((self.files_identity(workspace), replacement.clone()));
         std::thread::spawn(move || {
             let mut budget = 128 * 1024 * 1024usize;
+            let rescan_paths = rescan
+                .as_ref()
+                .into_iter()
+                .flat_map(|task| task.events.iter())
+                .filter_map(|event| match event {
+                    files::Event::Line(line) if line.match_count > 0 => Some(Ok(line.path)),
+                    files::Event::Error(error) => Some(Err(error)),
+                    _ => None,
+                });
             let result = paths
                 .into_iter()
+                .filter(|_| rescan.is_none())
+                .map(Ok)
+                .chain(rescan_paths)
                 .map(|path| {
+                    let path = path?;
+                    if dirty.contains(path.as_ref()) {
+                        return Err(format!("Save {} before replacing in files", path.display()));
+                    }
                     files::FileChange::prepare_with_decode(
                         path.to_path_buf(),
                         &search,
@@ -6019,6 +6159,7 @@ impl Panels {
                     self.search = None;
                 } else {
                     self.highlights = matches.ranges;
+                    self.find_match_count = matches.count;
                     self.update_find_status();
                 }
                 changed = true;
@@ -6066,10 +6207,10 @@ impl Panels {
                 break;
             };
             match event {
-                files::Event::Line(line) => {
+                files::Event::Line(mut line) => {
                     self.file_matches += line.match_count;
                     if let Some(budget) = &mut self.result_budget
-                        && !budget.allows(&line)
+                        && !budget.allows(&mut line)
                     {
                         changed = true;
                         continue;
@@ -6101,8 +6242,14 @@ impl Panels {
                     self.result_error.get_or_insert_with(|| error.clone());
                     self.set_message(error);
                 }
-                files::Event::Done { files, .. } => {
-                    done = Some(files);
+                files::Event::Done { files, matches } => {
+                    self.file_matches = matches;
+                    done = Some((
+                        files,
+                        self.file_task
+                            .as_ref()
+                            .map_or(0, files::Task::matched_files),
+                    ));
                     self.file_task = None;
                 }
             }
@@ -6116,16 +6263,8 @@ impl Panels {
         {
             results.write(&mut workspace.tabs[index].editor, batch);
         }
-        if let Some(files) = done {
+        if let Some((files, matched)) = done {
             self.files_searched = files;
-            let matched = self.result_view.matched_files()
-                + self.result_budget.as_ref().map_or(0, |budget| {
-                    budget
-                        .hidden_matches
-                        .iter()
-                        .filter(|path| !budget.shown_paths.get(*path).copied().unwrap_or(false))
-                        .count()
-                });
             self.result_status = match (self.file_matches, matched) {
                 (1, 1) => UiText::tr("1 match in 1 file"),
                 (count, 1) => {
@@ -6157,7 +6296,10 @@ impl Panels {
                     "{left}\n{right}",
                     [("left", summary), ("right", note.clone())],
                 );
-                self.result_status = note;
+                self.result_status = UiText::compose(
+                    "{left}\n{right}",
+                    [("left", self.result_status.clone()), ("right", note)],
+                );
             }
             if let Some(error) = self.result_error.take() {
                 summary = UiText::compose(

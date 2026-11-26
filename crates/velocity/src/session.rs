@@ -100,8 +100,8 @@ pub struct Sessions {
     pub(crate) original: Option<std::sync::Arc<crate::session_restore::Original>>,
     pub active_window: Option<u64>,
     recent: [Vec<PathBuf>; 3],
-    recent_heads: BTreeMap<u64, [Option<PathBuf>; 3]>,
-    forgotten_recent: [BTreeSet<PathBuf>; 3],
+    recent_heads: BTreeMap<u64, RecentWindow>,
+    recent_epoch: [u64; 3],
     recent_opened: Vec<PathBuf>,
     closed_window_files: Vec<PathBuf>,
     system_recent_enabled: Option<bool>,
@@ -131,6 +131,32 @@ pub struct Sessions {
     pub(crate) preference_updates: BTreeMap<u64, Vec<(String, Option<vel_config::Value>)>>,
     // Drop all writers before releasing the per-profile lock.
     pub instance: Option<crate::instance::Instance>,
+}
+
+#[derive(Debug, Default)]
+struct RecentWindow {
+    heads: [Option<PathBuf>; 3],
+    epoch: [u64; 3],
+}
+
+#[cfg(test)]
+#[test]
+fn stale_window_cannot_restore_recents_after_repeated_clears() {
+    let mut sessions = Sessions::new(None);
+    let owner = sessions.register();
+    sessions.recent[0].push("cleared.txt".into());
+    let stale = sessions.register();
+    sessions.clear_recent_kind(owner, 0);
+    for i in 0..20_000u32 {
+        sessions.recent[0].push(format!("removed-{i}.txt").into());
+        sessions.clear_recent_kind(owner, 0);
+    }
+    assert_eq!(sessions.recent_heads.len(), 2);
+    assert_eq!(sessions.recent_epoch[0], 20_001);
+    let mut files = vec!["new.txt".into(), "cleared.txt".into()];
+    sessions.sync_recents(stale, [&mut files, &mut Vec::new(), &mut Vec::new()]);
+    assert_eq!(files, [PathBuf::from("new.txt")]);
+    assert_eq!(sessions.recent_heads[&stale].epoch, sessions.recent_epoch);
 }
 impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
@@ -163,7 +189,7 @@ impl Sessions {
             active_window: None,
             recent: Default::default(),
             recent_heads: BTreeMap::new(),
-            forgotten_recent: Default::default(),
+            recent_epoch: [0; 3],
             recent_opened: Vec::new(),
             system_recent_enabled: None,
             messages,
@@ -208,8 +234,7 @@ impl Sessions {
         self.next += 1;
         self.active_window = Some(id);
         self.live.insert(id);
-        self.recent_heads
-            .insert(id, self.recent.each_ref().map(|p| p.first().cloned()));
+        self.acknowledge_recents(id);
         id
     }
     /// Takes a utility window (Settings) back out of the session: it never saves, restores,
@@ -301,7 +326,7 @@ impl Sessions {
         self.recent.iter_mut().flatten().for_each(&retarget);
         self.recent_heads
             .values_mut()
-            .flat_map(|heads| heads.iter_mut().flatten())
+            .flat_map(|window| window.heads.iter_mut().flatten())
             .for_each(&retarget);
         self.recent_opened.iter_mut().for_each(&retarget);
         self.closed_window_files.iter_mut().for_each(&retarget);
@@ -373,10 +398,6 @@ impl Sessions {
                 }
             }
             let id = self.register();
-            self.recent_heads.insert(
-                id,
-                std::array::from_fn(|index| self.recent[index].first().cloned()),
-            );
             self.open_windows.insert(
                 id,
                 crate::open_requests::WindowRoute::from_snapshot(&window, &retained),
@@ -517,27 +538,47 @@ impl Sessions {
             .zip(&self.recent)
             .all(|(local, shared)| &***local == shared.as_slice())
         {
+            if self
+                .recent_heads
+                .get(&id)
+                .is_some_and(|window| window.epoch != self.recent_epoch)
+            {
+                self.acknowledge_recents(id);
+            }
             return;
         }
         self.record_recents(id, std::array::from_fn(|i| lists[i].clone()));
         for (local, shared) in lists.into_iter().zip(&self.recent) {
             local.clone_from(shared);
         }
-        self.recent_heads
-            .insert(id, self.recent.each_ref().map(|p| p.first().cloned()));
+        self.acknowledge_recents(id);
+    }
+    fn acknowledge_recents(&mut self, id: u64) {
+        self.recent_heads.insert(
+            id,
+            RecentWindow {
+                heads: self.recent.each_ref().map(|p| p.first().cloned()),
+                epoch: self.recent_epoch,
+            },
+        );
     }
     fn record_recents(&mut self, id: u64, recent: [Vec<PathBuf>; 3]) {
-        let heads = std::array::from_fn(|index| recent[index].first().cloned());
-        let previous = self.recent_heads.insert(id, heads);
+        let window = self.recent_heads.entry(id).or_insert_with(|| RecentWindow {
+            epoch: self.recent_epoch,
+            ..Default::default()
+        });
         for (index, mut incoming) in recent.into_iter().enumerate() {
-            if let Some(head) = incoming.first()
-                && previous
-                    .as_ref()
-                    .is_some_and(|old| old[index].as_ref() != Some(head))
-            {
-                self.forgotten_recent[index].remove(head);
+            let previous = &mut window.heads[index];
+            let stale = window.epoch[index] != self.recent_epoch[index];
+            if stale && let Some(old) = previous.as_ref() {
+                // Only the prefix added since this window's last acknowledged
+                // head can be new. Do not republish the stale tail on close.
+                let fresh = incoming.iter().position(|p| p == old).unwrap_or(1);
+                incoming.truncate(fresh);
             }
-            incoming.retain(|path| !self.forgotten_recent[index].contains(path));
+            let promote = incoming
+                .first()
+                .is_some_and(|head| previous.as_ref() != Some(head));
             if index == 0 {
                 for path in incoming
                     .iter()
@@ -547,9 +588,7 @@ impl Sessions {
                     crate::workbench::remember(&mut self.recent_opened, path.clone());
                 }
                 if let Some(head) = incoming.first()
-                    && previous
-                        .as_ref()
-                        .is_some_and(|old| old[0].as_ref() != Some(head))
+                    && promote
                 {
                     crate::workbench::remember(&mut self.recent_opened, head.clone());
                 }
@@ -560,14 +599,15 @@ impl Sessions {
                 }
             }
             if let Some(head) = incoming.first()
-                && previous
-                    .as_ref()
-                    .is_some_and(|p| p[index].as_ref() != Some(head))
+                && promote
             {
                 self.recent[index].retain(|p| p != head);
                 self.recent[index].insert(0, head.clone());
             }
             self.recent[index].truncate(100);
+            if !stale {
+                *previous = incoming.into_iter().next();
+            }
         }
     }
     // ST4 4143, https://www.sublimetext.com/download: publish opened files and
@@ -709,23 +749,27 @@ impl Sessions {
         }
     }
     pub fn clear_recent_kind(&mut self, id: u64, kind: usize) {
-        self.forgotten_recent[kind].extend(self.recent[kind].drain(..));
-        if let Some(heads) = self.recent_heads.get_mut(&id) {
-            heads[kind] = None;
+        self.recent[kind].clear();
+        self.recent_epoch[kind] = self.recent_epoch[kind].wrapping_add(1);
+        if let Some(window) = self.recent_heads.get_mut(&id) {
+            window.heads[kind] = None;
+            window.epoch[kind] = self.recent_epoch[kind];
         }
     }
     pub fn remove_deleted_recent_projects(&mut self, id: u64, local: &mut Vec<PathBuf>) {
         let projects = &mut self.recent[2];
+        let before = projects.len();
         projects.retain(|path| {
-            let missing = std::fs::metadata(path)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-            if missing {
-                self.forgotten_recent[2].insert(path.clone());
-            }
-            !missing
+            !std::fs::metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         });
+        if before != projects.len() {
+            self.recent_epoch[2] = self.recent_epoch[2].wrapping_add(1);
+        }
         local.clone_from(projects);
-        self.recent_heads.entry(id).or_default()[2] = projects.first().cloned();
+        let window = self.recent_heads.entry(id).or_default();
+        window.heads[2] = projects.first().cloned();
+        window.epoch[2] = self.recent_epoch[2];
     }
     pub fn flush(&self) -> Result<(), String> {
         // A broken project workspace must not suppress flushes for other windows.

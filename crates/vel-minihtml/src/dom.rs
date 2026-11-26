@@ -1,6 +1,6 @@
 //! Bounded, forgiving fragment parser; script-like content is inert.
 use crate::{
-    Error,
+    Error, ImageSource,
     css::{Declaration, Rule, parse_declarations, parse_stylesheet},
 };
 use std::collections::BTreeMap;
@@ -36,6 +36,7 @@ impl Node {
 #[derive(Debug, Clone)]
 pub struct Document {
     pub(crate) nodes: Vec<Node>,
+    pub(crate) images: BTreeMap<usize, ImageSource>,
     pub(crate) rules: Vec<Rule>,
     pub(crate) inline: bool,
 }
@@ -59,6 +60,7 @@ impl Document {
         }
         let mut doc = Self {
             nodes: vec![Node::element("html", None), Node::element("body", Some(0))],
+            images: BTreeMap::new(),
             rules: Vec::new(),
             inline,
         };
@@ -118,7 +120,7 @@ impl Document {
             if tag.is_empty() {
                 continue;
             }
-            let attrs = attributes(&token[at..]);
+            let mut attrs = attributes(&token[at..]);
             if ["style", "script"].contains(&tag.as_str()) || (inline && tag == "head") {
                 let closing = format!("</{tag}");
                 if let Some(end) = find_ascii_case(rest, &closing) {
@@ -171,6 +173,12 @@ impl Document {
                 *stack.last().unwrap()
             };
             let mut node = Node::element(&tag, Some(parent));
+            let id = doc.nodes.len();
+            if tag == "img"
+                && let Some(image) = attrs.remove("src").and_then(|url| ImageSource::parse(&url))
+            {
+                doc.images.insert(id, image);
+            }
             node.declarations = if inline {
                 Vec::new()
             } else {
@@ -180,7 +188,6 @@ impl Document {
                     .unwrap_or_default()
             };
             node.attrs = attrs;
-            let id = doc.nodes.len();
             doc.nodes.push(node);
             doc.nodes[parent].children.push(id);
             if !token.ends_with('/')

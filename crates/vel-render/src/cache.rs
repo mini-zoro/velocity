@@ -5,6 +5,7 @@ use std::{
     hash::{Hash, Hasher},
     sync::Arc,
 };
+const LAYOUT_BYTES: usize = 4 * 1024 * 1024;
 /// Font size and font-set identity affecting layout.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct LayoutStyle {
@@ -23,6 +24,11 @@ struct Cached {
     older: Option<usize>,
     newer: Option<usize>,
 }
+impl Cached {
+    fn bytes(&self) -> usize {
+        256 + self.text.capacity() + size_of_val(self.glyphs.as_ref())
+    }
+}
 /// LRU cache with both an entry cap and a per-line byte cap. Hash collisions are
 /// checked against content, so a collision can only cause a miss. Recency uses
 /// stable slot indices: lookup, insertion and eviction take expected O(1) cache
@@ -34,6 +40,7 @@ pub struct LineLayoutCache {
     oldest: Option<usize>,
     newest: Option<usize>,
     maximum: usize,
+    bytes: usize,
 }
 impl LineLayoutCache {
     /// Creates a cache with a bounded number of visible/recent lines.
@@ -44,6 +51,7 @@ impl LineLayoutCache {
             oldest: None,
             newest: None,
             maximum: maximum.max(1),
+            bytes: 0,
         }
     }
     fn key(text: &str, style: LayoutStyle) -> (u64, LayoutStyle) {
@@ -64,16 +72,22 @@ impl LineLayoutCache {
     }
     /// Inserts a shaped line; very long lines stay uncached to bound memory.
     pub fn insert(&mut self, text: &str, style: LayoutStyle, glyphs: Arc<[ShapedGlyph]>) {
-        if text.len() > 16_384 {
+        let charge = 256 + text.len() * 2 + size_of_val(glyphs.as_ref());
+        if text.len() > 16_384 || charge > LAYOUT_BYTES {
             return;
+        }
+        if self.bytes + charge > LAYOUT_BYTES {
+            *self = Self::new(self.maximum);
         }
         let key = Self::key(text, style);
         // Updating an existing key (including a hash collision) needs no eviction.
         let slot = if let Some(&slot) = self.entries.get(&key) {
+            self.bytes -= self.slots[slot].bytes();
             self.unlink(slot);
             slot
         } else if self.slots.len() == self.maximum {
             let slot = self.oldest.expect("a full cache has an oldest entry");
+            self.bytes -= self.slots[slot].bytes();
             self.entries.remove(&self.slots[slot].key);
             self.unlink(slot);
             slot
@@ -92,6 +106,7 @@ impl LineLayoutCache {
         entry.text.clear();
         entry.text.push_str(text);
         entry.glyphs = glyphs;
+        self.bytes += entry.bytes();
         self.entries.insert(key, slot);
         self.append(slot);
     }
@@ -131,6 +146,10 @@ impl LineLayoutCache {
     /// Whether the cache has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+    /// Retained layout payload and estimated container storage.
+    pub fn storage_bytes(&self) -> usize {
+        self.bytes
     }
 }
 #[cfg(test)]

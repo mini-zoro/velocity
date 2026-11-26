@@ -383,13 +383,16 @@ fn send(tx: &mpsc::SyncSender<Event>, stop: &AtomicBool, mut event: Event) -> bo
 fn send_text_lines(
     tx: &mpsc::SyncSender<Event>,
     stop: &AtomicBool,
-    matches: &AtomicUsize,
+    totals: &Totals,
     search: &Search,
     path: &Path,
     text: &Text,
-    (context, context_characters): (usize, usize),
+    (context, context_characters, paths_only): (usize, usize, bool),
 ) -> bool {
     let hits = search.find(text, &[]);
+    if !hits.is_empty() {
+        totals.matched_files.fetch_add(1, Ordering::Relaxed);
+    }
     let path: Arc<Path> = path.into();
     let mut rows = BTreeSet::new();
     for hit in &hits {
@@ -411,7 +414,7 @@ fn send_text_lines(
             .map(|h| (h.start - start).min(len)..(h.end - start).min(len))
             .collect();
         let match_count = highlights.len();
-        matches.fetch_add(match_count, Ordering::Relaxed);
+        totals.matches.fetch_add(match_count, Ordering::Relaxed);
         let mut line = Line {
             path: path.clone(),
             number: row + 1,
@@ -424,8 +427,27 @@ fn send_text_lines(
         if !send(tx, stop, Event::Line(line)) {
             return false;
         }
+        if paths_only && match_count != 0 {
+            break;
+        }
     }
     true
+}
+
+#[derive(Debug, Default)]
+struct Totals {
+    matches: AtomicUsize,
+    matched_files: AtomicUsize,
+}
+impl Totals {
+    fn line(&self, line: &Line, matched: &mut bool) {
+        if line.match_count != 0 {
+            self.matches.fetch_add(line.match_count, Ordering::Relaxed);
+            if !std::mem::replace(matched, true) {
+                self.matched_files.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 /// Cancellable parallel file search. Dropping cancels blocked producers as well as walkers.
 #[derive(Debug)]
@@ -434,6 +456,7 @@ pub struct Task {
     pub events: mpsc::Receiver<Event>,
     stop: Arc<AtomicBool>,
     searched: Arc<AtomicUsize>,
+    totals: Arc<Totals>,
 }
 impl Task {
     /// Validates regex and spawns workers; no GUI or full-project result buffer is needed.
@@ -451,6 +474,25 @@ impl Task {
         request: Request,
         decode: DecodeOptions,
         limits: Limits,
+    ) -> Result<Self, String> {
+        Self::start_task(request, decode, limits, false)
+    }
+
+    /// Streams only the first matching row per file for an on-demand operation.
+    pub fn start_matching_files(
+        mut request: Request,
+        decode: DecodeOptions,
+        limits: Limits,
+    ) -> Result<Self, String> {
+        request.context = 0;
+        Self::start_task(request, decode, limits, true)
+    }
+
+    fn start_task(
+        request: Request,
+        decode: DecodeOptions,
+        limits: Limits,
+        paths_only: bool,
     ) -> Result<Self, String> {
         if request.search.query.is_empty() {
             return Err("Find in Files needs a nonempty query".into());
@@ -485,8 +527,10 @@ impl Task {
         let cancelled = stop.clone();
         let searched = Arc::new(AtomicUsize::new(0));
         let files = searched.clone();
+        let totals = Arc::new(Totals::default());
+        let counts = totals.clone();
         thread::spawn(move || {
-            let matches = AtomicUsize::new(0);
+            let totals = &*counts;
             let result = vel_crash::catch_recoverable(AssertUnwindSafe(|| {
                 let seen = std::sync::Mutex::new(BTreeSet::new());
                 // Live buffers take precedence over on-disk copies when both scope tokens are present.
@@ -514,6 +558,7 @@ impl Task {
                         }
                         files.fetch_add(1, Ordering::Relaxed);
                         if let Some(regex) = request.search.perl() {
+                            let mut matched = false;
                             let result = crate::text::perl::materialize(&open.text, &|| {
                                 cancelled.load(Ordering::Relaxed)
                             })
@@ -527,8 +572,10 @@ impl Task {
                                         (request.context, limits.context_characters),
                                         &cancelled,
                                         |line| {
-                                            matches.fetch_add(line.match_count, Ordering::Relaxed);
-                                            send(&tx, &cancelled, Event::Line(line))
+                                            let skip =
+                                                paths_only && (matched || line.match_count == 0);
+                                            totals.line(&line, &mut matched);
+                                            skip || send(&tx, &cancelled, Event::Line(line))
                                         },
                                     )?;
                                 }
@@ -546,11 +593,11 @@ impl Task {
                         } else if !send_text_lines(
                             &tx,
                             &cancelled,
-                            &matches,
+                            totals,
                             &request.search,
                             &open.path,
                             &open.text,
-                            (request.context, limits.context_characters),
+                            (request.context, limits.context_characters, paths_only),
                         ) {
                             return;
                         }
@@ -597,7 +644,6 @@ impl Task {
                             let stop = &cancelled;
                             let scope = &request.scope;
                             let seen = &seen;
-                            let matches = &matches;
                             let files = &files;
                             let search = &request.search;
                             let context = request.context;
@@ -681,12 +727,17 @@ impl Task {
                                                     )
                                                     .and_then(|input| {
                                                         if let Some(input) = input {
+                                                            let mut matched = false;
                                                             let emit = |line: Line| {
-                                                                matches.fetch_add(
-                                                                    line.match_count,
-                                                                    Ordering::Relaxed,
-                                                                );
-                                                                send(tx, stop, Event::Line(line))
+                                                                let skip = paths_only
+                                                                    && (matched
+                                                                        || line.match_count == 0);
+                                                                totals.line(&line, &mut matched);
+                                                                skip || send(
+                                                                    tx,
+                                                                    stop,
+                                                                    Event::Line(line),
+                                                                )
                                                             };
                                                             let context = (
                                                                 context,
@@ -758,7 +809,7 @@ impl Task {
             // Cancelled producers stop filling the queue; the terminal event
             // still has to reach a live consumer. Dropping it disconnects this send.
             let _ = tx.send(Event::Done {
-                matches: matches.load(Ordering::Relaxed),
+                matches: totals.matches.load(Ordering::Relaxed),
                 files: files.load(Ordering::Relaxed),
             });
         });
@@ -766,11 +817,16 @@ impl Task {
             events,
             stop,
             searched,
+            totals,
         })
     }
     /// Number of live/disk files visited so far, without blocking the UI consumer.
     pub fn searched_files(&self) -> usize {
         self.searched.load(Ordering::Relaxed)
+    }
+    /// Files with at least one hit, including results not retained by the UI.
+    pub fn matched_files(&self) -> usize {
+        self.totals.matched_files.load(Ordering::Relaxed)
     }
     /// Stops the workers. A consumer that keeps draining the queue receives Done.
     pub fn cancel(&self) {

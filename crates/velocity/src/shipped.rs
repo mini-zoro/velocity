@@ -7,10 +7,10 @@ use vel_config::{
 };
 
 #[derive(Clone, Copy)]
+// The generated resource inventory can be empty in source-only builds.
+#[allow(dead_code)]
 pub(crate) enum Meta {
     None,
-    // Emitted only if the bundled corpus contains a malformed resource.
-    #[allow(dead_code)]
     Invalid(&'static str),
     Snippet {
         scope: &'static str,

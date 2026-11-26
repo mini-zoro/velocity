@@ -801,7 +801,7 @@ fn image_scene(fixture: &Fixture, dark: bool, name: &str) -> Result<App, String>
     open(&mut app, &fixture.file)?;
     open(&mut app, &fixture.scratch(name))?;
     settle(&mut app);
-    if name == "preview.webp" && app.view.image_preview.image.is_none() {
+    if name == "preview.webp" && app.view.image_preview.image().is_none() {
         return Err("image_webp: the preview did not decode".into());
     }
     Ok(app)

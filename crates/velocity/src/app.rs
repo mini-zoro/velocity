@@ -222,6 +222,7 @@ pub struct App {
     window_size: Size,
     content: Rect,
     sheet_views: std::collections::BTreeMap<u64, View>,
+    closed_sheet_generation: u64,
     inactive_image_decodes: std::collections::BTreeSet<u64>,
     sheet_bounds: std::collections::BTreeMap<u64, Rect>,
     group_bounds: Vec<Rect>,
@@ -479,6 +480,7 @@ impl App {
                 height: view.size.height,
             },
             sheet_views: Default::default(),
+            closed_sheet_generation: 0,
             inactive_image_decodes: Default::default(),
             sheet_bounds: Default::default(),
             group_bounds: Vec::new(),
@@ -3749,6 +3751,20 @@ impl App {
         }
     }
     fn sync_active_view(&mut self) {
+        if self.closed_sheet_generation != self.workspace.closed_sheet_generation {
+            self.closed_sheet_generation = self.workspace.closed_sheet_generation;
+            self.sheet_views
+                .retain(|sheet, _| self.workspace.sheet_index(*sheet).is_some());
+            self.inactive_image_decodes
+                .retain(|sheet| self.sheet_views.contains_key(sheet));
+            self.panels.release_closed_matches(&self.workspace);
+            if let Some(renderer) = &mut self.renderer {
+                renderer.reset_fonts();
+            }
+            if let Some(fonts) = &mut self.fonts {
+                fonts.clear_document_caches();
+            }
+        }
         let tab = &self.workspace.tabs[self.workspace.active];
         let (current, document) = (tab.sheet, tab.session_document);
         let replaced = self
@@ -3782,14 +3798,22 @@ impl App {
                     self.fonts.as_ref().map_or(8., |f| f.cell as f64),
                     self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
                 );
-                let view = std::mem::replace(&mut self.view, replacement);
+                let mut view = std::mem::replace(&mut self.view, replacement);
                 if !(replaced && old == current)
                     && let Some(index) = self.workspace.sheet_index(old)
                 {
                     self.save_on_focus_lost(Some(old));
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
-                    if view.image_preview.busy() {
+                    if !self
+                        .workspace
+                        .workbench
+                        .groups
+                        .iter()
+                        .any(|g| g.selected.contains(&old))
+                    {
+                        view.image_preview.suspend();
+                    } else if view.image_preview.busy() {
                         self.inactive_image_decodes.insert(old);
                     }
                     self.sheet_views.insert(old, view);
@@ -3848,7 +3872,8 @@ impl App {
         if !self.view.image_preview.busy() {
             self.workspace.tabs[active].image_failed = self.view.image_preview.failed;
         }
-        let status = if let Some(image) = self.view.image_preview.image.as_ref().filter(|_| synced)
+        let status = if (synced || switched)
+            && let Some(image) = self.view.image_preview.image()
         {
             let [width, height] = image.logical_size;
             Some(format!("{width} × {height}"))

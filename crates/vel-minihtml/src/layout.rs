@@ -1,7 +1,7 @@
 //! Block/inline flow with baseline alignment and renderer-independent geometry.
 use crate::{
-    Border, BorderStyle, DisplayItem, DisplayList, FontMetrics, ImageSource, LayoutOptions,
-    LinkRegion, LinkTarget, Rect, Size, TextMetrics, TooltipRegion,
+    Border, BorderStyle, DisplayItem, DisplayList, FontMetrics, LayoutOptions, LinkRegion,
+    LinkTarget, Rect, Size, TextMetrics, TooltipRegion,
     css::{self, Align, Display, Length, Style, VerticalAlign, WhiteSpace},
     dom::Document,
 };
@@ -462,11 +462,11 @@ impl<M: FontMetrics> Engine<'_, M> {
             return clean(self.metrics.measure(&node.text, &style.text)).advance;
         }
         if node.tag == "img" {
-            return node
-                .attrs
-                .get("src")
-                .and_then(|s| ImageSource::parse(s))
-                .and_then(|s| self.metrics.image_size(&s))
+            return self
+                .doc
+                .images
+                .get(&id)
+                .and_then(|source| self.metrics.image_size(source))
                 .map_or(16., |s| s.width);
         }
         let mut width = 0f32;
@@ -718,7 +718,7 @@ impl<M: FontMetrics> Engine<'_, M> {
     fn image(&mut self, id: usize, flow: &mut Flow, context: &Context) {
         let node = &self.doc.nodes[id];
         let style = &self.styles[id];
-        let Some(source) = node.attrs.get("src").and_then(|s| ImageSource::parse(s)) else {
+        let Some(source) = self.doc.images.get(&id).cloned() else {
             if let Some(alt) = node.attrs.get("alt") {
                 self.text(alt, style, flow, context);
             }

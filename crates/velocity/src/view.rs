@@ -2489,7 +2489,7 @@ impl View {
     }
     fn scene_impl<const BUILD_INPUT: bool>(&mut self, e: &Editor, input: &[Range<usize>]) -> Scene {
         let mut phase = self.profile.as_ref().map(|_| Instant::now());
-        if let Some(image) = self.image_preview.image.clone() {
+        if let Some(image) = self.image_preview.image() {
             return self.image_scene(e, &image);
         }
         if e.binary.is_some() {
@@ -3899,7 +3899,7 @@ impl View {
     }
     pub(crate) fn text_cursor_at(&self, e: &Editor, point: Point) -> bool {
         e.binary.is_none()
-            && self.image_preview.image.is_none()
+            && self.image_preview.image().is_none()
             && e.settings.get("velocity_html_sheet").is_none()
             && point.y >= self.tab_height
             && point.y < self.size.height
@@ -4879,7 +4879,7 @@ mod tests {
                 12.,
             );
             v.appearance = appearance;
-            v.image_preview.image = Some(Arc::new(Image {
+            v.image_preview.set_test_image(Arc::new(Image {
                 logical_size: [360., 220.],
                 id: 7 | (1 << 63),
                 width: 2,

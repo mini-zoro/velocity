@@ -751,6 +751,30 @@ mod tests {
             std::thread::park_timeout(std::time::Duration::from_millis(5));
         }
     }
+
+    #[test]
+    fn closing_an_inactive_image_view_releases_its_pixels_across_fifty_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("preview.png");
+        write_png_sized(&file, 6, 4);
+        let mut a = clean_tabs(2, 1000., 1., true);
+        for _ in 0..50 {
+            open_path(&mut a, &file);
+            settle_images(&mut a);
+            let closed = a.workspace.active;
+            let sheet = a.workspace.tabs[closed].sheet;
+            let pixels = a.view.image_preview.image().expect("decoded");
+            let weak = Arc::downgrade(&pixels);
+            drop(pixels);
+            a.workspace.activate_sheet(0);
+            a.sync_active_view();
+            assert!(a.sheet_views.contains_key(&sheet));
+            a.workspace.close(closed).unwrap();
+            a.sync_active_view();
+            assert!(!a.sheet_views.contains_key(&sheet));
+            assert!(weak.upgrade().is_none());
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn r33_open_as_dispatch_enablement_and_session_choice() {
@@ -762,7 +786,7 @@ mod tests {
         open_path(&mut a, &webp);
         settle_images(&mut a);
         assert_eq!(
-            a.view.image_preview.image.as_ref().unwrap().logical_size,
+            a.view.image_preview.image().unwrap().logical_size,
             [240., 144.]
         );
         let file_menu = a
@@ -783,7 +807,7 @@ mod tests {
             &serde_json::from_str(&menu_text.args).unwrap(),
         );
         settle_images(&mut a);
-        assert!(a.view.image_preview.image.is_none());
+        assert!(a.view.image_preview.image().is_none());
         assert!(a.workspace.editor().binary.is_some());
         assert_eq!(
             a.workspace.tabs[a.workspace.active].open_as(),
@@ -819,7 +843,7 @@ mod tests {
         );
         assert_eq!(a.workspace.tabs[a.workspace.active].sheet, sheet);
         settle_images(&mut a);
-        assert!(a.view.image_preview.image.is_some());
+        assert!(a.view.image_preview.image().is_some());
 
         a.run_named(None, "show_overlay", &json!({"overlay":"command_palette"}));
         a.handle_text_input(
@@ -840,7 +864,7 @@ mod tests {
             a.workspace.tabs[a.workspace.active].open_as(),
             Some(OpenAs::Text)
         );
-        assert!(a.view.image_preview.image.is_none());
+        assert!(a.view.image_preview.image().is_none());
     }
     /// Image tabs are named by the file, before and after decoding, whether or not they
     /// were ever shown; only an image whose decode failed (and whose bytes are shown) says
@@ -928,7 +952,7 @@ mod tests {
         settle_images(&mut a);
         assert_eq!(a.panels.message, "6 × 4");
         let size = |a: &mut App| {
-            let image = a.view.image_preview.image.clone().expect("decoded");
+            let image = a.view.image_preview.image().expect("decoded");
             image.logical_size
         };
         assert_eq!(size(&mut a), [6., 4.]);
@@ -942,7 +966,7 @@ mod tests {
         assert!(a.workspace.editor().settings.revision() > revision);
         for _ in 0..3 {
             a.scene();
-            assert!(a.view.image_preview.image.is_some(), "picture dropped");
+            assert!(a.view.image_preview.image().is_some(), "picture dropped");
             assert!(!a.view.image_preview.failed);
             assert!(!a.workspace.tabs[0].label().contains("[hex]"));
             std::thread::park_timeout(std::time::Duration::from_millis(1));

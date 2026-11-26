@@ -31,7 +31,6 @@ use std::{
     fs,
     io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
 };
 use vel_buffer::{Buffer, Change, ChangeSet, Edit, EditKind, ViewId};
 use vel_config::settings::EditorSettings;
@@ -264,26 +263,37 @@ pub fn encoding(name: &str) -> Result<Codec, String> {
             .ok_or_else(|| format!("unknown encoding {name}"))
     }
 }
-/// Resolves a fallback, returning a diagnostic once per invalid name per process.
+/// Resolves a fallback, suppressing recently reported invalid names.
 /// Invalid settings use Windows-1252 so a single bad preference cannot block every open.
 pub fn fallback_encoding(name: &str) -> (Codec, Option<String>) {
     match encoding(name) {
         Ok(codec) => (codec, None),
         Err(error) => {
-            static REPORTED: std::sync::OnceLock<
-                std::sync::Mutex<std::collections::BTreeSet<String>>,
-            > = std::sync::OnceLock::new();
-            let first = REPORTED
-                .get_or_init(Default::default)
-                .lock()
-                .expect("encoding diagnostics")
-                .insert(name.into());
+            let first = first_encoding_note(name);
             (
                 Codec::Standard(WINDOWS_1252),
                 first.then(|| format!("{error}; using Western (Windows 1252)")),
             )
         }
     }
+}
+
+fn first_encoding_note(name: &str) -> bool {
+    use std::hash::{Hash as _, Hasher as _};
+    static REPORTED: std::sync::Mutex<Option<std::collections::HashSet<u64>>> =
+        std::sync::Mutex::new(None);
+    let mut hash = std::hash::DefaultHasher::new();
+    name.hash(&mut hash);
+    let mut reported = REPORTED.lock().expect("encoding diagnostics");
+    let reported = reported.get_or_insert_with(Default::default);
+    let key = hash.finish();
+    if reported.contains(&key) {
+        return false;
+    }
+    if reported.len() == 1024 {
+        reported.clear();
+    }
+    reported.insert(key)
 }
 /// Format for an explicit encoding choice; only names ending in "with BOM" add a BOM.
 pub fn encoding_format(name: &str, line_ending: LineEnding) -> Result<Format, String> {
@@ -949,22 +959,74 @@ fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 pub use save::{Saved, save, save_report, save_report_with_expected, save_with_identity};
 #[cfg(unix)]
 pub use save_journal::{RecoveredSave, recover_pending_save, recover_saves};
+const WATCH_KEYS: usize = 4096;
+const WATCH_BYTES: usize = 4 * 1024 * 1024;
+type Stamp = Option<(u64, std::time::SystemTime)>;
+
+#[derive(Debug, Default)]
+struct WatchEvents {
+    paths: std::collections::HashSet<PathBuf>,
+    bytes: usize,
+    rescan: bool,
+    error: Option<String>,
+}
+impl WatchEvents {
+    fn push(&mut self, path: PathBuf) {
+        if self.rescan || self.paths.contains(&path) {
+            return;
+        }
+        let bytes = watch_charge(&path);
+        if self.paths.len() == WATCH_KEYS || self.bytes + bytes > WATCH_BYTES {
+            self.rescan = true;
+            self.paths = Default::default();
+            self.bytes = 0;
+        } else {
+            self.paths.insert(path);
+            self.bytes += bytes;
+        }
+    }
+}
+
+fn watch_charge(path: &PathBuf) -> usize {
+    path.capacity().saturating_add(128)
+}
+
 /// Parent-directory watcher so atomic renames do not detach file monitoring.
 #[derive(Debug)]
 pub struct Watcher {
     watcher: notify::RecommendedWatcher,
-    events: Receiver<notify::Result<notify::Event>>,
-    directories: std::collections::BTreeSet<PathBuf>,
-    files: std::cell::RefCell<
-        std::collections::BTreeMap<PathBuf, Option<(u64, std::time::SystemTime)>>,
-    >,
+    events: std::sync::Arc<std::sync::Mutex<WatchEvents>>,
+    directories: std::collections::BTreeMap<PathBuf, (usize, bool)>,
+    files: std::cell::RefCell<std::collections::BTreeMap<PathBuf, (Stamp, bool)>>,
+    registration_bytes: usize,
+    overflow: bool,
 }
 impl Watcher {
     /// Starts native notifications; polling never blocks the UI.
     pub fn new() -> Result<Self, String> {
-        let (tx, events) = mpsc::channel();
-        let watcher = notify::recommended_watcher(move |event| {
-            let _ = tx.send(event);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(WatchEvents::default()));
+        let sender = events.clone();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let mut pending = sender.lock().expect("watch notifications");
+            match event {
+                Ok(event) if event.need_rescan() => {
+                    *pending = WatchEvents {
+                        rescan: true,
+                        ..Default::default()
+                    };
+                }
+                Ok(event)
+                    if event.kind.is_modify()
+                        || event.kind.is_create()
+                        || event.kind.is_remove() =>
+                {
+                    for path in event.paths {
+                        pending.push(path);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => pending.error = Some(e.to_string()),
+            }
         })
         .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -972,55 +1034,214 @@ impl Watcher {
             events,
             directories: Default::default(),
             files: Default::default(),
+            registration_bytes: 0,
+            overflow: false,
         })
     }
     /// Watches a file's parent once, covering save/replacement/delete/recreate.
     pub fn watch(&mut self, path: &Path) -> Result<(), String> {
-        use notify::Watcher as _;
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
-        let file = parent.join(path.file_name().ok_or("watch requires a file path")?);
-        self.files
-            .borrow_mut()
-            .entry(file.clone())
-            .or_insert_with(|| file_stamp(&file));
-        if self.directories.insert(parent.clone()) {
-            self.watcher
-                .watch(&parent, notify::RecursiveMode::NonRecursive)
-                .map_err(|e| e.to_string())?;
+        if let Some((_, seen)) = self.files.get_mut().get_mut(path) {
+            *seen = true;
+            return Ok(());
+        }
+        let file = path.to_owned();
+        let parent = watch_parent(path);
+        let register = !self.directories.contains_key(parent);
+        let directory_bytes = (parent.as_os_str().len() + 128) * usize::from(register);
+        let bytes = watch_charge(&file) + directory_bytes;
+        if self.files.get_mut().len() + self.directories.len() + 1 + usize::from(register)
+            > WATCH_KEYS
+            || self.registration_bytes + bytes > WATCH_BYTES
+        {
+            self.overflow = true;
+            return Ok(());
+        }
+        self.registration_bytes += bytes;
+        self.files.get_mut().insert(file, (file_stamp(path), true));
+        self.directories.entry(parent.to_owned()).or_default().0 += 1;
+        if register {
+            self.register(parent)?;
         }
         Ok(())
+    }
+    fn register(&mut self, dir: &Path) -> Result<(), String> {
+        use notify::Watcher as _;
+        self.watcher
+            .watch(dir, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())
+    }
+    fn unregister_unused(&mut self) {
+        use notify::Watcher as _;
+        self.directories.retain(|dir, (files, folder)| {
+            if *files != 0 || *folder {
+                return true;
+            }
+            let _ = self.watcher.unwatch(dir);
+            self.registration_bytes -= dir.as_os_str().len() + 128;
+            false
+        });
+    }
+    /// Releases a file after its last open sheet leaves.
+    pub fn unwatch(&mut self, path: &Path) {
+        if let Some((file, _)) = self.files.get_mut().remove_entry(path) {
+            let parent = watch_parent(path);
+            self.registration_bytes -= watch_charge(&file);
+            let (count, folder) = self.directories.get_mut(parent).expect("watched parent");
+            *count -= 1;
+            if *count == 0 && !*folder {
+                use notify::Watcher as _;
+                let _ = self.watcher.unwatch(parent);
+                self.directories.remove(parent);
+                self.registration_bytes -= parent.as_os_str().len() + 128;
+            }
+        }
+    }
+    /// Reconciles bulk workspace changes and shared files against live owners.
+    /// Files beyond the registration budget are covered by a workspace rescan.
+    pub fn reconcile<'a>(
+        &mut self,
+        files: impl Iterator<Item = &'a Path>,
+        folders: impl Iterator<Item = &'a Path>,
+    ) {
+        self.overflow = false;
+        for (_, seen) in self.files.get_mut().values_mut() {
+            *seen = false;
+        }
+        for (_, folder) in self.directories.values_mut() {
+            *folder = false;
+        }
+        // A project root can keep the native watch alive independently of its files.
+        for folder in folders {
+            if let Some(entry) = self.directories.get_mut(folder) {
+                entry.1 = true;
+            } else if self.directories.len() + self.files.get_mut().len() < WATCH_KEYS
+                && self.registration_bytes + folder.as_os_str().len() + 128 <= WATCH_BYTES
+            {
+                let dir = folder.to_owned();
+                self.registration_bytes += dir.as_os_str().len() + 128;
+                let _ = self.register(&dir);
+                self.directories.insert(dir, (0, true));
+            } else {
+                self.overflow = true;
+            }
+        }
+        for file in files {
+            if let Some((_, seen)) = self.files.get_mut().get_mut(file) {
+                *seen = true;
+            } else {
+                // A save-as/rename/bulk restore can reach here before explicit registration
+                // sampled the new name. Compare against the document's loaded stamp once.
+                self.overflow = true;
+                let _ = self.watch(file);
+            }
+        }
+        self.files.get_mut().retain(|file, (_, seen)| {
+            if !*seen {
+                let parent = watch_parent(file);
+                self.registration_bytes -= watch_charge(file);
+                self.directories.get_mut(parent).expect("watched parent").0 -= 1;
+            }
+            *seen
+        });
+        self.unregister_unused();
     }
     /// Drains content/name notifications and checks watched metadata as a fallback
     /// when native event delivery is unavailable (including restricted sessions).
     /// Call at a bounded rate; this does one stat per file and never reads its body.
     pub fn changed(&self) -> Vec<Result<Vec<PathBuf>, String>> {
-        let mut changed: Vec<_> = self
-            .events
-            .try_iter()
-            .filter_map(|event| match event {
-                Ok(e) if e.kind.is_modify() || e.kind.is_create() || e.kind.is_remove() => {
-                    Some(Ok(e.paths))
-                }
-                Ok(_) => None,
-                Err(e) => Some(Err(e.to_string())),
-            })
-            .collect();
-        for (path, previous) in self.files.borrow_mut().iter_mut() {
+        let (mut changes, rescan) = self.take_changes();
+        if rescan {
+            changes.push(Ok(self.files.borrow().keys().cloned().collect()));
+        }
+        changes
+    }
+
+    /// Returns coalesced notifications and whether the caller must rescan live files.
+    pub fn take_changes(&self) -> (Vec<Result<Vec<PathBuf>, String>>, bool) {
+        let mut pending = std::mem::take(&mut *self.events.lock().expect("watch notifications"));
+        let rescan = pending.rescan || self.overflow;
+        for (path, (previous, _)) in self.files.borrow_mut().iter_mut() {
             let current = file_stamp(path);
             if current != *previous {
                 *previous = current;
-                changed.push(Ok(vec![path.clone()]));
+                if !rescan {
+                    pending.push(path.clone());
+                }
             }
         }
-        changed
+        let mut changes = Vec::new();
+        if let Some(error) = pending.error {
+            changes.push(Err(error));
+        }
+        if !pending.paths.is_empty() {
+            changes.push(Ok(pending.paths.into_iter().collect()));
+        }
+        (changes, rescan || pending.rescan)
     }
 }
 
-fn file_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+fn watch_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+fn file_stamp(path: &Path) -> Stamp {
     let metadata = fs::metadata(path).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
+}
+
+#[cfg(test)]
+mod watch_budget_tests {
+    use super::*;
+
+    #[test]
+    fn watch_references_release_after_the_last_file_and_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        let mut watcher = Watcher::new().unwrap();
+        watcher.watch(&a).unwrap();
+        watcher.watch(&b).unwrap();
+        assert_eq!(watcher.directories[root.path()], (2, false));
+        watcher.reconcile(
+            [a.as_path(), b.as_path()].into_iter(),
+            [root.path()].into_iter(),
+        );
+        watcher.unwatch(&a);
+        watcher.unwatch(&b);
+        assert_eq!(watcher.directories[root.path()], (0, true));
+        watcher.reconcile(std::iter::empty(), std::iter::empty());
+        assert!(watcher.files.borrow().is_empty());
+        assert!(watcher.directories.is_empty());
+        assert_eq!(watcher.registration_bytes, 0);
+    }
+
+    #[test]
+    fn notifications_deduplicate_and_overflow_to_one_rescan() {
+        let mut pending = WatchEvents::default();
+        for _ in 0..WATCH_KEYS * 2 {
+            pending.push("same".into());
+        }
+        assert_eq!(pending.paths.len(), 1);
+        for i in 0..WATCH_KEYS {
+            pending.push(format!("path-{i}").into());
+        }
+        assert!(pending.rescan);
+        assert!(pending.paths.is_empty());
+        assert_eq!(pending.bytes, 0);
+        pending.push("late".into());
+        assert!(pending.paths.is_empty());
+    }
+
+    #[test]
+    fn encoding_diagnostics_for_old_names_expire() {
+        let old = "memory-soak-invalid-encoding";
+        first_encoding_note(old);
+        assert!(!first_encoding_note(old));
+        for i in 0..2048 {
+            first_encoding_note(&format!("memory-soak-encoding-{i}"));
+        }
+        assert!(first_encoding_note(old));
+    }
 }

@@ -84,10 +84,9 @@ impl Metrics {
 }
 impl FontMetrics for Metrics {
     fn image_size(&self, source: &vel_minihtml::ImageSource) -> Option<vel_minihtml::Size> {
-        self.images.get(source).map(|i| vel_minihtml::Size {
-            width: i.logical_size[0],
-            height: i.logical_size[1],
-        })
+        self.images
+            .size(source)
+            .map(|[width, height]| vel_minihtml::Size { width, height })
     }
     fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -146,7 +145,8 @@ pub struct Html {
     /// Original markup, retained for sheet/session reconstruction.
     pub source: String,
     document: Document,
-    images: HashMap<String, std::sync::Arc<vel_render::scene::Image>>,
+    images: HashMap<usize, std::rc::Rc<crate::images::Slot>>,
+    image_scratch: HashMap<usize, std::rc::Rc<crate::images::Slot>>,
     remote: Option<Box<RemoteDocument>>,
     key: Option<(u64, u32, u32)>,
     /// Layout display list in document coordinates.
@@ -177,6 +177,7 @@ impl Html {
             source: source.into(),
             document,
             images: HashMap::new(),
+            image_scratch: HashMap::new(),
             remote: None,
             key: None,
             display: DisplayList::default(),
@@ -209,8 +210,7 @@ impl Html {
             return;
         }
         self.display = vel_minihtml::layout(&self.document, options, metrics);
-        self.images.clear();
-        for item in &self.display.items {
+        for (index, item) in self.display.items.iter().enumerate() {
             let DisplayItem::Image { source, .. } = item else {
                 continue;
             };
@@ -221,10 +221,12 @@ impl Html {
                 if d.requested.len() < 128 && !d.requested.contains(url) && remote::request(url) {
                     d.requested.insert(url.clone());
                 }
-            } else if let Some(image) = metrics.images.get(source) {
-                self.images.insert(crate::images::key(source).into(), image);
+            } else if let Some(slot) = metrics.images.acquire(source) {
+                self.image_scratch.insert(index, slot);
             }
         }
+        std::mem::swap(&mut self.images, &mut self.image_scratch);
+        self.image_scratch.clear();
         if let Some(d) = &mut self.remote {
             d.generation = remote::generation();
         }
@@ -375,7 +377,7 @@ impl Html {
         self.clip = clip;
         self.bounds = bounds;
         self.clamp_scroll();
-        for item in &self.display.items {
+        for (index, item) in self.display.items.iter().enumerate() {
             let r = item.rect();
             let rect = Rect {
                 x: bounds.x + f64::from(r.x) - self.scroll.x,
@@ -449,7 +451,7 @@ impl Html {
                 DisplayItem::Image { source, .. } => {
                     let image = match source {
                         ImageSource::Https(url) => remote::get(url),
-                        _ => self.images.get(crate::images::key(source)).cloned(),
+                        _ => self.images.get(&index).and_then(|slot| slot.pixels()),
                     };
                     if let Some(image) = image {
                         layer.surfaces.push(vel_render::scene::Surface::Image(

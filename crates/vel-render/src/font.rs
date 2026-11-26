@@ -175,6 +175,17 @@ pub struct UiRun {
     /// Maximum descent of the resolved faces.
     pub descent: f32,
 }
+const SHAPED_BYTES: usize = 4 * 1024 * 1024;
+const CHOICE_BYTES: usize = 2 * 1024 * 1024;
+const CHOICE_KEYS: usize = 8192;
+type ShapeKey = (
+    String,
+    u32,
+    crate::scene::FontStyle,
+    crate::typography::FontOptions,
+    u64,
+);
+
 /// Lazy system fonts and reusable swash shaping/raster contexts.
 pub struct Fonts {
     families: HashMap<String, u16>,
@@ -186,6 +197,7 @@ pub struct Fonts {
     choices: HashMap<(u16, char), u16>,
     emoji_choices: HashMap<(u16, String), u16>,
     text_choices: HashMap<(u16, String), u16>,
+    choice_bytes: usize,
     options: crate::typography::FontOptions,
     wide_advances: Option<WideAdvances>,
     /// Primary metrics; no fallback face changes the editor grid.
@@ -197,16 +209,8 @@ pub struct Fonts {
     coretext_faces: std::collections::HashSet<u16>,
     scaler: ScaleContext,
     shaper: ShapeContext,
-    shaped: HashMap<
-        (
-            String,
-            u32,
-            crate::scene::FontStyle,
-            crate::typography::FontOptions,
-            u64,
-        ),
-        Vec<ShapedGlyph>,
-    >,
+    shaped: HashMap<ShapeKey, Vec<ShapedGlyph>>,
+    shaped_bytes: usize,
     ascii: [u16; 128],
     ascii_complete: bool,
     /// Primary font advance at 13 points.
@@ -271,6 +275,7 @@ impl Fonts {
             choices: HashMap::new(),
             emoji_choices: HashMap::new(),
             text_choices: HashMap::new(),
+            choice_bytes: 0,
             options: Default::default(),
             wide_advances: None,
             metrics: crate::typography::FontMetrics {
@@ -285,6 +290,7 @@ impl Fonts {
             scaler: ScaleContext::new(),
             shaper: ShapeContext::new(),
             shaped: HashMap::new(),
+            shaped_bytes: 0,
             ascii_complete: ascii[32..127].iter().all(|g| *g != 0),
             ascii,
             cell,
@@ -351,27 +357,75 @@ impl Fonts {
                     }
                 })
                 .unwrap_or(base);
-            match key {
-                FallbackKey::Scalar(c) => {
-                    self.choices.insert((base, c), face);
-                }
-                FallbackKey::Emoji(cluster) => {
-                    self.emoji_choices.insert((base, cluster), face);
-                }
-                FallbackKey::Text(cluster) => {
-                    // Both a color-only answer and no coverage are settled results.
-                    self.text_choices.insert((base, cluster), face);
-                }
-            }
+            self.remember_choice(base, key, face);
         }
         if changed {
             self.shaped.clear();
+            self.shaped_bytes = 0;
         }
         changed
     }
     /// Whether another display-linked frame should poll the cascade worker.
     pub fn fallback_pending(&self) -> bool {
         self.fallback.pending()
+    }
+    fn remember_choice(&mut self, base: u16, key: vel_platform::fonts::FallbackKey, face: u16) {
+        use vel_platform::fonts::FallbackKey;
+        // Hash buckets, load-factor/growth slack, and cluster string capacity.
+        let charge = 128
+            + match &key {
+                FallbackKey::Scalar(_) => 0,
+                FallbackKey::Emoji(s) | FallbackKey::Text(s) => s.capacity(),
+            };
+        if charge > CHOICE_BYTES {
+            return;
+        }
+        if self.choices.len() + self.emoji_choices.len() + self.text_choices.len() >= CHOICE_KEYS
+            || self.choice_bytes + charge > CHOICE_BYTES
+        {
+            self.choices = HashMap::new();
+            self.emoji_choices = HashMap::new();
+            self.text_choices = HashMap::new();
+            self.choice_bytes = 0;
+        }
+        let previous = match key {
+            FallbackKey::Scalar(c) => self.choices.insert((base, c), face),
+            FallbackKey::Emoji(s) => self.emoji_choices.insert((base, s), face),
+            FallbackKey::Text(s) => self.text_choices.insert((base, s), face),
+        };
+        if previous.is_none() {
+            self.choice_bytes += charge;
+        }
+    }
+
+    /// Drops optional, document-warmed caches and fallback faces. The primary
+    /// face and metrics stay; the renderer must discard identities at the same time.
+    pub fn clear_document_caches(&mut self) {
+        self.shaped = HashMap::new();
+        self.shaped_bytes = 0;
+        self.choices = HashMap::new();
+        self.emoji_choices = HashMap::new();
+        self.text_choices = HashMap::new();
+        self.choice_bytes = 0;
+        self.fallback = Default::default();
+        self.shaper = ShapeContext::new();
+        self.scaler = ScaleContext::new();
+        if self.faces.len() > 1 || self.files.len() > 1 {
+            self.faces.truncate(1);
+            self.faces.shrink_to_fit();
+            let primary = &self.faces[0];
+            self.files = HashMap::from([(primary.path.clone(), primary.bytes.clone())]);
+            self.face_files = HashMap::from([((primary.path.clone(), primary.name.clone()), 0)]);
+            self.families = HashMap::new();
+            self.variants = HashMap::new();
+            #[cfg(target_os = "macos")]
+            self.coretext_faces.clear();
+        }
+    }
+
+    /// Retained payload of the optional document shaping and cascade caches.
+    pub fn document_cache_bytes(&self) -> (usize, usize) {
+        (self.shaped_bytes, self.choice_bytes)
     }
     /// Changes shaping features without changing face/raster identities.
     pub fn set_options(&mut self, options: crate::typography::FontOptions) {
@@ -395,7 +449,11 @@ impl Fonts {
                 !face.color_glyphs
                     && cluster_characters(cluster).all(|c| face.reference().charmap().map(c) != 0)
             }) {
-                self.text_choices.insert(key, face as u16);
+                self.remember_choice(
+                    base,
+                    vel_platform::fonts::FallbackKey::Text(key.1),
+                    face as u16,
+                );
                 return face as u16;
             }
             self.fallback
@@ -420,7 +478,11 @@ impl Fonts {
                 cluster_characters(cluster).all(|c| f.reference().charmap().map(c) != 0)
             }) {
                 chosen = face as u16;
-                self.choices.insert((base, scalar), chosen);
+                self.remember_choice(
+                    base,
+                    vel_platform::fonts::FallbackKey::Scalar(scalar),
+                    chosen,
+                );
                 continue;
             }
             self.fallback
@@ -695,15 +757,27 @@ impl Fonts {
                 }
             });
         }
-        if glyphs.iter().any(|g| g.id == 0) && self.warnings.len() < 32 {
-            self.warnings
-                .push(format!("missing glyph in {text:?}; rendered .notdef"));
+        if self.warnings.len() < 32 && glyphs.iter().any(|g| g.id == 0) {
+            self.warnings.push(format!(
+                "missing glyph in {:?}; rendered .notdef",
+                text.get(..text.floor_char_boundary(text.len().min(256)))
+                    .unwrap_or(text)
+            ));
         }
-        if self.shaped.len() >= 1024 {
-            self.shaped.clear();
-        }
-        self.shaped.insert(key, glyphs.clone());
+        self.remember_shaped(key, &glyphs);
         glyphs
+    }
+
+    fn remember_shaped(&mut self, key: ShapeKey, glyphs: &[ShapedGlyph]) {
+        let charge = 256 + key.0.capacity() + size_of_val(glyphs);
+        if charge <= SHAPED_BYTES {
+            if self.shaped.len() >= 1024 || self.shaped_bytes + charge > SHAPED_BYTES {
+                self.shaped = HashMap::new();
+                self.shaped_bytes = 0;
+            }
+            self.shaped.insert(key, glyphs.to_vec());
+            self.shaped_bytes += charge;
+        }
     }
     /// Shapes a proportional UI run using the same face/fallback/raster stack as painting.
     /// Family lists are tried in order; generic CSS families map to native system faces.
@@ -876,6 +950,53 @@ impl Fonts {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn distinct_cjk_and_large_shaped_runs_fit_cpu_budgets_and_clear_on_close() {
+    use vel_platform::fonts::FallbackKey;
+    let mut fonts = Fonts::load().unwrap();
+    let baseline = fonts.file_storage_bytes();
+    let mut scalars = (0x3400..=0x9fff)
+        .chain(0x20000..)
+        .filter_map(char::from_u32)
+        .take(30_000);
+    for _ in 0..300 {
+        let run: String = scalars.by_ref().take(100).collect();
+        for c in run.chars() {
+            fonts.remember_choice(0, FallbackKey::Scalar(c), 0);
+        }
+        fonts.shape(&run, 13.);
+        assert!(fonts.choices.len() <= CHOICE_KEYS);
+        assert!(fonts.choice_bytes <= CHOICE_BYTES);
+        assert!(fonts.shaped_bytes <= SHAPED_BYTES);
+    }
+    let glyph = ShapedGlyph {
+        face: 0,
+        id: 1,
+        x: 0.,
+        y: 0.,
+        source: [0, 1],
+    };
+    let oversized = vec![glyph; SHAPED_BYTES / size_of::<ShapedGlyph>() + 1];
+    let before = fonts.shaped_bytes;
+    fonts.remember_shaped(
+        (
+            "oversized".into(),
+            832,
+            Default::default(),
+            Default::default(),
+            0,
+        ),
+        &oversized,
+    );
+    assert_eq!(fonts.shaped_bytes, before);
+    assert!(before > 0);
+    fonts.clear_document_caches();
+    assert_eq!(fonts.document_cache_bytes(), (0, 0));
+    assert_eq!(fonts.shaped.capacity() + fonts.choices.capacity(), 0);
+    assert_eq!(fonts.file_storage_bytes(), baseline);
 }
 /// Use straight-alpha RGBA for masks. Swash color bitmaps are retained as delivered.
 pub fn rgba(image: &Image) -> Vec<u8> {

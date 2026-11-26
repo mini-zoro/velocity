@@ -3,7 +3,7 @@ pub(crate) const NONE: u32 = u32::MAX;
 const PLAIN_ASCII: u32 = 1 << 31;
 const SHORT_LENGTH_BITS: u32 = 10;
 const SHORT_LENGTH_MASK: u32 = (1 << SHORT_LENGTH_BITS) - 1;
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Name {
     pub(crate) start: u32,
     pub(crate) mask: u64,
@@ -17,7 +17,10 @@ pub(crate) struct Names {
     arena: Vec<String>,
     lengths: crate::slab::Slab<u32>,
     pub(crate) records: crate::slab::Slab<Name>,
+    uses: crate::slab::Slab<u32>,
     table: Vec<u32>,
+    pub(crate) dead: usize,
+    pub(crate) dead_bytes: usize,
 }
 fn hash(text: &str) -> usize {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -49,6 +52,9 @@ impl Names {
         (&self.arena[chunk][offset..offset + len], core)
     }
     pub(crate) fn find(&self, text: &str) -> Option<u32> {
+        self.probe(text).filter(|&id| self.uses[id as usize] != 0)
+    }
+    fn probe(&self, text: &str) -> Option<u32> {
         if self.table.is_empty() {
             return None;
         }
@@ -65,7 +71,13 @@ impl Names {
         }
     }
     pub(crate) fn intern(&mut self, text: &str) -> u32 {
-        if let Some(id) = self.find(text) {
+        if let Some(id) = self.probe(text) {
+            let uses = &mut self.uses[id as usize];
+            if *uses == 0 {
+                self.dead -= 1;
+                self.dead_bytes -= Self::entry_bytes(text.len());
+            }
+            *uses += 1;
             return id;
         }
         if (self.records.len() + 1) * 10 > self.table.len() * 7 {
@@ -114,6 +126,7 @@ impl Names {
             length
         };
         self.lengths.push(packed);
+        self.uses.push(1);
         self.records.push(Name {
             start,
             mask: mask(text),
@@ -127,9 +140,41 @@ impl Names {
         self.table[slot] = id;
         id
     }
+    pub(crate) fn release(&mut self, id: u32) {
+        self.uses[id as usize] -= 1;
+        if self.uses[id as usize] == 0 {
+            self.dead += 1;
+            self.dead_bytes += Self::entry_bytes(self.text(id).len());
+        }
+    }
+    fn entry_bytes(length: usize) -> usize {
+        size_of::<Name>() + 3 * size_of::<u32>() + length
+    }
+    pub(crate) fn compact(&mut self) -> Vec<u32> {
+        let mut compact = Self::default();
+        let ids = (0..self.records.len())
+            .map(|old| {
+                let uses = self.uses[old];
+                if uses == 0 {
+                    return NONE;
+                }
+                let id = compact.intern(self.text(old as u32));
+                let n = &mut compact.records[id as usize];
+                let source = self.records[old];
+                n.head = source.head;
+                n.frequency = source.frequency;
+                n.definitions = source.definitions;
+                compact.uses[id as usize] = uses;
+                id
+            })
+            .collect();
+        *self = compact;
+        ids
+    }
     pub(crate) fn storage_bytes(&self) -> usize {
         self.arena.iter().map(String::capacity).sum::<usize>()
             + self.lengths.capacity() * 4
+            + self.uses.capacity() * 4
             + self.records.capacity() * std::mem::size_of::<Name>()
             + self.table.capacity() * 4
     }

@@ -273,15 +273,15 @@ fn r20_real_loader_opens_image_and_keeps_nonmatching_hex() {
     std::fs::copy(&image, &bin).unwrap();
     let mut a = app("", None, sessions());
     a.open_received_paths(&[image]).unwrap();
-    until(&mut a, |a| a.view.image_preview.image.is_some());
-    let preview = a.view.image_preview.image.as_ref().unwrap();
+    until(&mut a, |a| a.view.image_preview.image().is_some());
+    let preview = a.view.image_preview.image().unwrap();
     assert_eq!((preview.width, preview.height), (2, 3));
     assert!(a.workspace.editor().read_only);
     assert!(a.view.scene(a.workspace.editor()).layers.iter().flat_map(|l| &l.surfaces)
         .any(|s| matches!(s, vel_render::scene::Surface::Image(i) if i.image.logical_size == [2., 3.])));
     a.open_received_paths(&[bin]).unwrap();
     until(&mut a, |a| a.workspace.editor().binary.is_some());
-    assert!(a.view.image_preview.image.is_none());
+    assert!(a.view.image_preview.image().is_none());
 }
 
 #[test]
@@ -982,7 +982,7 @@ fn r20_hidden_image_decode_is_cancelled_and_folder_edits_are_independent() {
     until(&mut a, |a| {
         a.workspace.folders.iter().any(|f| f.path == folder)
     });
-    assert!(a.view.image_preview.image.is_none());
+    assert!(a.view.image_preview.image().is_none());
     assert_eq!(
         vel_session::project::Project::load(&project)
             .unwrap()
@@ -1006,7 +1006,7 @@ fn r20_hex_and_image_carets_do_not_break_navigation() {
         a.run_named(None, "open_file", &json!({"file":path}));
         until(&mut a, |a| a.workspace.editor().binary.is_some());
         if i == 0 {
-            until(&mut a, |a| a.view.image_preview.image.is_some());
+            until(&mut a, |a| a.view.image_preview.image().is_some());
         }
         key(&mut a, "right");
         let byte = a.workspace.editor().caret;
@@ -1120,7 +1120,7 @@ fn round20_hex_image_default_command_sweep() {
                         tab.path.as_deref() == Some(&file) && tab.editor.binary.is_some()
                     });
                     if name == "picture.png" {
-                        until(&mut a, |a| a.view.image_preview.image.is_some());
+                        until(&mut a, |a| a.view.image_preview.image().is_some());
                     }
                     a.panels.focus_editor_for_context();
                     a.workspace.editor_mut().keymap.cancel();

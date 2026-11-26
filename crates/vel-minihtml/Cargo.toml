@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+blake3 = "1"
 vel-theme = { path = "../vel-theme" }
 vel-color-scheme = { path = "../vel-color-scheme" }
 serde_json = "1"

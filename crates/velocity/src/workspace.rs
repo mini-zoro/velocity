@@ -851,6 +851,7 @@ pub struct Workspace {
     pub folders: Vec<vel_search::project::Folder>,
     pub(crate) transient_folders: std::collections::BTreeSet<PathBuf>,
     pub tabs: Vec<Tab>,
+    pub(crate) closed_sheet_generation: u64,
     pub active: usize,
     /// An empty window retains an input adapter but has no workbench sheet.
     pub(crate) empty: bool,
@@ -2365,6 +2366,7 @@ impl Workspace {
             folders,
             transient_folders: Default::default(),
             tabs: vec![tab],
+            closed_sheet_generation: 0,
             active: 0,
             empty,
             closed_files: Vec::new(),
@@ -3482,7 +3484,17 @@ impl Workspace {
             group.remove(sheet);
         }
         let large = tab.editor.text.len_bytes() >= vel_platform::memory_pressure::LARGE_WORK_BYTES;
-        self.tabs.remove(index);
+        let closed = self.tabs.remove(index);
+        self.closed_sheet_generation = self.closed_sheet_generation.wrapping_add(1);
+        if let Some(path) = closed.path.as_deref()
+            && let Some(watcher) = self.watcher.as_mut()
+            && !self.tabs.iter().any(|tab| {
+                !tab.goto_preview && tab.lazy.is_none() && tab.path.as_deref() == Some(path)
+            })
+        {
+            watcher.unwatch(path);
+        }
+        drop(closed);
         if large {
             vel_platform::memory_pressure::request();
         }
@@ -3711,7 +3723,15 @@ impl Workspace {
     /// Process watcher notifications and release deferred changes when their document
     /// becomes active. A visible clone can own the buffer without being the active sheet.
     pub(crate) fn apply_file_changes(&mut self, events: Vec<Result<Vec<PathBuf>, String>>) -> bool {
-        let mut paths = Vec::new();
+        self.apply_watch_changes(events, false)
+    }
+
+    fn apply_watch_changes(
+        &mut self,
+        events: Vec<Result<Vec<PathBuf>, String>>,
+        rescan: bool,
+    ) -> bool {
+        let mut paths = std::collections::HashSet::new();
         for event in events {
             match event {
                 Ok(changes) => paths.extend(changes),
@@ -3734,7 +3754,7 @@ impl Workspace {
             let Some(path) = tab.path.as_ref() else {
                 continue;
             };
-            let notified = paths.contains(path);
+            let notified = rescan || paths.contains(path);
             if !notified && !tab.reload_deferred {
                 continue;
             }
@@ -3985,17 +4005,25 @@ impl Workspace {
                 changed = true;
             }
         }
-        let events = self
+        let (events, rescan) = self
             .watcher
-            .as_ref()
-            .map(Watcher::changed)
-            .unwrap_or_default();
+            .as_mut()
+            .map_or_else(Default::default, |watcher| {
+                watcher.reconcile(
+                    self.tabs
+                        .iter()
+                        .filter(|tab| !tab.goto_preview && tab.lazy.is_none())
+                        .filter_map(|tab| tab.path.as_deref()),
+                    self.folders.iter().map(|folder| folder.path.as_path()),
+                );
+                watcher.take_changes()
+            });
         for sheet in failed_documents {
             if let Some(index) = self.sheet_index(sheet) {
                 let _ = self.fail_shared_document(index);
             }
         }
-        changed |= self.apply_file_changes(events);
+        changed |= self.apply_watch_changes(events, rescan);
         self.reconcile_installs();
         let had_pending_writes = !self.settings_writes.is_empty();
         let mut settled_settings = false;

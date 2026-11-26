@@ -58,6 +58,20 @@ pub struct Search {
     pub options: Options,
     engine: Engine,
 }
+type MatchPreview = (Vec<Range<usize>>, usize);
+
+#[cfg(test)]
+#[test]
+fn dense_search_retains_only_navigation_ranges_but_counts_every_match() {
+    let doc = Text::from("x".repeat(400_000));
+    let search = Search::new("x", Options::default()).unwrap();
+    let (matches, count) = search.find_preview(&doc, &[]);
+    assert_eq!(count, 400_000);
+    assert_eq!(matches.len(), 100_000);
+    assert_eq!(matches.last(), Some(&(99_999..100_000)));
+    assert!(matches.capacity() * size_of::<Range<usize>>() <= 16 * 1024 * 1024);
+}
+
 impl Search {
     /// Whether this query needs the bounded, contiguous Perl engine.
     pub fn uses_perl(&self) -> bool {
@@ -190,6 +204,82 @@ impl Search {
         matches.sort_by_key(|r| (r.start, r.end));
         matches.dedup();
         Ok(Some(matches))
+    }
+
+    /// Counts all matches, retaining at most the navigation budget.
+    pub fn find_preview(&self, text: &Text, ranges: &[Range<usize>]) -> MatchPreview {
+        self.preview_cancel(text, ranges, || false)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    fn preview_cancel(
+        &self,
+        text: &Text,
+        ranges: &[Range<usize>],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<MatchPreview>, String> {
+        if self.query.is_empty() {
+            return Ok(Some((Vec::new(), 0)));
+        }
+        const LIMIT: usize = 100_000;
+        const _: () =
+            assert!(LIMIT.next_power_of_two() * size_of::<Range<usize>>() <= 16 * 1024 * 1024);
+        let all = 0..text.len_bytes();
+        let ranges = if ranges.is_empty() {
+            std::slice::from_ref(&all)
+        } else {
+            ranges
+        };
+        // Editor selection scopes are sorted and disjoint. The general API accepts
+        // overlapping scopes too; preserve its exact sorted, deduplicated semantics.
+        if ranges.windows(2).any(|pair| pair[0].end > pair[1].start) {
+            return Ok(self.find_cancel(text, ranges, cancelled)?.map(|mut hits| {
+                let count = hits.len();
+                hits.truncate(LIMIT);
+                hits.shrink_to_fit();
+                (hits, count)
+            }));
+        }
+        let mut hits = Vec::new();
+        let mut count = 0;
+        let mut last = None;
+        let mut visit = |hit: Range<usize>| {
+            if last.as_ref() == Some(&hit) {
+                return;
+            }
+            last = Some(hit.clone());
+            count += 1;
+            if hits.len() < LIMIT {
+                hits.push(hit);
+            }
+        };
+        match &self.engine {
+            Engine::Perl(re) => {
+                let Some(input) = perl::materialize(text, &cancelled)? else {
+                    return Ok(None);
+                };
+                if !perl::visit(re, &input, ranges, &cancelled, visit)? {
+                    return Ok(None);
+                }
+            }
+            Engine::Rope(re) => {
+                for range in ranges {
+                    let input = Input::new(ChunkCursor::from(text)).range(range.clone());
+                    for found in re.find_iter(input) {
+                        if cancelled() {
+                            return Ok(None);
+                        }
+                        visit(found.start()..found.end());
+                    }
+                    if cancelled() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        Ok(Some((hits, count)))
     }
     /// Chooses the next/previous match. `current` is skipped, including a zero-width match.
     pub fn next(
@@ -493,6 +583,8 @@ pub struct Matches {
     pub revision: u64,
     /// Sorted UTF-8 matches.
     pub ranges: Vec<Range<usize>>,
+    /// Total matches, including beyond the navigation budget.
+    pub count: usize,
     /// A runtime limit prevented this search from completing.
     pub error: Option<String>,
 }
@@ -522,18 +614,20 @@ impl Default for Worker {
                         if current.load(Ordering::Acquire) != id {
                             continue;
                         }
-                        let result = search
-                            .find_cancel(&text, &ranges, || current.load(Ordering::Relaxed) != id);
+                        let result = search.preview_cancel(&text, &ranges, || {
+                            current.load(Ordering::Relaxed) != id
+                        });
                         if current.load(Ordering::Acquire) == id {
-                            let (ranges, error) = match result {
-                                Ok(Some(ranges)) => (ranges, None),
+                            let ((ranges, count), error) = match result {
+                                Ok(Some(result)) => (result, None),
                                 Ok(None) => continue,
-                                Err(error) => (Vec::new(), Some(error)),
+                                Err(error) => ((Vec::new(), 0), Some(error)),
                             };
                             let _ = results.send(Matches {
                                 generation: id,
                                 revision,
                                 ranges,
+                                count,
                                 error,
                             });
                         }
