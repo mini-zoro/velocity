@@ -1,14 +1,15 @@
 //! Window geometry, monitor policy, and DWM decoration.
 use super::{Event, Host, WindowHandle, model};
 use crate::{
-    Appearance, DisplayStatus, FrameReason, Rect, Size, accessibility, clamp_window_frame,
+    Appearance, DisplayStatus, FrameReason, Point, Rect, Size, accessibility,
+    anchored_window_frame, clamp_window_frame,
 };
 use std::{
     mem::size_of,
     ptr::{null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, RECT, WPARAM},
+    Foundation::{HWND, LPARAM, POINT, RECT, WPARAM},
     Graphics::{
         Dwm::{
             DWMWA_CAPTION_COLOR, DWMWA_CLOAKED, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -315,6 +316,41 @@ impl WindowHandle {
     /// Saves the restored outer frame in physical virtual-screen coordinates.
     pub fn frame(&self) -> Option<Rect> {
         self.0.normal_frame.get()
+    }
+
+    /// Places a client point at the desired screen location, within the monitor work area.
+    pub fn position_content_point(&self, local: Point, desired: Point) {
+        let (Some(hwnd), Some(current)) = (self.hwnd(), self.screen_point(local)) else {
+            return;
+        };
+        let mut frame = RECT::default();
+        // SAFETY: Read the current frame of this GUI thread's live HWND.
+        if unsafe { GetWindowRect(hwnd.as_ptr(), &mut frame) } == 0 {
+            return;
+        }
+        let point = POINT {
+            x: desired.x.round() as i32,
+            y: desired.y.round() as i32,
+        };
+        // SAFETY: A read-only monitor query in physical desktop coordinates.
+        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+        let area = monitor_info(monitor).map(|info| info.monitorInfo.rcWork);
+        let to_rect = |r: RECT| Rect {
+            x: f64::from(r.left),
+            y: f64::from(r.top),
+            width: f64::from(r.right - r.left),
+            height: f64::from(r.bottom - r.top),
+        };
+        let clamped = anchored_window_frame(to_rect(frame), current, desired, area.map(to_rect));
+        self.0.set_bounds(
+            RECT {
+                left: clamped.x.round() as i32,
+                top: clamped.y.round() as i32,
+                right: (clamped.x + clamped.width).round() as i32,
+                bottom: (clamped.y + clamped.height).round() as i32,
+            },
+            0,
+        );
     }
 
     /// Restores the requested outer frame onto a current monitor's work area.

@@ -41,6 +41,19 @@ pub use windows::WindowHandle;
 
 use std::time::Instant;
 
+/// Premultiplied sRGB RGBA8 pixels for the floating drag image, top row first.
+#[derive(Debug)]
+pub struct DragImage {
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+    /// Pixels per logical point.
+    pub scale: f64,
+    /// Tightly packed pixels, including any transparent padding.
+    pub rgba: Vec<u8>,
+}
+
 /// The user's accent color in straight sRGB: the macOS control accent, or the Windows accent
 /// color. `None` when the system has none (other platforms) or it cannot be read.
 pub fn system_accent_color() -> Option<[f32; 4]> {
@@ -219,6 +232,60 @@ pub fn clamp_window_frame(frame: Rect, screens: &[Rect]) -> Option<Rect> {
         width,
         height,
     })
+}
+
+/// Moves the native frame by the same screen-space delta as its content anchor.
+/// Both points use the same axes and units as the frame, including on AppKit.
+#[cfg(any(target_os = "macos", windows, test))]
+fn anchored_window_frame(
+    frame: Rect,
+    current: Point,
+    desired: Point,
+    work_area: Option<Rect>,
+) -> Rect {
+    let frame = Rect {
+        x: frame.x + desired.x - current.x,
+        y: frame.y + desired.y - current.y,
+        ..frame
+    };
+    work_area
+        .and_then(|area| clamp_window_frame(frame, &[area]))
+        .unwrap_or(frame)
+}
+
+#[test]
+fn anchored_window_preserves_tab_position_and_clamps_at_screen_edges() {
+    let frame = Rect {
+        x: 20.,
+        y: 110.,
+        width: 400.,
+        height: 300.,
+    };
+    let current = Point { x: 132., y: 380. };
+    let desired = Point { x: 390., y: 470. };
+    let placed = anchored_window_frame(frame, current, desired, None);
+    assert_eq!(
+        placed,
+        Rect {
+            x: 278.,
+            y: 200.,
+            ..frame
+        }
+    );
+    let work_area = Rect {
+        x: 0.,
+        y: 23.,
+        width: 600.,
+        height: 450.,
+    };
+    assert_eq!(
+        anchored_window_frame(frame, current, desired, Some(work_area)),
+        Rect {
+            x: 200.,
+            y: 173.,
+            ..frame
+        },
+    );
 }
 
 #[cfg(test)]
@@ -422,6 +489,8 @@ pub trait AppHandler: 'static {
     fn on_command(&mut self, _window: &WindowHandle, _command: Command) {}
     /// Receive mouse button/drag events.
     fn on_mouse(&mut self, _window: &WindowHandle, _event: MouseEvent) {}
+    /// A captured gesture was interrupted by deactivation or capture loss.
+    fn on_pointer_cancel(&mut self, _window: &WindowHandle) {}
     /// Cursor for a point in the client area.
     fn cursor_at(&self, _point: Point) -> CursorShape {
         CursorShape::Arrow
@@ -430,6 +499,8 @@ pub trait AppHandler: 'static {
     fn on_scroll(&mut self, _window: &WindowHandle, _event: ScrollEvent) {}
     /// Update geometry on resize and backing changes.
     fn on_resize(&mut self, _window: &WindowHandle, _size: Size, _scale: f64) {}
+    /// Refresh screen-space geometry when the native window moves without resizing.
+    fn on_move(&mut self, _window: &WindowHandle) {}
     /// Draw requested work; errors stop the event loop and are returned by run.
     fn on_frame(&mut self, context: &mut FrameContext<'_>) -> Result<(), String>;
     /// Observe system light/dark changes.

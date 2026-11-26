@@ -4,6 +4,29 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Unsupported platforms have no floating native drag image.
+    pub fn show_drag_image(
+        &self,
+        _image: &crate::DragImage,
+        _screen_point: crate::Point,
+        _grab_offset: crate::Point,
+    ) {
+    }
+    /// Unsupported platforms have no floating native drag image.
+    pub fn move_drag_image(&self, _screen_point: crate::Point) {}
+    /// Unsupported platforms have no floating native drag image.
+    pub fn pause_drag_image(&self) {}
+    /// Unsupported platforms have no floating native drag image.
+    pub fn hide_drag_image(&self) {}
+    /// Unsupported platforms have no native z-order.
+    pub fn screen_window_at(&self, _point: crate::Point) -> Option<usize> {
+        None
+    }
+    /// Unsupported platforms have no native window identity.
+    pub fn native_window_id(&self) -> Option<usize> {
+        None
+    }
+
     /// No native pointer exists on this platform.
     pub fn hide_pointer_until_motion(&self) {}
     /// Without a native preference, use overlay scrollbars.
@@ -24,6 +47,15 @@ impl WindowHandle {
     pub fn screen_point(&self, _point: crate::Point) -> Option<crate::Point> {
         None
     }
+    /// Headless offsets use the same units as the input point.
+    pub fn screen_point_offset(&self, screen: crate::Point, offset: crate::Point) -> crate::Point {
+        crate::Point {
+            x: screen.x + offset.x,
+            y: screen.y + offset.y,
+        }
+    }
+    /// Unsupported platforms cannot position native windows.
+    pub fn position_content_point(&self, _local: crate::Point, _desired: crate::Point) {}
     /// Unsupported platforms have no system document controller.
     pub fn system_recent_document(&self, _path: Option<&std::path::Path>) {}
     /// Updates the native minimum content extent (unavailable on this platform).

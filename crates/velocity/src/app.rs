@@ -241,6 +241,10 @@ pub struct App {
     tab_painted: Vec<(u64, usize, f64)>,
     tab_press: Option<tab_drag::TabPress>,
     tab_slides: Option<tab_drag::TabSlides>,
+    /// The platform-owned popup is fed once per detached gesture and hidden over a target strip.
+    drag_image: Option<vel_platform::DragImage>,
+    shared_drag_slot: Option<crate::session::DragSlot>,
+    tear_off_anchor: Option<Point>,
     #[cfg(test)]
     torn_off_windows: Vec<App>,
     tab_button_hits: Vec<(usize, &'static str, Rect)>,
@@ -505,6 +509,9 @@ impl App {
             tab_painted: Vec::new(),
             tab_press: None,
             tab_slides: None,
+            drag_image: None,
+            shared_drag_slot: None,
+            tear_off_anchor: None,
             #[cfg(test)]
             torn_off_windows: Vec::new(),
             tab_button_hits: Vec::new(),
@@ -1212,31 +1219,32 @@ impl App {
         &mut self,
         window: Option<&WindowHandle>,
         sheet: u64,
-        position: Option<Point>,
+        tab_origin: Point,
     ) -> Result<(), String> {
-        let index = self
+        let tab_index = self
             .workspace
             .sheet_index(sheet)
             .ok_or("The tab is no longer open")?;
-        self.workspace.prepare_sheet(index)?;
-        if !self.transferable_tab(index) {
+        self.workspace.prepare_sheet(tab_index)?;
+        if !self.transferable_tab(tab_index) {
             return Err("Finish loading or close the other views before moving this tab".into());
         }
         let mut request = crate::instance::Request::new(&Options::default(), None)?;
         request.new_window = true;
-        let app = self.app_for_new_window(crate::instance::Incoming::local(request))?;
+        let mut app = self.app_for_new_window(crate::instance::Incoming::local(request))?;
         let destination = app.session_id;
+        app.tear_off_anchor = Some(tab_origin);
         if let Some(window) = window {
             // A native launch can fail. Do not take the live editor out of its
             // source window until the destination is ready to receive it.
-            let target = self.launch_child(window, app.new_window_options(position), app)?;
+            let target =
+                self.launch_child(window, app.new_window_options(Some(tab_origin)), app)?;
             self.move_tab_to_window(Some(window), sheet, destination, 0)?;
             target.request_frame();
             return Ok(());
         }
         #[cfg(test)]
         {
-            let mut app = app;
             self.move_tab_to_window(None, sheet, destination, 0)?;
             assert!(app.receive_tabs());
             app.sync_active_view();
@@ -2020,20 +2028,30 @@ impl App {
         destination: u64,
         group: usize,
     ) -> Result<(), String> {
+        self.move_tab_to_window_at(window, sheet, destination, group, None)
+    }
+    fn move_tab_to_window_at(
+        &mut self,
+        window: Option<&WindowHandle>,
+        sheet: u64,
+        destination: u64,
+        group: usize,
+        index: Option<usize>,
+    ) -> Result<(), String> {
         if destination == self.session_id || !self.sessions.borrow().can_receive_tab(destination) {
             return Err("The destination window cannot accept the tab".into());
         }
-        let index = self
+        let tab_index = self
             .workspace
             .sheet_index(sheet)
             .ok_or("The tab is no longer open")?;
-        self.workspace.prepare_sheet(index)?;
-        if !self.transferable_tab(index) {
+        self.workspace.prepare_sheet(tab_index)?;
+        if !self.transferable_tab(tab_index) {
             return Err("Finish loading or close the other views before moving this tab".into());
         }
-        if index == self.workspace.active {
-            self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
-            self.workspace.tabs[index].scroll_line_height = self.view.line_height;
+        if tab_index == self.workspace.active {
+            self.workspace.tabs[tab_index].scroll = (self.view.scroll_x, self.view.scroll_y);
+            self.workspace.tabs[tab_index].scroll_line_height = self.view.line_height;
         }
         let mut slot = crate::workspace::Tab::new(
             vel_text::Text::new(),
@@ -2043,11 +2061,11 @@ impl App {
         slot.sheet = sheet;
         // close() chooses the same neighboring sheet as a normal close. Its temporary
         // unnamed adapter does not contribute to this window's closed-file history.
-        let tab = std::mem::replace(&mut self.workspace.tabs[index], slot);
-        let result = self.workspace.close(index);
+        let tab = std::mem::replace(&mut self.workspace.tabs[tab_index], slot);
+        let result = self.workspace.close(tab_index);
         self.sessions
             .borrow_mut()
-            .transfer_tab(destination, group, tab);
+            .transfer_tab(destination, group, index, tab);
         self.sheet_views.remove(&sheet);
         if result.is_ok() {
             self.close_empty_window(window);
@@ -2178,7 +2196,7 @@ impl App {
     fn receive_tabs(&mut self) -> bool {
         let incoming = self.sessions.borrow_mut().take_tabs(self.session_id);
         let changed = !incoming.is_empty();
-        for (group, mut tab) in incoming {
+        for (group, index, mut tab) in incoming {
             self.workspace.adopt_transferred_settings(&mut tab);
             tab.transient = false;
             let sheet = tab.sheet;
@@ -2195,7 +2213,14 @@ impl App {
             } else {
                 self.workspace.workbench.active
             };
-            self.workspace.workbench.groups[group].add(sheet, true);
+            let target = &mut self.workspace.workbench.groups[group];
+            target.add(sheet, true);
+            if let Some(index) = index
+                && let Some(from) = target.sheets.iter().position(|id| *id == sheet)
+            {
+                let sheet = target.sheets.remove(from);
+                target.sheets.insert(index.min(target.sheets.len()), sheet);
+            }
             self.workspace.tabs.push(tab);
             self.workspace.select(self.workspace.tabs.len() - 1);
         }
@@ -4212,8 +4237,11 @@ impl App {
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
         self.ensure_startup_services();
-        self.render_scene()
+        let scene = self.render_scene();
+        self.publish_tab_strips(None);
+        scene
     }
+
     // A native draw alone does not need the deferred services before scanout.
     fn render_scene(&mut self) -> vel_render::scene::Scene {
         if self.workspace.settings_page.is_none() {
@@ -4346,8 +4374,14 @@ impl App {
         }
         self.tab_bars.clear();
         self.tab_strips.clear();
-        self.tab_painted.clear();
         let now = Instant::now();
+        let shared_tab = self.shared_tab_preview();
+        let slot = shared_tab.as_ref().and_then(|drag| drag.slot);
+        if slot != self.shared_drag_slot {
+            self.shared_drag_slot = slot;
+            self.begin_tab_slide();
+        }
+        self.tab_painted.clear();
         if !self.tab_slides_active(now) {
             self.tab_slides = None;
         }
@@ -4623,24 +4657,40 @@ impl App {
                     scroll,
                 });
                 for (position, sheet) in tabs.iter().enumerate() {
-                    let Some(index) = self.workspace.sheet_index(*sheet) else {
-                        continue;
-                    };
-                    let tab = &self.workspace.tabs[index];
                     let mut rect = Rect {
                         x: bar.x + position as f64 * tab_width - scroll,
                         y: bar.y,
                         width: (tab_width - 1.).max(tab_width * 0.5),
                         height: bar.height,
                     };
-                    let lifted = self.lifted_tab_x(*sheet, bar, rect.width);
+                    let lifted = self.lifted_tab_x(shared_tab.as_ref(), *sheet, bar, rect.width);
                     if let Some(x) = lifted {
                         rect.x = x;
-                        rect.y -= 2. * self.panels.ui_scale;
                         rect.width = rect.width.min(bar.width);
+                        if let Some(shared) =
+                            shared_tab.as_ref().filter(|drag| drag.tab.sheet == *sheet)
+                        {
+                            self.paint_lifted_tab(&mut lifted_tab, &shared.tab, rect, bar);
+                        } else if let Some(index) = self.workspace.sheet_index(*sheet) {
+                            self.paint_lifted_tab(
+                                &mut lifted_tab,
+                                &self.drag_tab_presentation(index),
+                                rect,
+                                bar,
+                            );
+                        }
+                        if self.workspace.sheet_index(*sheet).is_some() {
+                            self.tab_hits.push((*sheet, rect));
+                            self.tab_painted.push((*sheet, group_index, rect.x));
+                        }
+                        continue;
                     } else {
                         rect.x = self.sliding_tab_x(*sheet, group_index, rect.x, now);
                     }
+                    let Some(index) = self.workspace.sheet_index(*sheet) else {
+                        continue;
+                    };
+                    let tab = &self.workspace.tabs[index];
                     if rect.x + rect.width <= bar.x || rect.x >= bar.x + bar.width {
                         continue;
                     }
@@ -4651,20 +4701,15 @@ impl App {
                     };
                     self.tab_hits.push((*sheet, hit));
                     self.tab_painted.push((*sheet, group_index, rect.x));
-                    let paint = if lifted.is_some() {
-                        &mut lifted_tab
-                    } else {
-                        &mut chrome
-                    };
+                    let paint = &mut chrome;
                     let selected = group.selected.contains(sheet);
                     let mut attrs = [""; 8];
                     let mut n = 0;
                     for (enabled, attr) in [
-                        (selected || lifted.is_some(), "selected"),
-                        (Some(*sheet) == focused_tab || lifted.is_some(), "focused"),
+                        (selected, "selected"),
+                        (Some(*sheet) == focused_tab, "focused"),
                         (tab.dirty(), "dirty"),
                         (tab.transient, "transient"),
-                        (lifted.is_some(), "dragging"),
                     ] {
                         if enabled {
                             attrs[n] = attr;
@@ -4815,11 +4860,6 @@ impl App {
                             width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
                             ..rect
                         };
-                        let label_clip = if lifted.is_some() {
-                            vel_ui::minihtml::intersection(label_clip, bar)
-                        } else {
-                            label_clip
-                        };
                         let label_end = if bullet {
                             // Right-aligned before the label's end; in a tab too narrow for that,
                             // centred in the visible part, and only when it fits there at all.
@@ -4904,7 +4944,7 @@ impl App {
                         node.attributes.insert("transient");
                     }
                     self.panels.tree.roots.insert(0, id);
-                    if selected && group.selected.len() > 1 && lifted.is_none() {
+                    if selected && group.selected.len() > 1 {
                         let connector = Rect {
                             y: rect.y + rect.height - 2.,
                             height: 2.,
@@ -4984,10 +5024,9 @@ impl App {
             scene.layers.push(strip);
         }
         scene.layers.push(chrome);
-        if self
-            .tab_press
-            .as_ref()
-            .is_some_and(|press| press.drag.is_some())
+        if !lifted_tab.surfaces.is_empty()
+            || !lifted_tab.text.is_empty()
+            || !lifted_tab.shadows.is_empty()
         {
             scene.layers.push(lifted_tab);
         }
@@ -6020,6 +6059,9 @@ impl AppHandler for App {
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
         self.handle_mouse_event(Some(w), event);
     }
+    fn on_pointer_cancel(&mut self, w: &WindowHandle) {
+        self.cancel_tab_drag(Some(w));
+    }
     // Native and headless events share UI hit testing, focus, binding lookup and gestures.
     fn on_scroll(&mut self, w: &WindowHandle, event: ScrollEvent) {
         self.handle_scroll_event(Some(w), event);
@@ -6039,6 +6081,12 @@ impl AppHandler for App {
             );
         }
         w.request_frame();
+    }
+    fn on_move(&mut self, w: &WindowHandle) {
+        if let Some(frame) = w.frame() {
+            self.window_frame = Some([frame.x, frame.y, frame.width, frame.height]);
+        }
+        self.publish_tab_strips(Some(w));
     }
     fn on_appearance(&mut self, w: &WindowHandle, appearance: Appearance) {
         crate::field_chrome::refresh_system_accent();
@@ -6104,6 +6152,7 @@ impl AppHandler for App {
             }
         }
         let focused = w.is_focused();
+        self.cancel_orphaned_tab_drag(Some(w));
         let focus_changed = self.window_focused != focused;
         if focus_changed && !focused {
             self.cancel_tab_drag(Some(w));
@@ -6340,6 +6389,14 @@ impl AppHandler for App {
         }
         if ctx.reason == FrameReason::StartupPrepare {
             let scene = self.render_scene();
+            if let Some(anchor) = self.tear_off_anchor.take() {
+                let bar = self
+                    .tab_strips
+                    .first()
+                    .map_or(self.workbench_bounds, |s| s.clip);
+                w.position_content_point(Point { x: bar.x, y: bar.y }, anchor);
+            }
+            self.publish_tab_strips(Some(w));
             self.clock.mark("first_scene_ready");
             self.renderer
                 .as_mut()
@@ -6364,13 +6421,15 @@ impl AppHandler for App {
             }
             // Ordering can constrain an oversized window or change its scale.
             // Rebuild on this tick if a resize invalidated the offscreen texture.
-            if !self
-                .renderer
-                .as_ref()
-                .ok_or("renderer missing")?
-                .has_prepared_frame()
+            if self.receive_tabs()
+                || !self
+                    .renderer
+                    .as_ref()
+                    .ok_or("renderer missing")?
+                    .has_prepared_frame()
             {
                 let scene = self.render_scene();
+                self.publish_tab_strips(Some(w));
                 self.renderer
                     .as_mut()
                     .ok_or("renderer missing")?
@@ -6521,6 +6580,10 @@ impl AppHandler for App {
             }
         }
         let scene = self.render_scene();
+        self.publish_tab_strips(Some(w));
+        if self.tab_slides_active(Instant::now()) {
+            w.request_frame();
+        }
         // Layout can enqueue its first image request after the worker poll above.
         if self.workspace.themes.ui.borrow().metrics.images_pending() {
             w.request_frame_at(Instant::now() + Duration::from_millis(8));
@@ -6550,6 +6613,10 @@ impl AppHandler for App {
             self.close_settings_window();
             return true;
         }
+        self.cancel_tab_drag(Some(w));
+        self.sessions
+            .borrow_mut()
+            .cancel_window_tab_drag(self.session_id);
         if !self.finish_tab_rename(Some(w)) {
             return false;
         }
@@ -6579,6 +6646,10 @@ impl AppHandler for App {
             self.close_settings_window();
             return true;
         }
+        self.cancel_tab_drag(Some(w));
+        self.sessions
+            .borrow_mut()
+            .cancel_window_tab_drag(self.session_id);
         if !self.finish_tab_rename(Some(w)) {
             return false;
         }

@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use vel_platform::{Point, Rect, WindowHandle};
 use vel_session::{Document, HotExit, Session, Window, Writer};
 
 #[path = "session_departures.rs"]
@@ -83,6 +84,46 @@ pub struct Policy {
     pub remember_layout: bool,
 }
 
+/// A tab strip published in screen coordinates for cross-window drag hit testing.
+#[derive(Debug, Default)]
+pub(crate) struct ScreenTabStrip {
+    pub group: usize,
+    pub bounds: Rect,
+    pub origin: f64,
+    pub step: f64,
+    pub view_x: f64,
+    pub x_scale: f64,
+    pub sheets: Vec<u64>,
+}
+
+/// Paint-only metadata. The live document stays in its source workspace until drop.
+#[derive(Clone, Debug)]
+pub(crate) struct DragTab {
+    pub sheet: u64,
+    pub label: String,
+    pub icon: Option<String>,
+    pub dirty: bool,
+    pub transient: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DragSlot {
+    pub window: u64,
+    pub group: usize,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SharedTabDrag {
+    pub source: u64,
+    pub tab: std::rc::Rc<DragTab>,
+    pub slot: Option<DragSlot>,
+    pub pointer_x: f64,
+    pub grab_x: f64,
+}
+
+type TabTransfer = (usize, Option<usize>, crate::workspace::Tab);
+
 /// Collapse the groups without reordering tabs or changing the focused document.
 pub(crate) fn forget_layout(workbench: &mut vel_ui::workbench::Workbench) -> Result<(), String> {
     if workbench.groups.len() > 1 {
@@ -118,7 +159,7 @@ pub struct Sessions {
     next: u64,
     live: BTreeSet<u64>,
     ready: BTreeSet<u64>,
-    transfers: BTreeMap<u64, Vec<(usize, crate::workspace::Tab)>>,
+    transfers: BTreeMap<u64, Vec<TabTransfer>>,
     file_renames: BTreeMap<u64, Vec<(PathBuf, PathBuf)>>,
     pub(crate) open_windows: BTreeMap<u64, crate::open_requests::WindowRoute>,
     pub(crate) open_as_choices: crate::open_requests::OpenAsChoices,
@@ -126,6 +167,10 @@ pub struct Sessions {
     /// Live window handles by session ID, so one window can bring another to the front.
     /// Removed when the window closes.
     pub(crate) handles: BTreeMap<u64, vel_platform::WindowHandle>,
+    /// Last laid-out tab strips, converted to screen coordinates by each window.
+    pub(crate) tab_strips: BTreeMap<u64, Vec<ScreenTabStrip>>,
+    /// One process-wide tab drag. The native pointer remains captured by its source view.
+    pub(crate) tab_drag: Option<SharedTabDrag>,
     pub(crate) menu_merges: BTreeMap<u64, u64>,
     pub(crate) persist_project_workspaces: bool,
     /// The one Settings window, by its window ID. It has no session state of its own and is
@@ -213,6 +258,8 @@ impl Sessions {
             open_as_choices: Default::default(),
             open_inbox: BTreeMap::new(),
             handles: BTreeMap::new(),
+            tab_strips: BTreeMap::new(),
+            tab_drag: None,
             menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
             settings_window: None,
@@ -261,11 +308,13 @@ impl Sessions {
     /// A failed native launch can still have a recovery snapshot, but it
     /// must not remain eligible to receive requests.
     pub(crate) fn release_route(&mut self, id: u64) {
+        self.cancel_window_tab_drag(id);
         self.live.remove(&id);
         self.ready.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
         self.handles.remove(&id);
+        self.tab_strips.remove(&id);
         self.recent_heads.remove(&id);
         self.preference_updates.remove(&id);
         if self.active_window == Some(id) {
@@ -317,11 +366,73 @@ impl Sessions {
                 .saturating_add(count)
                 <= 64
     }
-    pub fn transfer_tab(&mut self, id: u64, group: usize, tab: crate::workspace::Tab) {
-        self.transfers.entry(id).or_default().push((group, tab));
+    pub fn transfer_tab(
+        &mut self,
+        id: u64,
+        group: usize,
+        index: Option<usize>,
+        tab: crate::workspace::Tab,
+    ) {
+        self.transfers
+            .entry(id)
+            .or_default()
+            .push((group, index, tab));
     }
-    pub fn take_tabs(&mut self, id: u64) -> Vec<(usize, crate::workspace::Tab)> {
+    pub fn take_tabs(&mut self, id: u64) -> Vec<TabTransfer> {
         self.transfers.remove(&id).unwrap_or_default()
+    }
+
+    /// Queries native z-order at most once, and only if a published strip contains the point.
+    pub(crate) fn tab_strip_at(
+        &self,
+        window: Option<&WindowHandle>,
+        point: Point,
+    ) -> Option<(u64, &ScreenTabStrip)> {
+        let mut native_hit = None;
+        self.tab_strips
+            .iter()
+            .rev()
+            .filter_map(|(&id, strips)| {
+                let strip = strips
+                    .iter()
+                    .find(|strip| vel_ui::contains(strip.bounds, point))?;
+                let matches = window.is_none_or(|window| {
+                    let hit = native_hit.get_or_insert_with(|| window.screen_window_at(point));
+                    hit.is_some()
+                        && self
+                            .handles
+                            .get(&id)
+                            .and_then(WindowHandle::native_window_id)
+                            == *hit
+                });
+                (matches && self.can_receive_tab(id)).then_some((id, strip))
+            })
+            .next()
+    }
+
+    pub(crate) fn request_window_frame(&self, id: u64) {
+        if let Some(handle) = self.handles.get(&id) {
+            handle.request_frame();
+        }
+    }
+
+    pub(crate) fn cancel_window_tab_drag(&mut self, window: u64) {
+        if let Some(drag) = &self.tab_drag
+            && (drag.source == window || drag.slot.is_some_and(|slot| slot.window == window))
+        {
+            let source = drag.source;
+            let slot = drag.slot;
+            self.tab_drag = None;
+            if let Some(handle) = self.handles.get(&source) {
+                handle.hide_drag_image();
+                handle.request_frame();
+            }
+            if let Some(slot) = slot
+                && slot.window != source
+            {
+                self.request_window_frame(slot.window);
+            }
+        }
     }
 
     /// Keep recovery snapshots and routing current even before other windows draw.
@@ -1392,5 +1503,43 @@ mod review15_tests {
                 .all(|w| w.retained_closed)
         );
         persisted.restored.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tab_drag_tests {
+    use super::*;
+
+    #[test]
+    fn screen_strip_hit_testing_uses_published_geometry_and_ignores_released_routes() {
+        let mut sessions = Sessions::new(None);
+        let first = sessions.register();
+        let second = sessions.register();
+        let strip = |x| ScreenTabStrip {
+            group: 2,
+            bounds: Rect {
+                x,
+                y: 50.,
+                width: 240.,
+                height: 32.,
+            },
+            origin: x,
+            step: 80.,
+            view_x: 0.,
+            x_scale: 1.,
+            sheets: vec![41, 42],
+        };
+        sessions.tab_strips.insert(first, vec![strip(100.)]);
+        sessions.tab_strips.insert(second, vec![strip(275.)]);
+        let hit = |sessions: &Sessions, point| {
+            sessions
+                .tab_strip_at(None, point)
+                .map(|(id, strip)| (id, strip.group))
+        };
+        assert_eq!(hit(&sessions, Point { x: 110., y: 60. }), Some((first, 2)));
+        assert_eq!(hit(&sessions, Point { x: 300., y: 60. }), Some((second, 2)));
+        assert_eq!(hit(&sessions, Point { x: 300., y: 82. }), None);
+        sessions.release_route(second);
+        assert_eq!(hit(&sessions, Point { x: 300., y: 60. }), Some((first, 2)));
     }
 }

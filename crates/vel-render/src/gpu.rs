@@ -1391,15 +1391,48 @@ impl Renderer {
         }))
     }
     /// Renders one scene into a fresh offscreen texture of the configured size and reads it
-    /// back as tightly packed, straight sRGB RGBA8 rows (top row first).
+    /// back as tightly packed sRGB RGBA8 rows (top row first).
     pub fn render_rgba(
         &mut self,
         scene: &Scene,
         fonts: &mut Fonts,
         scale: f32,
     ) -> Result<Vec<u8>, String> {
+        self.read_scene_rgba(scene, fonts, scale, self.physical_size())
+    }
+    /// Reads a small transparent scene with the window's existing device and glyph atlas,
+    /// without resizing its surface. With a transparent clear, pixels are premultiplied RGBA.
+    pub fn render_rgba_at_size(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut Fonts,
+        scale: f32,
+        size: [u32; 2],
+    ) -> Result<Vec<u8>, String> {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        if size.into_iter().any(|extent| extent == 0 || extent > limit) {
+            return Err("Invalid offscreen image size".into());
+        }
+        let window_size = self.physical_size();
+        let set_extent = |extent: [u32; 2]| [extent[0] as f32, extent[1] as f32, 0., 0.];
+        self.queue
+            .write_buffer(&self.screen, 0, bytemuck::cast_slice(&set_extent(size)));
+        let result = self.read_scene_rgba(scene, fonts, scale, size);
+        self.queue.write_buffer(
+            &self.screen,
+            0,
+            bytemuck::cast_slice(&set_extent(window_size)),
+        );
+        result
+    }
+    fn read_scene_rgba(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut Fonts,
+        scale: f32,
+        [width, height]: [u32; 2],
+    ) -> Result<Vec<u8>, String> {
         self.prepare(scene, fonts, scale)?;
-        let (width, height) = (self.config.width, self.config.height);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen readback"),
             size: wgpu::Extent3d {
