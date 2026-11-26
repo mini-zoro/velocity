@@ -1,0 +1,83 @@
+name: GUI end-to-end
+
+# End-to-end checks that need a real GUI session: Pinyin composition, tab drag-out,
+# first-click activation, background launch. Every run starts with the capability
+# probe and only runs the scenarios that probe shows the runner supports.
+#
+# Not a required check: it never gates a merge, and it is not on main's push path.
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "auto = probe then every supported scenario; probe only; scenarios only"
+        type: choice
+        default: auto
+        options: [auto, probe, scenarios]
+
+concurrency:
+  group: gui-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gui:
+    name: gui e2e (macos-15 arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The harness reads no package data; the product build needs no submodule.
+          submodules: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gui-e2e
+          cache-on-failure: true
+      - name: Build Velocity (release)
+        run: cargo build --release -p velocity --locked
+      - name: Build the e2e driver
+        run: scripts/e2e/run.sh build
+
+      - name: GPU / Metal (vel-render device tests)
+        continue-on-error: true
+        run: |
+          cargo test --release -p vel-render --lib memory_tests -- --nocapture 2>&1 | tee /tmp/gpu.log | tail -40
+          {
+            echo '### Metal / GPU tests'
+            echo '```'
+            grep -E 'test result|skipped: no GPU|adapter' /tmp/gpu.log | head -20 || true
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # Step 1: capability table (csrutil, GUI session, TCC, HID keyboard/pointer,
+      # Pinyin selection, screencapture). Also decides which scenarios run below.
+      - name: Probe runner capabilities
+        if: inputs.suite != 'scenarios'
+        continue-on-error: true
+        run: scripts/e2e/run.sh probe
+
+      - name: Scenarios (probe-gated)
+        if: github.event_name == 'pull_request' || inputs.suite != 'probe'
+        continue-on-error: true
+        run: scripts/e2e/run.sh scenarios
+
+      - name: Summarise
+        if: always()
+        run: scripts/e2e/run.sh summary
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gui-e2e-artifacts
+          path: |
+            ${{ runner.temp }}/e2e/artifacts
+            ${{ runner.temp }}/e2e/work/results
+          if-no-files-found: ignore
+          retention-days: 7
