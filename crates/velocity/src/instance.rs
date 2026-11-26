@@ -1241,6 +1241,7 @@ mod tests {
         let endpoints = fixture_endpoints(dir.path());
         let path = &endpoints.socket;
         drop(UnixListener::bind(path).unwrap());
+        wait_until_stale(path);
         let barrier = std::sync::Barrier::new(2);
         let (first, second) = std::thread::scope(|scope| {
             let start = || {
@@ -1392,6 +1393,7 @@ mod tests {
         let mut endpoints = fixture_endpoints(dir.path());
         let stale = dir.path().join("legacy.sock");
         drop(UnixListener::bind(&stale).unwrap());
+        wait_until_stale(&stale);
         endpoints.legacy.push(stale.clone());
         let marker = dir.path().join("foreign-marker");
         fs::write(&marker, "not a socket").unwrap();
@@ -1475,19 +1477,39 @@ mod tests {
         let request = Request::new(&Options::default(), None).unwrap();
         match Instance::start(Some(&root.join("profile")), &request).unwrap() {
             Start::Primary(instance) => {
-                fs::write(root.join(format!("primary-{id}")), "").unwrap();
                 let mut count = 0;
                 wait_until(|| {
                     count += instance.drain().len();
-                    count == 2 || root.join("stop").exists()
+                    count == 2
                 });
                 assert_eq!(count, 2);
+                // Only now is it safe for the parent to stop the children: a
+                // forwarder reports itself once its request is sent, not once
+                // the primary has read it, so stopping earlier can cut the
+                // second request off and make this child exit non-zero.
+                fs::write(root.join(format!("primary-{id}")), "").unwrap();
                 wait_until(|| root.join("stop").exists());
             }
             Start::Forwarded => fs::write(root.join(format!("forwarded-{id}")), "").unwrap(),
         }
     }
 
+    /// A socket that this process bound and closed can stay connectable for a
+    /// moment: a child forked by another test thread inherits the listening
+    /// descriptor until it execs, and under load that window is long enough to
+    /// be seen. Wait until the endpoint really refuses connections, which is
+    /// what these tests mean by a stale socket.
+    fn wait_until_stale(path: &Path) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(path).is_ok() {
+            assert!(
+                Instant::now() < until,
+                "{} kept accepting connections",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
     fn wait_until(mut ready: impl FnMut() -> bool) {
         let until = Instant::now() + Duration::from_secs(10);
         while !ready() {
