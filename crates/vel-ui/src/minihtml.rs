@@ -86,11 +86,17 @@ impl Metrics {
     /// Enables the existing native font/fallback stack. Never called by headless modes/tests.
     #[cfg(any(target_os = "macos", windows))]
     pub fn enable_native(&self) -> Result<(), String> {
-        let mut fonts = vel_render::font::Fonts::load()?;
+        let mut fonts = vel_render::font::Fonts::load_shared()?;
         fonts.shape_ui("M世界 👋", "system-ui", 12., FontStyle::default());
         *self.native.borrow_mut() = Some(fonts);
         self.cache.borrow_mut().clear();
         Ok(())
+    }
+    /// Releases native font resources when a Windows handler becomes a reopen template.
+    #[cfg(windows)]
+    pub fn disable_native(&self) {
+        self.native.borrow_mut().take();
+        self.cache.borrow_mut().clear();
     }
 }
 impl FontMetrics for Metrics {

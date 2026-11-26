@@ -3,8 +3,10 @@
 use crate::{native, typography::WideAdvances};
 use serde_json::{Value, json};
 use std::{
+    cell::{RefCell, RefMut},
     collections::HashMap,
     path::{Path, PathBuf},
+    rc::{Rc, Weak},
 };
 use swash::{
     CacheKey, FontDataRef, FontRef, StringId,
@@ -178,154 +180,354 @@ pub struct UiRun {
 const SHAPED_BYTES: usize = 4 * 1024 * 1024;
 const CHOICE_BYTES: usize = 2 * 1024 * 1024;
 const CHOICE_KEYS: usize = 8192;
+const DEFAULT_FONT: &str = if cfg!(windows) { "Consolas" } else { "Menlo" };
 type ShapeKey = (
     String,
     u32,
     crate::scene::FontStyle,
     crate::typography::FontOptions,
     u64,
+    u16,
 );
+type FaceKey = (PathBuf, String, Vec<(u32, u32)>);
+type CascadeKey = u32;
 
-/// Lazy system fonts and reusable swash shaping/raster contexts.
-pub struct Fonts {
+thread_local! {
+    static WINDOW_FONTS: RefCell<Weak<RefCell<FontStore>>> = const { RefCell::new(Weak::new()) };
+}
+
+#[derive(Debug)]
+struct Primary {
+    // Preserve the cascade's loaded-face shortcut in this primary's load order;
+    // a face opened in an unrelated window must not join that search.
+    known: Vec<u16>,
     families: HashMap<String, u16>,
     variants: HashMap<(u16, crate::scene::FontStyle), u16>,
-    faces: Vec<Face>,
-    files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
-    face_files: HashMap<(PathBuf, String), u16>,
-    fallback: vel_platform::fonts::AsyncFontFallback,
-    choices: HashMap<(u16, char), u16>,
-    emoji_choices: HashMap<(u16, String), u16>,
-    text_choices: HashMap<(u16, String), u16>,
-    choice_bytes: usize,
-    options: crate::typography::FontOptions,
     wide_advances: Option<WideAdvances>,
-    /// Primary metrics; no fallback face changes the editor grid.
-    pub metrics: crate::typography::FontMetrics,
-    /// Missing-face/glyph diagnostics.
-    pub warnings: Vec<String>,
-    coretext_rasters: usize,
-    #[cfg(target_os = "macos")]
-    coretext_faces: std::collections::HashSet<u16>,
-    scaler: ScaleContext,
-    shaper: ShapeContext,
-    shaped: HashMap<ShapeKey, Vec<ShapedGlyph>>,
-    shaped_bytes: usize,
+    metrics: crate::typography::FontMetrics,
     ascii: [u16; 128],
     ascii_complete: bool,
-    /// Primary font advance at 13 points.
-    pub cell: f32,
-    /// Primary ascent at 13 points.
-    pub ascent: f32,
+    cell: f32,
+    pending: usize,
+    blocked: bool,
+    fallback_generation: u64,
 }
-impl Fonts {
-    /// Loads only the primary monospace face; system fallbacks are lazy.
-    pub fn load() -> Result<Self, String> {
-        Self::load_named(if cfg!(windows) { "Consolas" } else { "Menlo" })
-    }
-    /// Loads a requested primary face through CoreText, retaining lazy fallbacks.
-    pub fn load_named(requested: &str) -> Result<Self, String> {
-        #[cfg(target_os = "macos")]
-        let primary = Path::new("/System/Library/Fonts/Menlo.ttc");
-        let mut files = HashMap::new();
-        #[cfg(target_os = "macos")]
-        let face = if requested == "Menlo" && primary.exists() {
-            Face::load(primary, "Menlo-Regular", None, &mut files, true)?
-        } else {
-            let (path, name, font) = native::font_location(requested)?;
-            Face::load(&path, &name, Some(font), &mut files, true)?
-        };
-        #[cfg(windows)]
-        let face = {
-            let (path, name, font) = native::font_location(requested)?;
-            Face::load(&path, &name, Some(font), &mut files, true)?
-        };
-        Self::from_face(face, files)
-    }
-    /// Loads a fixture or explicitly selected file without consulting the system service.
-    pub fn load_file(path: &Path, name: &str) -> Result<Self, String> {
-        let mut files = HashMap::new();
-        let face = Face::load(path, name, None, &mut files, true)?;
-        Self::from_face(face, files)
-    }
-    /// Whether the primary face has a supported default substitution feature.
-    pub fn has_ligatures(&self) -> bool {
-        self.faces[0].ligatures
-    }
-    fn from_face(
-        face: Face,
-        files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
-    ) -> Result<Self, String> {
+impl Primary {
+    fn new(id: u16, face: &Face) -> Self {
         let font = face.reference();
-        // A variable primary face is measured at the instance it is shaped and rasterized
-        // with (CoreText's optical size and weight); static faces have no coordinates.
         let metrics = font.metrics(&face.coords).scale(13.);
         let ascii = std::array::from_fn(|i| font.charmap().map(char::from(i as u8)));
         let cell = font
             .glyph_metrics(&face.coords)
             .scale(13.)
             .advance_width(ascii[b'M' as usize]);
-        Ok(Self {
+        Self {
+            known: vec![id],
             families: HashMap::new(),
             variants: HashMap::new(),
-
-            files,
-            face_files: HashMap::from([((face.path.clone(), face.name.clone()), 0)]),
-            fallback: Default::default(),
-            choices: HashMap::new(),
-            emoji_choices: HashMap::new(),
-            text_choices: HashMap::new(),
-            choice_bytes: 0,
-            options: Default::default(),
             wide_advances: None,
             metrics: crate::typography::FontMetrics {
-                ascent: metrics.ascent as f64,
-                descent: metrics.descent.abs() as f64,
-                leading: metrics.leading as f64,
+                ascent: f64::from(metrics.ascent),
+                descent: f64::from(metrics.descent.abs()),
+                leading: f64::from(metrics.leading),
             },
-            warnings: Vec::new(),
-            coretext_rasters: 0,
-            #[cfg(target_os = "macos")]
-            coretext_faces: std::collections::HashSet::new(),
-            scaler: ScaleContext::new(),
-            shaper: ShapeContext::new(),
-            shaped: HashMap::new(),
-            shaped_bytes: 0,
             ascii_complete: ascii[32..127].iter().all(|g| *g != 0),
             ascii,
             cell,
-            ascent: metrics.ascent,
-            faces: vec![face],
-        })
+            pending: 0,
+            blocked: false,
+            fallback_generation: 0,
+        }
     }
-    fn load_face(
+}
+
+/// A client's font settings and metrics. Windows use a common font store;
+/// explicit fixture loads have their own store and fallback resolver.
+pub struct Fonts {
+    store: Rc<RefCell<FontStore>>,
+    primary: u16,
+    options: crate::typography::FontOptions,
+    observed_fallback: u64,
+    ligatures: bool,
+    /// Primary metrics; no fallback face changes the editor grid.
+    pub metrics: crate::typography::FontMetrics,
+    /// Primary font advance at 13 points.
+    pub cell: f32,
+    /// Primary ascent at 13 points.
+    pub ascent: f32,
+}
+
+impl Fonts {
+    /// Loads the default primary font in a standalone store.
+    pub fn load() -> Result<Self, String> {
+        Self::load_named(DEFAULT_FONT)
+    }
+    /// Loads a requested primary font in a standalone store.
+    pub fn load_named(requested: &str) -> Result<Self, String> {
+        let mut store = FontStore::default();
+        let primary = store.load_primary(requested)?;
+        Ok(Self::new(Rc::new(RefCell::new(store)), primary))
+    }
+    /// Loads the default primary in the window thread's shared font store.
+    pub fn load_shared() -> Result<Self, String> {
+        Self::load_shared_named(DEFAULT_FONT)
+    }
+    /// Borrows the window thread's font store, starting it on first use.
+    pub fn load_shared_named(requested: &str) -> Result<Self, String> {
+        let store = WINDOW_FONTS.with_borrow(Weak::upgrade).unwrap_or_else(|| {
+            let store = Rc::new(RefCell::new(FontStore::default()));
+            WINDOW_FONTS.with_borrow_mut(|slot| *slot = Rc::downgrade(&store));
+            store
+        });
+        let primary = store.borrow_mut().load_primary(requested)?;
+        Ok(Self::new(store, primary))
+    }
+    /// Loads a fixture or explicitly selected file without consulting the system service.
+    pub fn load_file(path: &Path, name: &str) -> Result<Self, String> {
+        let mut store = FontStore::default();
+        let id = store.intern_face(path, name, None)?;
+        store.add_primary(id);
+        Ok(Self::new(Rc::new(RefCell::new(store)), id))
+    }
+    fn new(store: Rc<RefCell<FontStore>>, primary: u16) -> Self {
+        let (cell, metrics, observed_fallback, ligatures) = {
+            let s = store.borrow();
+            let root = &s.roots[&primary];
+            (
+                root.cell,
+                root.metrics,
+                root.fallback_generation,
+                s.faces[primary as usize].ligatures,
+            )
+        };
+        Self {
+            store,
+            primary,
+            options: Default::default(),
+            observed_fallback,
+            ligatures,
+            metrics,
+            cell,
+            ascent: metrics.ascent as f32,
+        }
+    }
+    /// Whether the primary face has a supported default substitution feature.
+    pub fn has_ligatures(&self) -> bool {
+        self.ligatures
+    }
+    /// Installs completed fallback choices and reports changes to every client once.
+    pub fn poll_fallbacks(&mut self) -> bool {
+        let generation = {
+            let mut store = self.store.borrow_mut();
+            store.poll_fallbacks();
+            store.roots[&self.primary].fallback_generation
+        };
+        std::mem::replace(&mut self.observed_fallback, generation) != generation
+    }
+    /// Whether another display-linked frame should poll this primary's cascade.
+    pub fn fallback_pending(&self) -> bool {
+        let store = self.store.borrow();
+        let root = &store.roots[&self.primary];
+        root.pending != 0 || root.blocked
+    }
+    /// Releases shaping and raster scratch without forgetting resolved fallbacks.
+    /// Returns the shaping payload before the trim.
+    pub fn trim_shaping(&mut self) -> usize {
+        self.store.borrow_mut().trim_shaping()
+    }
+    /// Drops optional, document-warmed state. Resolved faces are retained
+    /// if other primary fonts in this store can reference their indices.
+    pub fn clear_document_caches(&mut self) {
+        self.store.borrow_mut().clear_document_caches();
+    }
+    /// Retained payload of the shaping and cascade caches, shared in the window path.
+    pub fn document_cache_bytes(&self) -> (usize, usize) {
+        let store = self.store.borrow();
+        (store.shaped_bytes, store.choice_bytes)
+    }
+    /// Changes shaping features for this client without changing face identities.
+    pub fn set_options(&mut self, options: crate::typography::FontOptions) {
+        self.options = options;
+    }
+    /// Font identities, raster fallback counts and diagnostics.
+    pub fn metadata(&self) -> Value {
+        self.for_frame().metadata()
+    }
+    /// Unique owned and mapped backing bytes for this store, not resident memory.
+    pub fn file_storage_bytes(&self) -> (usize, usize) {
+        self.store.borrow().file_storage_bytes()
+    }
+    /// Measures representative glyphs with this primary's cascade.
+    pub fn wide_advances(&mut self) -> WideAdvances {
+        self.for_frame().wide_advances()
+    }
+    /// Shapes editor text using the regular face.
+    pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
+        self.shape_styled(text, px, Default::default())
+    }
+    /// Shapes using actual face variants, including fallback families.
+    pub fn shape_styled(
+        &mut self,
+        text: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+    ) -> Vec<ShapedGlyph> {
+        self.shape_editor(text, px, style, WideAdvances::default())
+    }
+    /// Shapes an editor run using the same width classes as row geometry.
+    pub fn shape_editor(
+        &mut self,
+        text: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+        advances: WideAdvances,
+    ) -> Vec<ShapedGlyph> {
+        self.for_frame().shape_editor(text, px, style, advances)
+    }
+    /// Shapes a proportional UI run using the same cascade as painting.
+    pub fn shape_ui(
+        &mut self,
+        text: &str,
+        families: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+    ) -> UiRun {
+        self.for_frame().shape_ui(text, families, px, style)
+    }
+    /// Rasterizes one glyph at a quarter-pixel physical phase.
+    pub fn rasterize(&mut self, face: u16, id: u16, px: f32, bucket: u8) -> Option<Image> {
+        self.for_frame().rasterize(face, id, px, bucket)
+    }
+    // Borrow once for an entire render, not once per shaped line or bitmap.
+    pub(crate) fn for_frame(&self) -> RefMut<'_, FontStore> {
+        let mut store = self.store.borrow_mut();
+        store.primary = self.primary;
+        store.options = self.options;
+        store
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FontStore {
+    primary: u16,
+    roots: HashMap<u16, Primary>,
+    names: HashMap<String, u16>,
+    faces: Vec<Face>,
+    files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
+    face_files: HashMap<FaceKey, u16>,
+    fallback: vel_platform::fonts::AsyncFontFallback,
+    blocked_primaries: Vec<u16>,
+    choices: HashMap<(CascadeKey, char), u16>,
+    emoji_choices: HashMap<(CascadeKey, String), u16>,
+    text_choices: HashMap<(CascadeKey, String), u16>,
+    choice_bytes: usize,
+    options: crate::typography::FontOptions,
+    warnings: Vec<String>,
+    coretext_rasters: usize,
+    #[cfg(target_os = "macos")]
+    coretext_faces: std::collections::HashSet<u16>,
+    scaler: ScaleContext,
+    shaper: ShapeContext,
+    scratch_used: bool,
+    shaped: HashMap<ShapeKey, Vec<ShapedGlyph>>,
+    shaped_bytes: usize,
+}
+impl FontStore {
+    fn load_primary(&mut self, requested: &str) -> Result<u16, String> {
+        if let Some(&id) = self.names.get(requested) {
+            return Ok(id);
+        }
+        #[cfg(target_os = "macos")]
+        let menlo = Path::new("/System/Library/Fonts/Menlo.ttc");
+        #[cfg(target_os = "macos")]
+        let (path, name, native) = if requested == "Menlo" && menlo.exists() {
+            (menlo.into(), "Menlo-Regular".into(), None)
+        } else {
+            let (path, name, native) = native::font_location(requested)?;
+            (path, name, Some(native))
+        };
+        #[cfg(windows)]
+        let (path, name, native) = {
+            let (path, name, native) = native::font_location(requested)?;
+            (path, name, Some(native))
+        };
+        let id = self.intern_face(&path, &name, native)?;
+        self.add_primary(id);
+        self.names.insert(requested.into(), id);
+        Ok(id)
+    }
+    fn add_primary(&mut self, id: u16) {
+        self.roots
+            .entry(id)
+            .or_insert_with(|| Primary::new(id, &self.faces[id as usize]));
+    }
+    fn intern_face(
         &mut self,
         path: &Path,
         name: &str,
         native: Option<native::NativeFont>,
     ) -> Result<u16, String> {
-        if let Some(face) = self.face_files.get(&(path.to_owned(), name.to_owned())) {
-            return Ok(*face);
+        let mut variation = native.as_ref().map_or_else(Vec::new, |native| {
+            native::font_variation(native)
+                .into_iter()
+                .map(|(tag, v)| (tag, v.to_bits()))
+                .collect()
+        });
+        variation.sort_unstable();
+        let key = (path.into(), name.into(), variation);
+        if let Some(&id) = self.face_files.get(&key) {
+            return Ok(id);
         }
-        if self.faces.len() >= u16::MAX as usize {
-            return Err("font face limit".into());
-        }
-        let face = Face::load(path, name, native, &mut self.files, true)?;
-        let id = self.faces.len() as u16;
-        self.face_files
-            .insert((path.to_owned(), name.to_owned()), id);
-        self.faces.push(face);
+        let id = u16::try_from(self.faces.len()).map_err(|_| "font face limit")?;
+        self.faces
+            .push(Face::load(path, name, native, &mut self.files, true)?);
+        self.face_files.insert(key, id);
         Ok(id)
     }
-    /// Installs completed cascade choices without blocking. True invalidates cached .notdef runs.
-    pub fn poll_fallbacks(&mut self) -> bool {
+    fn load_face(
+        &mut self,
+        primary: u16,
+        path: &Path,
+        name: &str,
+        native: Option<native::NativeFont>,
+    ) -> Result<u16, String> {
+        let id = self.intern_face(path, name, native)?;
+        let root = self.roots.get_mut(&primary).expect("primary font loaded");
+        if !root.known.contains(&id) {
+            root.known.push(id);
+        }
+        Ok(id)
+    }
+    pub(crate) fn raster_identity(&self, face: u16) -> u64 {
+        self.faces[face as usize].key.value()
+    }
+    pub(crate) fn layout_identity(&self) -> (u64, u64) {
+        (
+            self.raster_identity(self.primary),
+            self.roots[&self.primary].fallback_generation,
+        )
+    }
+    fn cascade_key(primary: u16, base: u16) -> CascadeKey {
+        (u32::from(primary) << 16) | u32::from(base)
+    }
+    pub(crate) fn fallback_pending(&self) -> bool {
+        let root = &self.roots[&self.primary];
+        root.pending != 0 || root.blocked
+    }
+    fn poll_fallbacks(&mut self) {
         let results = self.fallback.poll();
         let changed = !results.is_empty();
-        for (base, key, descriptor) in results {
+        for (cascade, key, descriptor) in results {
+            let primary = (cascade >> 16) as u16;
+            let base = cascade as u16;
+            let root = self.roots.get_mut(&primary).expect("fallback primary");
+            root.pending -= 1;
+            root.fallback_generation += 1;
             use vel_platform::fonts::FallbackKey;
             let face = descriptor
                 .and_then(|d| {
                     match self.load_face(
+                        primary,
                         &d.path,
                         &d.postscript_name,
                         #[cfg(target_os = "macos")]
@@ -357,19 +559,26 @@ impl Fonts {
                     }
                 })
                 .unwrap_or(base);
-            self.remember_choice(base, key, face);
+            self.remember_choice(cascade, key, face);
         }
         if changed {
+            // A different primary could have filled the bounded shared queue.
+            // Expire .notdef layouts for clients that can now retry their misses.
+            for primary in self.blocked_primaries.drain(..) {
+                let root = self.roots.get_mut(&primary).expect("fallback primary");
+                root.blocked = false;
+                root.fallback_generation += 1;
+            }
             self.shaped.clear();
             self.shaped_bytes = 0;
         }
-        changed
     }
-    /// Whether another display-linked frame should poll the cascade worker.
-    pub fn fallback_pending(&self) -> bool {
-        self.fallback.pending()
-    }
-    fn remember_choice(&mut self, base: u16, key: vel_platform::fonts::FallbackKey, face: u16) {
+    fn remember_choice(
+        &mut self,
+        cascade: CascadeKey,
+        key: vel_platform::fonts::FallbackKey,
+        face: u16,
+    ) {
         use vel_platform::fonts::FallbackKey;
         // Hash buckets, load-factor/growth slack, and cluster string capacity.
         let charge = 128
@@ -389,81 +598,100 @@ impl Fonts {
             self.choice_bytes = 0;
         }
         let previous = match key {
-            FallbackKey::Scalar(c) => self.choices.insert((base, c), face),
-            FallbackKey::Emoji(s) => self.emoji_choices.insert((base, s), face),
-            FallbackKey::Text(s) => self.text_choices.insert((base, s), face),
+            FallbackKey::Scalar(c) => self.choices.insert((cascade, c), face),
+            FallbackKey::Emoji(s) => self.emoji_choices.insert((cascade, s), face),
+            FallbackKey::Text(s) => self.text_choices.insert((cascade, s), face),
         };
         if previous.is_none() {
             self.choice_bytes += charge;
         }
     }
 
-    /// Releases shaping and raster scratch storage without forgetting resolved
-    /// fallback choices. The first frame after a trim must still show those glyphs.
-    pub fn trim_shaping(&mut self) {
-        self.shaped = HashMap::new();
-        self.shaped_bytes = 0;
-        self.shaper = ShapeContext::new();
-        self.scaler = ScaleContext::new();
+    fn trim_shaping(&mut self) -> usize {
+        let bytes = std::mem::take(&mut self.shaped_bytes);
+        if bytes != 0 || self.shaped.capacity() != 0 {
+            self.shaped = HashMap::new();
+        }
+        if std::mem::take(&mut self.scratch_used) {
+            self.shaper = ShapeContext::new();
+            self.scaler = ScaleContext::new();
+        }
+        bytes
     }
 
-    /// Drops optional, document-warmed caches and fallback faces. The primary
-    /// face and metrics stay; the renderer must discard identities at the same time.
-    pub fn clear_document_caches(&mut self) {
+    fn clear_document_caches(&mut self) {
         self.trim_shaping();
         self.choices = HashMap::new();
         self.emoji_choices = HashMap::new();
         self.text_choices = HashMap::new();
         self.choice_bytes = 0;
         self.fallback = Default::default();
-        if self.faces.len() > 1 || self.files.len() > 1 {
+        self.blocked_primaries.clear();
+        for root in self.roots.values_mut() {
+            root.pending = 0;
+            root.blocked = false;
+            root.fallback_generation += 1;
+        }
+        // In a single-primary store, drop document-warmed faces. Never
+        // renumber a different client's primary face.
+        if self.roots.len() == 1 && (self.faces.len() > 1 || self.files.len() > 1) {
             self.faces.truncate(1);
             self.faces.shrink_to_fit();
             let primary = &self.faces[0];
             self.files = HashMap::from([(primary.path.clone(), primary.bytes.clone())]);
-            self.face_files = HashMap::from([((primary.path.clone(), primary.name.clone()), 0)]);
-            self.families = HashMap::new();
-            self.variants = HashMap::new();
+            self.face_files.retain(|_, id| *id == 0);
+            self.face_files.shrink_to_fit();
+            let root = self.roots.get_mut(&0).expect("sole primary has index zero");
+            root.known = vec![0];
+            root.families = HashMap::new();
+            root.variants = HashMap::new();
             #[cfg(target_os = "macos")]
             self.coretext_faces.clear();
         }
     }
 
-    /// Retained payload of the optional document shaping and cascade caches.
-    pub fn document_cache_bytes(&self) -> (usize, usize) {
-        (self.shaped_bytes, self.choice_bytes)
-    }
-    /// Changes shaping features without changing face/raster identities.
-    pub fn set_options(&mut self, options: crate::typography::FontOptions) {
+    pub(crate) fn set_options(&mut self, options: crate::typography::FontOptions) {
         self.options = options;
     }
+    fn request_fallback(&mut self, cascade: CascadeKey, key: vel_platform::fonts::FallbackKey) {
+        let name = &self.faces[cascade as u16 as usize].name;
+        let root = self
+            .roots
+            .get_mut(&self.primary)
+            .expect("primary font loaded");
+        if self.fallback.request(cascade, name, key) {
+            root.pending += 1;
+        } else if self.fallback.is_full() && !root.blocked {
+            root.blocked = true;
+            self.blocked_primaries.push(self.primary);
+        }
+    }
     fn fallback_face(&mut self, base: u16, cluster: &str) -> u16 {
+        use vel_platform::fonts::FallbackKey;
+        let cascade = Self::cascade_key(self.primary, base);
         if emoji_presentation(cluster) {
-            if let Some(face) = self.emoji_choices.get(&(base, cluster.to_owned())) {
+            let cluster = cluster.to_owned();
+            let key = (cascade, cluster);
+            if let Some(face) = self.emoji_choices.get(&key) {
                 return *face;
             }
-            self.fallback
-                .request_cluster(base, &self.faces[base as usize].name, cluster);
+            self.request_fallback(cascade, FallbackKey::Emoji(key.1));
             return base; // Pending presentation never blocks the first frame.
         }
         if cluster.contains('\u{fe0e}') {
-            let key = (base, cluster.to_owned());
+            let key = (cascade, cluster.to_owned());
             if let Some(face) = self.text_choices.get(&key) {
                 return *face;
             }
-            if let Some(face) = self.faces.iter().position(|face| {
+            if let Some(&id) = self.roots[&self.primary].known.iter().find(|&&id| {
+                let face = &self.faces[id as usize];
                 !face.color_glyphs
                     && cluster_characters(cluster).all(|c| face.reference().charmap().map(c) != 0)
             }) {
-                self.remember_choice(
-                    base,
-                    vel_platform::fonts::FallbackKey::Text(key.1),
-                    face as u16,
-                );
-                return face as u16;
+                self.remember_choice(cascade, FallbackKey::Text(key.1), id);
+                return id;
             }
-            self.fallback
-                .request_text_cluster(base, &self.faces[base as usize].name, cluster);
+            self.request_fallback(cascade, FallbackKey::Text(key.1));
             return base;
         }
         let mut chosen = base;
@@ -476,38 +704,35 @@ impl Fonts {
             {
                 continue;
             }
-            if let Some(face) = self.choices.get(&(base, scalar)) {
+            if let Some(face) = self.choices.get(&(cascade, scalar)) {
                 chosen = *face;
                 continue;
             }
-            if let Some(face) = self.faces.iter().position(|f| {
-                cluster_characters(cluster).all(|c| f.reference().charmap().map(c) != 0)
+            if let Some(&id) = self.roots[&self.primary].known.iter().find(|&&id| {
+                let face = &self.faces[id as usize];
+                cluster_characters(cluster).all(|c| face.reference().charmap().map(c) != 0)
             }) {
-                chosen = face as u16;
-                self.remember_choice(
-                    base,
-                    vel_platform::fonts::FallbackKey::Scalar(scalar),
-                    chosen,
-                );
+                chosen = id;
+                self.remember_choice(cascade, FallbackKey::Scalar(scalar), chosen);
                 continue;
             }
-            self.fallback
-                .request(base, &self.faces[base as usize].name, scalar);
+            self.request_fallback(cascade, FallbackKey::Scalar(scalar));
         }
         chosen
     }
     /// Font identities, raster fallback counts and diagnostics.
-    pub fn metadata(&self) -> Value {
+    fn metadata(&self) -> Value {
+        let root = &self.roots[&self.primary];
         let rasterizer = if cfg!(windows) {
             "swash"
         } else {
             "swash with CoreText fallback when a glyph has no swash image"
         };
-        json!({"rasterizer":rasterizer,"coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
+        json!({"rasterizer":rasterizer,"coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":root.cell,"ascent_points":root.metrics.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":root.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
     /// Unique face backing bytes: owned heap capacity and mapped file length.
     /// The latter is not a count of resident pages.
-    pub fn file_storage_bytes(&self) -> (usize, usize) {
+    fn file_storage_bytes(&self) -> (usize, usize) {
         let mut seen = std::collections::HashSet::new();
         let mut owned = 0;
         let mut mapped = 0;
@@ -526,15 +751,11 @@ impl Fonts {
         }
         (owned, mapped)
     }
-    /// ASCII skips shaping; non-ASCII graphemes use a cached swash shaping path.
-    pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
-        self.shape_styled(text, px, crate::scene::FontStyle::default())
-    }
     fn variant(&mut self, base: u16, style: crate::scene::FontStyle) -> u16 {
         if style == crate::scene::FontStyle::default() {
             return base;
         }
-        if let Some(face) = self.variants.get(&(base, style)) {
+        if let Some(face) = self.roots[&self.primary].variants.get(&(base, style)) {
             return *face;
         }
         let name = self.faces[base as usize].name.clone();
@@ -545,7 +766,7 @@ impl Fonts {
             .unwrap_or_else(|| native::font_location(&name).map(|(_, _, f)| f));
         let face = match original
             .and_then(|font| native::font_variant(&font, style))
-            .and_then(|(p, n, f)| self.load_face(&p, &n, Some(f)))
+            .and_then(|(p, n, f)| self.load_face(self.primary, &p, &n, Some(f)))
         {
             Ok(face) => face,
             Err(e) => {
@@ -553,16 +774,23 @@ impl Fonts {
                 base
             }
         };
-        self.variants.insert((base, style), face);
+        self.roots
+            .get_mut(&self.primary)
+            .expect("primary font loaded")
+            .variants
+            .insert((base, style), face);
         face
     }
     /// Measures representative glyphs using the editor's cascade, not a Unicode
     /// column estimate. Keep the measurement faces out of the raster cascade.
     pub fn wide_advances(&mut self) -> WideAdvances {
-        if let Some(advances) = self.wide_advances {
+        let root = &self.roots[&self.primary];
+        if let Some(advances) = root.wide_advances {
             return advances;
         }
-        let primary = &self.faces[0];
+        let cell = root.cell;
+        let primary = &self.faces[self.primary as usize];
+        self.scratch_used = true;
         let cells = WideAdvances::SAMPLES.map(|cluster| {
             let first = cluster.chars().next().expect("sample");
             let emoji = emoji_presentation(cluster);
@@ -601,31 +829,26 @@ impl Fonts {
             shaper.add_str(cluster);
             let mut advance = 0.;
             shaper.shape_with(|g| advance += g.advance());
-            f64::from(advance) / f64::from(self.cell)
+            f64::from(advance) / f64::from(cell)
         });
         let advances = WideAdvances::new(cells);
-        self.wide_advances = Some(advances);
+        self.roots
+            .get_mut(&self.primary)
+            .expect("primary font loaded")
+            .wide_advances = Some(advances);
         advances
     }
-    /// Shapes using actual face variants, including each non-ASCII fallback family.
-    pub fn shape_styled(
-        &mut self,
-        text: &str,
-        px: f32,
-        style: crate::scene::FontStyle,
-    ) -> Vec<ShapedGlyph> {
-        self.shape_editor(text, px, style, WideAdvances::default())
-    }
-
     /// Shapes an editor run using the same width classes as row geometry.
-    pub fn shape_editor(
+    pub(crate) fn shape_editor(
         &mut self,
         text: &str,
         px: f32,
         style: crate::scene::FontStyle,
         advances: WideAdvances,
     ) -> Vec<ShapedGlyph> {
-        let primary = self.variant(0, style);
+        let primary = self.variant(self.primary, style);
+        let root = &self.roots[&self.primary];
+        let cell = root.cell;
         let shape_ascii = self.options.stylistic_sets != 0
             || ((self.faces[primary as usize].ligatures && self.options.disabled != 7
                 || self.options.discretionary)
@@ -635,7 +858,7 @@ impl Fonts {
                     .any(|pair| pair.iter().all(u8::is_ascii_punctuation)));
         if text.is_ascii()
             && !shape_ascii
-            && (self.ascii_complete || text.bytes().all(|b| self.ascii[b as usize] != 0))
+            && (root.ascii_complete || text.bytes().all(|b| root.ascii[b as usize] != 0))
         {
             let face = primary;
             return text
@@ -643,15 +866,15 @@ impl Fonts {
                 .enumerate()
                 .map(|(i, b)| ShapedGlyph {
                     face,
-                    id: if face == 0 {
-                        self.ascii[b as usize]
+                    id: if face == self.primary {
+                        root.ascii[b as usize]
                     } else {
                         self.faces[face as usize]
                             .reference()
                             .charmap()
                             .map(char::from(b))
                     },
-                    x: i as f32 * self.cell * px / 13.,
+                    x: i as f32 * cell * px / 13.,
                     y: 0.,
                     source: [i, i + 1],
                 })
@@ -663,6 +886,7 @@ impl Fonts {
             style,
             self.options,
             advances.identity(),
+            self.primary,
         );
         if let Some(g) = self.shaped.get(&key) {
             return g.clone();
@@ -670,6 +894,7 @@ impl Fonts {
 
         // Keep each grapheme intact during fallback, then shape adjacent
         // graphemes of the same face as a run (Kana/Arabic/Indic contextual forms).
+        self.scratch_used = true;
         let mut runs: Vec<(usize, usize, u16)> = Vec::new();
         let mut previous_kind = None;
         for (start, cluster) in text.grapheme_indices(true) {
@@ -678,7 +903,7 @@ impl Fonts {
             } else {
                 2
             };
-            let face = self.fallback_face(0, cluster);
+            let face = self.fallback_face(self.primary, cluster);
             let face = self.variant(face, style);
             let end = start + cluster.len();
             if let Some(previous) = runs.last_mut()
@@ -691,7 +916,7 @@ impl Fonts {
             }
             previous_kind = Some(kind);
         }
-        let cell = self.cell * px / 13.;
+        let cell = cell * px / 13.;
         let mut offsets = vec![0.; text.len() + 1];
         let mut column = 0;
         let mut adjustment = 0.;
@@ -787,19 +1012,20 @@ impl Fonts {
     }
     /// Shapes a proportional UI run using the same face/fallback/raster stack as painting.
     /// Family lists are tried in order; generic CSS families map to native system faces.
-    pub fn shape_ui(
+    pub(crate) fn shape_ui(
         &mut self,
         text: &str,
         families: &str,
         px: f32,
         style: crate::scene::FontStyle,
     ) -> UiRun {
-        let base = if let Some(index) = self.families.get(families) {
+        let root = &self.roots[&self.primary];
+        let base = if let Some(index) = root.families.get(families) {
             *index
-        } else if self.families.len() >= 256 || self.faces.len() >= 512 {
-            0
+        } else if root.families.len() >= 256 || root.known.len() >= 512 {
+            self.primary
         } else {
-            let mut index = 0;
+            let mut index = self.primary;
             for requested in families
                 .split(',')
                 .map(|s| s.trim().trim_matches(['\"', '\'']))
@@ -811,15 +1037,17 @@ impl Fonts {
                     s => s,
                 };
                 if let Ok((path, name, native)) = native::font_location(name)
-                    && let Ok(face) = self.load_face(&path, &name, Some(native))
+                    && let Ok(face) = self.load_face(self.primary, &path, &name, Some(native))
                 {
                     index = face;
                     break;
                 }
             }
-            if self.families.len() < 256 {
-                self.families.insert(families.into(), index);
-            }
+            let root = self
+                .roots
+                .get_mut(&self.primary)
+                .expect("primary font loaded");
+            root.families.insert(families.into(), index);
             index
         };
 
@@ -881,7 +1109,8 @@ impl Fonts {
         out
     }
     /// Rasterizes one glyph at a quarter-pixel physical phase.
-    pub fn rasterize(&mut self, face: u16, id: u16, px: f32, bucket: u8) -> Option<Image> {
+    pub(crate) fn rasterize(&mut self, face: u16, id: u16, px: f32, bucket: u8) -> Option<Image> {
+        self.scratch_used = true;
         let no_antialias = bucket & 4 != 0;
         let bucket = bucket & 3;
         let font = self.faces[face as usize].reference();
@@ -971,12 +1200,15 @@ fn distinct_cjk_and_large_shaped_runs_fit_cpu_budgets_and_clear_on_close() {
     for _ in 0..300 {
         let run: String = scalars.by_ref().take(100).collect();
         for c in run.chars() {
-            fonts.remember_choice(0, FallbackKey::Scalar(c), 0);
+            fonts
+                .store
+                .borrow_mut()
+                .remember_choice(0, FallbackKey::Scalar(c), 0);
         }
         fonts.shape(&run, 13.);
-        assert!(fonts.choices.len() <= CHOICE_KEYS);
-        assert!(fonts.choice_bytes <= CHOICE_BYTES);
-        assert!(fonts.shaped_bytes <= SHAPED_BYTES);
+        assert!(fonts.store.borrow().choices.len() <= CHOICE_KEYS);
+        assert!(fonts.store.borrow().choice_bytes <= CHOICE_BYTES);
+        assert!(fonts.store.borrow().shaped_bytes <= SHAPED_BYTES);
     }
     let glyph = ShapedGlyph {
         face: 0,
@@ -986,22 +1218,26 @@ fn distinct_cjk_and_large_shaped_runs_fit_cpu_budgets_and_clear_on_close() {
         source: [0, 1],
     };
     let oversized = vec![glyph; SHAPED_BYTES / size_of::<ShapedGlyph>() + 1];
-    let before = fonts.shaped_bytes;
-    fonts.remember_shaped(
+    let before = fonts.store.borrow().shaped_bytes;
+    fonts.store.borrow_mut().remember_shaped(
         (
             "oversized".into(),
             832,
             Default::default(),
             Default::default(),
             0,
+            0,
         ),
         &oversized,
     );
-    assert_eq!(fonts.shaped_bytes, before);
+    assert_eq!(fonts.store.borrow().shaped_bytes, before);
     assert!(before > 0);
     fonts.clear_document_caches();
     assert_eq!(fonts.document_cache_bytes(), (0, 0));
-    assert_eq!(fonts.shaped.capacity() + fonts.choices.capacity(), 0);
+    assert_eq!(
+        fonts.store.borrow().shaped.capacity() + fonts.store.borrow().choices.capacity(),
+        0
+    );
     assert_eq!(fonts.file_storage_bytes(), baseline);
 }
 /// Use straight-alpha RGBA for masks. Swash color bitmaps are retained as delivered.
@@ -1025,12 +1261,44 @@ pub fn rgba(image: &Image) -> Vec<u8> {
 
 impl std::fmt::Debug for Fonts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let store = self.store.borrow();
         f.debug_struct("Fonts")
-            .field("faces", &self.faces)
+            .field("faces", &store.faces)
             .field("cell", &self.cell)
-            .field("warnings", &self.warnings)
+            .field("warnings", &store.warnings)
             .finish_non_exhaustive()
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn window_fonts_share_storage_but_keep_primary_and_size_distinct() {
+    let mut first = Fonts::load_shared().unwrap();
+    let mut second = Fonts::load_shared().unwrap();
+    let mut other = Fonts::load_shared_named("Monaco").unwrap();
+    assert!(Rc::ptr_eq(&first.store, &second.store));
+    assert!(Rc::ptr_eq(&first.store, &other.store));
+    assert_eq!(first.primary, second.primary);
+    assert_ne!(first.primary, other.primary);
+
+    let text = "Ma\u{00e4}";
+    let before = first.shape(text, 13.);
+    let warm = first.document_cache_bytes();
+    assert!(warm.0 > 0);
+    let again = second.shape(text, 13.);
+    assert_eq!(first.document_cache_bytes(), warm);
+    assert_eq!(again[1].id, before[1].id);
+    assert_eq!(again[1].x, before[1].x);
+    let bigger = second.shape(text, 26.);
+    assert_eq!(bigger[1].x, 2. * before[1].x);
+    assert_ne!(other.shape(text, 13.)[0].face, before[0].face);
+
+    let store = Rc::downgrade(&first.store);
+    drop(first);
+    drop(second);
+    assert!(store.upgrade().is_some());
+    drop(other);
+    assert!(store.upgrade().is_none());
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1061,9 +1329,10 @@ mod tests {
     #[test]
     fn primary_grid_matches_the_shaped_instance() {
         let menlo = super::Fonts::load().unwrap();
-        assert!(menlo.faces[0].coords.is_empty());
-        let face = menlo.faces[0].reference();
-        let m = menlo.ascii[b'M' as usize];
+        let store = menlo.store.borrow();
+        assert!(store.faces[0].coords.is_empty());
+        let face = store.faces[0].reference();
+        let m = store.roots[&menlo.primary].ascii[b'M' as usize];
         let cell = face.glyph_metrics(&[]).scale(13.).advance_width(m);
         assert_eq!(menlo.cell.to_bits(), cell.to_bits());
         let metrics = face.metrics(&[]).scale(13.);
@@ -1072,7 +1341,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             let mut system = super::Fonts::load_named(".AppleSystemUIFont").unwrap();
-            if !system.faces[0].coords.is_empty() {
+            if !system.store.borrow().faces[0].coords.is_empty() {
                 let run = system.shape_ui(
                     "M",
                     ".AppleSystemUIFont",
@@ -1118,9 +1387,14 @@ mod tests {
         let (r, b) = (regular.glyphs[0], heavy.glyphs[0]);
         assert!(r.id != 0 && b.id != 0, "{}", fonts.metadata());
         assert!(
-            fonts.warnings.iter().all(|w| !w.contains("no file URL")),
+            fonts
+                .store
+                .borrow()
+                .warnings
+                .iter()
+                .all(|w| !w.contains("no file URL")),
             "{:?}",
-            fonts.warnings
+            fonts.store.borrow().warnings
         );
         let ink = |face: u16, id: u16, fonts: &mut super::Fonts| {
             let image = fonts.rasterize(face, id, 22., 0).unwrap();
@@ -1131,8 +1405,8 @@ mod tests {
         assert!(
             bold_ink > regular_ink * 6 / 5,
             "bold {bold_ink} vs regular {regular_ink} ({} / {})",
-            fonts.faces[r.face as usize].name,
-            fonts.faces[b.face as usize].name
+            fonts.store.borrow().faces[r.face as usize].name,
+            fonts.store.borrow().faces[b.face as usize].name
         );
         // Full-width characters keep their one-em advance in either weight.
         assert!((heavy.advance - regular.advance).abs() < 0.5);
@@ -1154,12 +1428,17 @@ mod tests {
             },
         );
         let (r, b) = (regular.glyphs[0].face, bold.glyphs[0].face);
-        if fonts.faces[r as usize].path != fonts.faces[b as usize].path {
+        if fonts.store.borrow().faces[r as usize].path
+            != fonts.store.borrow().faces[b as usize].path
+        {
             return; // A static family: real faces, nothing to apply.
         }
-        assert!(!fonts.faces[b as usize].coords.is_empty(), "bold instance");
         assert!(
-            !fonts.faces[r as usize].coords.is_empty(),
+            !fonts.store.borrow().faces[b as usize].coords.is_empty(),
+            "bold instance"
+        );
+        assert!(
+            !fonts.store.borrow().faces[r as usize].coords.is_empty(),
             "text optical size"
         );
         assert!(bold.advance > regular.advance + 0.5);
@@ -1246,9 +1525,9 @@ mod round17_tests {
             (crate::typography::grid_x(1, fonts.cell as f64) - glyphs[1].x as f64 / 2.).abs()
                 < 0.001
         );
-        let count = fonts.shaped.len();
+        let count = fonts.store.borrow().shaped.len();
         fonts.shape("->x", 13.);
-        assert_eq!(fonts.shaped.len(), count);
+        assert_eq!(fonts.store.borrow().shaped.len(), count);
         fonts.set_options(crate::typography::FontOptions::parse(["no_liga"]));
         assert_eq!(fonts.shape("->x", 13.).len(), 3);
         fonts.set_options(crate::typography::FontOptions::default());
@@ -1258,23 +1537,25 @@ mod round17_tests {
         let regular = fonts.shape("x", 13.)[0].id;
         fonts.set_options(crate::typography::FontOptions::parse(["ss01"]));
         assert_ne!(fonts.shape("x", 13.)[0].id, regular);
-        assert_eq!(fonts.files.len(), 1);
-        assert_eq!(fonts.faces.len(), 1);
+        assert_eq!(fonts.store.borrow().files.len(), 1);
+        assert_eq!(fonts.store.borrow().faces.len(), 1);
         assert!(!fonts.fallback_pending());
     }
     #[test]
     fn font_file_snapshots_are_deduplicated_without_loading_fallbacks() {
-        let mut fonts = fixture();
+        let fonts = fixture();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ligature-fixture.ttf");
         assert_eq!(
             fonts
-                .load_face(&path, "VelocityFixture-Regular", None)
+                .store
+                .borrow_mut()
+                .load_face(0, &path, "VelocityFixture-Regular", None)
                 .unwrap(),
             0
         );
-        assert_eq!(fonts.files.len(), 1);
-        assert!(std::sync::Arc::strong_count(&fonts.faces[0].bytes) >= 2);
-        assert!(fonts.choices.is_empty());
+        assert_eq!(fonts.store.borrow().files.len(), 1);
+        assert!(std::sync::Arc::strong_count(&fonts.store.borrow().faces[0].bytes) >= 2);
+        assert!(fonts.store.borrow().choices.is_empty());
         assert!(!fonts.fallback_pending());
     }
     #[test]
@@ -1331,7 +1612,7 @@ mod round17_tests {
             }
             println!(
                 "SHAPING_TIMING {}",
-                json!({"font":label,"cold_run_us":cold.as_secs_f64()*1e6/4000.,"warm_run_us":warm.elapsed().as_secs_f64()*1e6/20_000.,"file":path,"mapped_files":font.files.len()})
+                json!({"font":label,"cold_run_us":cold.as_secs_f64()*1e6/4000.,"warm_run_us":warm.elapsed().as_secs_f64()*1e6/20_000.,"file":path,"mapped_files":font.store.borrow().files.len()})
             );
         }
     }
@@ -1366,13 +1647,14 @@ mod fallback_mock_tests {
             "VelocityFixture-Regular",
         )
         .unwrap();
-        fonts.fallback = vel_platform::fonts::AsyncFontFallback::with_resolver(Resolver {
-            calls: calls.clone(),
-            path: root.join("fallback-fixture.ttf"),
-        });
+        fonts.store.borrow_mut().fallback =
+            vel_platform::fonts::AsyncFontFallback::with_resolver(Resolver {
+                calls: calls.clone(),
+                path: root.join("fallback-fixture.ttf"),
+            });
         fonts.shape("->x", 13.);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(fonts.faces.len(), 1);
+        assert_eq!(fonts.store.borrow().faces.len(), 1);
         let scripts = "한ไअאع𝒜⠿\u{e000}";
         fonts.shape(scripts, 13.);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1390,8 +1672,8 @@ mod fallback_mock_tests {
         }
         fonts.shape(scripts, 13.);
         assert_eq!(calls.load(Ordering::Relaxed), 8);
-        assert_eq!(fonts.faces.len(), 2);
-        assert_eq!(fonts.files.len(), 2);
+        assert_eq!(fonts.store.borrow().faces.len(), 2);
+        assert_eq!(fonts.store.borrow().files.len(), 2);
     }
 }
 
@@ -1439,7 +1721,7 @@ mod review_regressions {
             .truncate(true)
             .open(&path)
             .unwrap();
-        fonts.shaped.clear();
+        fonts.store.borrow_mut().shaped.clear();
         let after = fonts.shape("->x", 13.);
         assert_eq!(
             before.iter().map(|g| g.id).collect::<Vec<_>>(),
@@ -1447,7 +1729,7 @@ mod review_regressions {
         );
         assert!(after.iter().all(|g| g.id != 0));
         assert!(matches!(
-            &*fonts.faces[0].bytes,
+            &*fonts.store.borrow().faces[0].bytes,
             vel_platform::fonts::FontData::Owned(_)
         ));
         std::fs::remove_file(path).unwrap();
@@ -1473,7 +1755,8 @@ mod review_regressions {
             "VelocityFixture-Regular",
         )
         .unwrap();
-        fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.join("emoji-fixture.ttf")));
+        fonts.store.borrow_mut().fallback =
+            AsyncFontFallback::with_resolver(Resolver(root.join("emoji-fixture.ttf")));
         let cases = [
             ("❤️", true),
             ("☺️", true),
@@ -1514,8 +1797,8 @@ mod review_regressions {
                 "{cluster}: {glyphs:?}"
             );
         }
-        assert_eq!(fonts.faces.len(), 2);
-        assert_eq!(fonts.files.len(), 2);
+        assert_eq!(fonts.store.borrow().faces.len(), 2);
+        assert_eq!(fonts.store.borrow().files.len(), 2);
         assert!(!fonts.fallback_pending());
     }
     #[test]
@@ -1552,11 +1835,12 @@ mod review_regressions {
                 "VelocityFixture-Regular",
             )
             .unwrap();
-            fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.clone()));
+            fonts.store.borrow_mut().fallback =
+                AsyncFontFallback::with_resolver(Resolver(root.clone()));
             if emoji_first {
                 fonts.shape("😀", 13.);
                 drain(&mut fonts);
-                assert!(fonts.faces[1].color_glyphs);
+                assert!(fonts.store.borrow().faces[1].color_glyphs);
                 // Exercise both the already-loaded-face shortcut and a cached scalar.
                 fonts.shape("⛑", 13.);
             }
@@ -1566,12 +1850,12 @@ mod review_regressions {
                 fonts.shape("😀", 13.);
                 drain(&mut fonts);
             }
-            fonts.shaped.clear();
+            fonts.store.borrow_mut().shaped.clear();
             let glyphs = fonts.shape("⛑\u{fe0e}", 13.);
             assert!(!glyphs.is_empty());
             assert!(
                 glyphs.iter().all(|glyph| {
-                    let face = &fonts.faces[glyph.face as usize];
+                    let face = &fonts.store.borrow().faces[glyph.face as usize];
                     glyph.id != 0 && !face.color_glyphs && face.name == "VelocityFallback-Regular"
                 }),
                 "emoji_first={emoji_first}: {glyphs:?}"
@@ -1634,7 +1918,7 @@ mod review_regressions {
             "VelocityFixture-Regular",
         )
         .unwrap();
-        fonts.fallback = AsyncFontFallback::with_resolver(Resolver {
+        fonts.store.borrow_mut().fallback = AsyncFontFallback::with_resolver(Resolver {
             root,
             calls: calls.clone(),
         });
@@ -1763,7 +2047,8 @@ mod review_regressions {
                     "VelocityFixture-Regular",
                 )
                 .unwrap();
-                fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.clone()));
+                fonts.store.borrow_mut().fallback =
+                    AsyncFontFallback::with_resolver(Resolver(root.clone()));
                 let bare = scalar.to_string();
                 let text = format!("{scalar}\u{fe0e}");
                 let emoji = format!("{scalar}\u{fe0f}");
@@ -1778,9 +2063,10 @@ mod review_regressions {
                             cluster == &emoji || (cluster == &bare && default_emoji);
                         let glyphs = settled_glyphs(&mut fonts, cluster);
                         assert!(
-                            glyphs.iter().all(
-                                |g| fonts.faces[g.face as usize].color_glyphs == expected_emoji
-                            ),
+                            glyphs
+                                .iter()
+                                .all(|g| fonts.store.borrow().faces[g.face as usize].color_glyphs
+                                    == expected_emoji),
                             "{cluster} text_first={text_first}: {glyphs:?}"
                         );
                     }
@@ -1810,13 +2096,13 @@ mod review_regressions {
                         assert!(
                             glyphs
                                 .iter()
-                                .all(|g| !fonts.faces[g.face as usize].color_glyphs),
+                                .all(|g| !fonts.store.borrow().faces[g.face as usize].color_glyphs),
                             "{text}: text keycap lost its available text face"
                         );
                     }
                     assert!(
                         glyphs.iter().all(|g| {
-                            let face = &fonts.faces[g.face as usize];
+                            let face = &fonts.store.borrow().faces[g.face as usize];
                             cluster_characters(&text)
                                 .all(|c| face.reference().charmap().map(c) != 0)
                         }),

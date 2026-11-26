@@ -2299,7 +2299,7 @@ fn render(
     loop {
         let fonts = app.fonts.as_mut().ok_or("fonts missing")?;
         if fonts.poll_fallbacks() {
-            renderer.invalidate_layouts();
+            renderer.invalidate_prepared();
             pixels = renderer.render_rgba(&scene, fonts, scale)?;
             continue;
         }

@@ -32,6 +32,27 @@ fn app_with_text(text: Text) -> App {
     a
 }
 
+#[test]
+fn two_apps_keep_text_pixels_when_fonts_are_shared() {
+    fn pixels(app: &mut App, fonts: Fonts) -> Vec<u8> {
+        app.reload_font_views(fonts, 1.);
+        let scene = app.scene();
+        assert!(
+            scene
+                .layers
+                .iter()
+                .any(|layer| { layer.text.iter().any(|run| run.text.contains("let shared")) })
+        );
+        vel_render::snapshot::text_rgba(&scene, app.fonts.as_mut().unwrap(), 640, 360, 1.).unwrap()
+    }
+    let text = Text::from_str("let shared = 42;\n");
+    let mut first = app_with_text(text.clone());
+    let mut second = app_with_text(text);
+    let before = pixels(&mut first, Fonts::load().unwrap());
+    assert_eq!(pixels(&mut first, Fonts::load_shared().unwrap()), before);
+    assert_eq!(pixels(&mut second, Fonts::load_shared().unwrap()), before);
+}
+
 fn named(a: &mut App, name: &str, args: Value) {
     a.run_named(None, name, &args);
 }

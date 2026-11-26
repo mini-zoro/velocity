@@ -13,7 +13,9 @@ pub struct LayoutStyle {
     pub font_style: crate::scene::FontStyle,
     /// Physical font size in 1/64 pixels.
     pub px64: u32,
-    /// Changes when the font set/configuration changes.
+    /// Resolved primary face and its fallback generation.
+    pub font_set: (u64, u64),
+    /// Shaping options, width classes and UI family.
     pub font_epoch: u64,
 }
 #[derive(Debug)]
@@ -162,6 +164,7 @@ mod tests {
         let s = LayoutStyle {
             font_style: Default::default(),
             px64: 832,
+            font_set: (0, 0),
             font_epoch: 0,
         };
         c.insert("a", s, Arc::from([]));
@@ -170,6 +173,26 @@ mod tests {
         c.insert("c", s, Arc::from([]));
         assert!(c.get("b", s).is_none());
         assert!(c.get("a", LayoutStyle { px64: 1664, ..s }).is_none());
+        assert!(
+            c.get(
+                "a",
+                LayoutStyle {
+                    font_set: (1, 0),
+                    ..s
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            c.get(
+                "a",
+                LayoutStyle {
+                    font_set: (0, 1),
+                    ..s
+                }
+            )
+            .is_none()
+        );
         assert_eq!(c.len(), 2);
     }
 
@@ -184,7 +207,7 @@ mod tests {
             for (insert, key, epoch) in operations {
                 let text = key.to_string();
                 let style = LayoutStyle {
-                    font_style: Default::default(), px64: 832, font_epoch: epoch,
+                    font_style: Default::default(), px64: 832, font_set: (0, 0), font_epoch: epoch,
                 };
                 let item = (text.clone(), style);
                 let found = model.iter().position(|e| e == &item);
@@ -221,6 +244,7 @@ mod tests {
         let style = LayoutStyle {
             font_style: Default::default(),
             px64: 832,
+            font_set: (0, 0),
             font_epoch: 0,
         };
         let mut cache = LineLayoutCache::new(1);

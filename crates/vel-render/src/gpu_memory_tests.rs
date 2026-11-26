@@ -1,7 +1,10 @@
 //! GPU memory must stay flat in a steady state. These run against the real device
 //! (Metal on macOS) with wgpu's internal counters, so a frame path that leaks buffers or
 //! textures fails here instead of in a user's process hours later.
-use super::{INSTANCE_SHRINK_FRAMES, MIN_INSTANCE_BYTES, RASTER_BYTES, Renderer};
+use super::{
+    INSTANCE_SHRINK_FRAMES, MIN_INSTANCE_BYTES, Renderer,
+    shared_atlas::{RASTER_BYTES, Raster},
+};
 use crate::{
     font::Fonts,
     scene::{Layer, Scene, SolidRect, TextRun},
@@ -19,7 +22,7 @@ struct Gpu {
 fn gpu(renderer: &Renderer) -> Gpu {
     // A finished submission is only retired when the device is maintained.
     renderer.wait_idle().unwrap();
-    let hal = renderer.device.get_internal_counters().hal;
+    let hal = renderer.gpu.device.get_internal_counters().hal;
     Gpu {
         buffers: hal.buffers.read(),
         textures: hal.textures.read(),
@@ -70,6 +73,98 @@ fn renderer() -> Option<(Renderer, Fonts)> {
             None
         }
     }
+}
+
+#[test]
+fn offscreen_clients_share_device_pipeline_and_release_context() {
+    let first = Renderer::offscreen(48, 32).unwrap();
+    let second = Renderer::offscreen(64, 48).unwrap();
+    let shared = std::rc::Rc::downgrade(&first.gpu);
+    assert!(std::rc::Rc::ptr_eq(&first.gpu, &second.gpu));
+    assert_eq!(first.gpu.device, second.gpu.device);
+    assert_eq!(first.pipeline, second.pipeline);
+    assert_ne!(first.instances, second.instances);
+    assert_ne!(first.screen, second.screen);
+    drop(first);
+    assert!(shared.upgrade().is_some());
+    drop(second);
+    assert!(shared.upgrade().is_none());
+}
+
+#[test]
+fn device_loss_is_seen_by_all_offscreen_clients() {
+    let first = Renderer::offscreen(48, 32).unwrap();
+    let second = Renderer::offscreen(64, 48).unwrap();
+    first.gpu.device.destroy();
+    // wgpu delivers the callback on maintenance once the queue is empty.
+    let _ = first.gpu.device.poll(wgpu::PollType::Poll);
+    let first_error = first.gpu.check_device().unwrap_err();
+    assert_eq!(second.wait_idle().unwrap_err(), first_error);
+    assert!(Renderer::offscreen(48, 32).is_err());
+}
+
+#[test]
+fn two_offscreen_renderers_allocate_cjk_pages_once() {
+    let mut first = Renderer::offscreen(800, 600).unwrap();
+    let mut second = Renderer::offscreen(800, 600).unwrap();
+    let mut fonts = Fonts::load_shared().unwrap();
+    let mut other_fonts = Fonts::load_shared().unwrap();
+    fonts.shape("网关", 12.);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        fonts.poll_fallbacks();
+        if !fonts.fallback_pending() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "CJK fallback timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(fonts.shape("网关", 12.).iter().all(|g| g.id != 0));
+
+    let scene = page(0);
+    let pixels = first.render_rgba(&scene, &mut fonts, 1.).unwrap();
+    let atlas = first.atlas_info();
+    assert!(atlas["allocated_array_layers"].as_u64().unwrap() > 0);
+    let usage = gpu(&first);
+    assert_eq!(
+        second.render_rgba(&scene, &mut other_fonts, 1.).unwrap(),
+        pixels
+    );
+    assert_eq!(second.atlas_info()["glyph_keys"], atlas["glyph_keys"]);
+    assert_eq!(
+        second.atlas_info()["allocated_array_layers"],
+        atlas["allocated_array_layers"]
+    );
+    assert_eq!(gpu(&second).textures, usage.textures);
+
+    // A different scale is a different raster key even at the same physical
+    // size (6 pt @ 2x versus 12 pt @ 1x).
+    let mut retina = page(0);
+    for run in &mut retina.layers[0].text {
+        run.size *= 0.5;
+    }
+    second.render_rgba(&retina, &mut other_fonts, 2.).unwrap();
+    assert!(second.atlas_info()["glyph_keys"].as_u64() > atlas["glyph_keys"].as_u64());
+
+    let generation = atlas["generation"].as_u64().unwrap();
+    assert_eq!(first.prepared_generation, Some(generation));
+    second.reset_fonts();
+    assert!(first.atlas_info()["generation"].as_u64().unwrap() > generation);
+    assert_ne!(
+        first.prepared_generation,
+        first.atlas_info()["generation"].as_u64()
+    );
+    assert_eq!(first.render_rgba(&scene, &mut fonts, 1.).unwrap(), pixels);
+
+    let usage = gpu(&first);
+    assert!(second.trim_memory(true).0 > 0);
+    assert_eq!(first.memory_cache_bytes().0, 0);
+    assert_eq!(first.trim_memory(true).0, 0);
+    assert_eq!(gpu(&first).textures, usage.textures - 1);
+    assert_eq!(first.render_rgba(&scene, &mut fonts, 1.).unwrap(), pixels);
 }
 
 #[test]
@@ -269,7 +364,7 @@ fn memory_trim_right_sizes_instances_and_rebuilds_the_atlas_on_draw() {
     assert_eq!(renderer.capacity, MIN_INSTANCE_BYTES);
     assert!(renderer.data.capacity() <= MIN_INSTANCE_BYTES as usize / size_of::<super::Instance>());
     assert_eq!(renderer.memory_cache_bytes().0, 0);
-    assert!(renderer.atlas.is_empty());
+    assert!(renderer.gpu.atlas.borrow().atlas.is_empty());
     assert_eq!(
         renderer.render_rgba(&small, &mut fonts, 1.).unwrap(),
         before
@@ -315,16 +410,18 @@ fn cjk_scroll_and_document_close_release_cpu_glyph_caches() {
         renderer.prepare(&scene, &mut fonts, 1.).unwrap();
         renderer.discard_staged_writes();
         assert!(
-            renderer.rasters.capacity() * 2 * (size_of::<(super::GlyphKey, super::Raster)>() + 1)
+            renderer.gpu.atlas.borrow().rasters.capacity()
+                * 2
+                * (size_of::<(super::GlyphKey, Raster)>() + 1)
                 <= RASTER_BYTES
         );
     }
-    assert!(!renderer.rasters.is_empty());
+    assert!(!renderer.gpu.atlas.borrow().rasters.is_empty());
     renderer.reset_fonts();
     fonts.clear_document_caches();
-    assert_eq!(renderer.rasters.capacity(), 0);
-    assert!(renderer.atlas.is_empty());
-    assert_eq!(renderer.layouts.storage_bytes(), 0);
+    assert_eq!(renderer.gpu.atlas.borrow().rasters.capacity(), 0);
+    assert!(renderer.gpu.atlas.borrow().atlas.is_empty());
+    assert_eq!(renderer.gpu.layouts.borrow().storage_bytes(), 0);
     assert_eq!(fonts.document_cache_bytes(), (0, 0));
     assert_eq!(fonts.file_storage_bytes(), files);
 }
