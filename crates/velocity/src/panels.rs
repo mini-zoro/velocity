@@ -9863,7 +9863,10 @@ mod intelligence_tests {
         panels: &mut Panels,
         condition: impl Fn(&Workspace, &Panels) -> bool,
     ) {
-        let until = Instant::now() + Duration::from_secs(15);
+        // A hang guard, not a latency assertion: the index worker shares the
+        // machine with every other test in this binary, and a saturated CI
+        // runner starves it past 15 s. The outcome is still asserted below.
+        let until = Instant::now() + Duration::from_secs(120);
         loop {
             workspace.poll();
             panels.poll(workspace, 0..100);
