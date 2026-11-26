@@ -113,8 +113,8 @@ scenarios() {
         probe
     fi
     local keyboard=0 pointer=0
-    grep -q '^PASS \[probe\] Pinyin HID: nihao' "$probe_log" && keyboard=1
-    grep -q '^PASS \[probe\] HID click places the caret' "$probe_log" && pointer=1
+    if grep -q '^PASS \[probe\] Pinyin HID: nihao' "$probe_log"; then keyboard=1; fi
+    if grep -q '^PASS \[probe\] HID click places the caret' "$probe_log"; then pointer=1; fi
     echo "probe: keyboard=$keyboard pointer=$pointer"
     if [ "$keyboard" = 1 ] && [ "$pointer" = 1 ]; then
         # Scenarios that need the input method and the mouse.
@@ -139,6 +139,13 @@ summary() {
         for file in "$E2E_RESULTS"/*.log; do
             [ -e "$file" ] || continue
             name=$(basename "$file" .log)
+            if [ "$name" = probe ]; then
+                # The capability table is informational; its CHECK lines are shown in
+                # full above, so only a count goes in the table.
+                printf '| probe | INFO | %s checks failed of %s |\n' \
+                    "$(grep -c '^FAIL' "$file" || true)" "$(grep -c '^\(PASS\|FAIL\)' "$file" || true)"
+                continue
+            fi
             line=$(grep '^SUMMARY' "$file" | tail -1 || true)
             if [ -z "$line" ]; then
                 printf '| %s | FAIL | no SUMMARY line (crash or timeout) |\n' "$name"
