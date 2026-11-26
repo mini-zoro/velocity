@@ -122,7 +122,7 @@ func probe() -> Never {
         // frontmost and whether the IME process is up before typing.
         report.info("input method processes", detail: output("pgrep -fl 'SCIM|imklaunchagent' | head -5") ?? "none")
         report.info("before IME typing", detail: "front=\(frontmostName()) pid=\(frontmostPid()) textEdit=\(textEdit)")
-        let area = axFind(axApp(textEdit), role: "AXTextArea")
+        let area = axDocumentWindow(textEdit).flatMap { axFind($0, role: "AXTextArea") }
         if let area {
             _ = AXUIElementSetAttributeValue(area, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         }
@@ -151,7 +151,7 @@ func probe() -> Never {
             _ = shell("open -e \(fresh.shellQuoted)")
             usleep(1_500_000)
             if let freshPid = waitForApp(bundleId: "com.apple.TextEdit", timeout: 10) {
-                _ = waitUntil(5) { axWindows(freshPid).count > 1 || !readText(pid: freshPid).isEmpty }
+                _ = waitUntil(5) { axStandardWindows(freshPid).count > 1 || !readText(pid: freshPid).isEmpty }
                 selectAll(pid: freshPid)
                 typeKeys("nihao", gap: 60_000)
                 usleep(300_000)
@@ -197,8 +197,10 @@ func parentChain() -> String {
     return chain.joined(separator: " <- ")
 }
 
+/// The text of the document window's text area (never a text area found by walking
+/// every window the app owns: an input-method bubble or panel can come first).
 func readText(pid: pid_t) -> String {
-    guard let area = axFind(axApp(pid), role: "AXTextArea") else { return "" }
+    guard let window = axDocumentWindow(pid), let area = axFind(window, role: "AXTextArea") else { return "" }
     return axString(area, kAXValueAttribute) ?? ""
 }
 
@@ -242,12 +244,12 @@ func probeTextEdit(_ report: Report) -> pid_t? {
         return nil
     }
     _ = status
-    _ = waitUntil(10) { !axWindows(pid).isEmpty }
+    _ = waitUntil(10) { !axStandardWindows(pid).isEmpty }
     NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
     usleep(800_000)
     let front = frontmostPid()
     report.check(front == pid, "TextEdit frontmost after launch", detail: "front=\(frontmostName()) pid=\(front)")
-    if let area = axFind(axApp(pid), role: "AXTextArea") {
+    if let area = axDocumentWindow(pid).flatMap({ axFind($0, role: "AXTextArea") }) {
         _ = AXUIElementSetAttributeValue(area, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
     selectAll(pid: pid)
@@ -264,7 +266,7 @@ func probeTextEdit(_ report: Report) -> pid_t? {
 }
 
 func probeMouse(_ report: Report, textEdit pid: pid_t) {
-    guard let window = axWindows(pid).first, let frame = axRect(window) else {
+    guard let window = axDocumentWindow(pid), let frame = axRect(window) else {
         report.check(false, "TextEdit window frame")
         return
     }

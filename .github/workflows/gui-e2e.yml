@@ -73,7 +73,8 @@ jobs:
         run: scripts/e2e/run.sh summary
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        # Always: a passing run still needs its AX dumps and screenshots to be checked.
+        if: always()
         with:
           name: gui-e2e-artifacts
           path: |

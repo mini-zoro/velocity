@@ -90,19 +90,18 @@ func launchVelocity(_ environment: Environment, files: [String], background: Boo
     process.standardError = FileHandle.nullDevice
     process.standardInput = FileHandle.nullDevice
     do { try process.run() } catch { fail("cannot launch velocity: \(error)") }
-    let deadline = Date().addingTimeInterval(45)
     var pid: pid_t = 0
-    while Date() < deadline {
-        if let found = velocityPid(executable: environment.executable), !onScreenWindows(found).isEmpty,
-           axWindows(found).count > 0 {
-            pid = found
-            // A window can exist before its first frame; wait for a second sampling.
-            sleep(seconds: 0.4)
-            break
-        }
-        sleep(seconds: 0.2)
+    // waitUntil, not a bare loop: AX reads refused while the app starts up are
+    // retried, not left pending for the scenario's first check.
+    _ = waitUntil(45, interval: 0.2) {
+        guard let found = velocityPid(executable: environment.executable), !onScreenWindows(found).isEmpty,
+              !velocityWindows(found).isEmpty else { return false }
+        pid = found
+        return true
     }
     if pid == 0 { fail("velocity did not present a window within 45 s") }
+    // A window can exist before its first frame; wait for a second sampling.
+    sleep(seconds: 0.4)
     return pid
 }
 
@@ -110,17 +109,25 @@ func velocityPid(executable: String) -> pid_t? {
     topVelocityProcesses(executable: executable).first.map { pid_t($0.pid) }
 }
 
-/// The frontmost Velocity window (first in AXWindows order) by title substring.
+/// Velocity's editor windows: standard windows only. AXWindows also lists the
+/// input-method indicator bubble the system shows inside the app after IME typing
+/// (macOS 14+), and lists it first; it has no text area and no tabs.
+func velocityWindows(_ pid: pid_t) -> [AXUIElement] {
+    axStandardWindows(pid)
+}
+
+/// The editor window a person is working in (main, else focused, else first
+/// standard window; see `axDocumentWindow`), or the first standard window whose
+/// title contains `contains`.
 func velocityWindow(_ pid: pid_t, title contains: String? = nil) -> AXUIElement? {
-    let windows = axWindows(pid)
     if let contains {
-        return windows.first { axWindowTitle($0).contains(contains) }
+        return velocityWindows(pid).first { axWindowTitle($0).contains(contains) }
     }
-    return windows.first
+    return axDocumentWindow(pid)
 }
 
 func windowTitles(_ pid: pid_t) -> [String] {
-    axWindows(pid).map { axWindowTitle($0) }
+    velocityWindows(pid).map { axWindowTitle($0) }
 }
 
 /// AXRadioButton tab nodes under a window (the tab strip is a group of them).
@@ -157,7 +164,6 @@ func tab(_ window: AXUIElement, named name: String) -> TabInfo? {
 /// The editor element, waiting briefly: right after a tab switch Velocity can rebuild
 /// its accessibility snapshot and answer with no text area for a moment.
 func editorNode(_ window: AXUIElement, timeout: Double = 4) -> AXUIElement? {
-    if let node = axFindAll(window, role: "AXTextArea").first { return node }
     var found: AXUIElement?
     _ = waitUntil(timeout) {
         found = axFindAll(window, role: "AXTextArea").first
@@ -166,9 +172,20 @@ func editorNode(_ window: AXUIElement, timeout: Double = 4) -> AXUIElement? {
     return found
 }
 
+/// The editor's AXValue, or nil with the reason. A missing text area or a failed
+/// read is recorded as an AX error, so the next check cannot pass on it.
+func editorValue(_ window: AXUIElement) -> (text: String?, why: String) {
+    guard let node = editorNode(window) else {
+        let why = "no AXTextArea in window \"\(axWindowTitle(window))\""
+        AXReadErrors.shared.record(why)
+        return (nil, why)
+    }
+    return axRequiredString(node, kAXValueAttribute)
+}
+
+/// `editorValue` for callers that compare strings; "" when unreadable (and recorded).
 func editorText(_ window: AXUIElement) -> String {
-    guard let node = editorNode(window) else { return "" }
-    return axString(node, kAXValueAttribute) ?? ""
+    editorValue(window).text ?? ""
 }
 
 func selectedRange(_ window: AXUIElement) -> NSRange? {
@@ -177,11 +194,41 @@ func selectedRange(_ window: AXUIElement) -> NSRange? {
 }
 
 /// Comma-joined selected text ranges, for multi-caret logs.
+/// Pinyin shows the preedit with syllable separators ("ni hao", "zhong'wen");
+/// compare without them. Either the Latin preedit or a candidate's characters count.
+func isComposing(_ text: String, pinyin: String = "zhongwen", hanzi: String = "中文") -> Bool {
+    let squeezed = text.filter { $0 != " " && $0 != "'" && $0 != "\u{2019}" }
+    return squeezed.contains(pinyin) || text.contains(hanzi)
+}
+
+/// A click point just inside the left edge of `range`'s glyph, from AXBoundsForRange,
+/// or nil (with a FAIL saying why) when the rectangle is empty or lies outside the
+/// text area. A rectangle in Cocoa's bottom-left coordinates is flipped and noted.
+func textTarget(_ node: AXUIElement, area: CGRect, range: NSRange, report: Report) -> CGPoint? {
+    guard let rect = axBoundsForRange(node, range), rect.width > 0, rect.height > 0 else {
+        report.check(false, "AXBoundsForRange \(NSStringFromRange(range)) is a usable rectangle",
+                     detail: String(describing: axBoundsForRange(node, range)))
+        return nil
+    }
+    let point = CGPoint(x: rect.minX + min(2, rect.width / 4), y: rect.midY)
+    if area.contains(point) { return point }
+    let screenHeight = CGDisplayBounds(CGMainDisplayID()).height
+    let flipped = CGPoint(x: point.x, y: screenHeight - rect.midY)
+    if area.contains(flipped) {
+        report.note("AXBoundsForRange came back in bottom-left coordinates", detail: "\(rect) flipped to \(flipped)")
+        return flipped
+    }
+    report.check(false, "AXBoundsForRange \(NSStringFromRange(range)) lies inside the text area",
+                 detail: "rect=\(rect) area=\(area)")
+    return nil
+}
+
+/// Velocity exposes only the primary selection here, so this cannot count carets.
 func describeRanges(_ element: AXUIElement) -> String {
-    guard let value = axAttr(element, kAXSelectedTextRangesAttribute as String) as? [NSValue] else {
+    guard let ranges = axRanges(element) else {
         return "single:\(String(describing: axRange(element, kAXSelectedTextRangeAttribute)))"
     }
-    return value.map { NSStringFromRange($0.rangeValue) }.joined(separator: " ")
+    return ranges.map { NSStringFromRange($0) }.joined(separator: " ")
 }
 
 func tabSummary(_ window: AXUIElement) -> String {
@@ -237,10 +284,12 @@ func dismissAlerts(report: Report) {
     for owner in ["UserNotificationCenter", "CoreServicesUIAgent", "SecurityAgent", "screencaptureui"] {
         guard let raw = output("pgrep -x \(owner)"), let pid = pid_t(raw) else { continue }
         let app = axApp(pid)
-        for button in axFindAll(app, role: "AXButton") where ["Allow", "OK", "Cancel", "Don't Allow", "不允许", "允许"]
-            .contains(axString(button, kAXTitleAttribute) ?? "") {
+        // Other apps' trees: refusals there are not Velocity's and decide nothing.
+        let buttons = AXReadErrors.shared.quietly { axFindAll(app, role: "AXButton") }
+        for button in buttons where ["Allow", "OK", "Cancel", "Don't Allow", "不允许", "允许"]
+            .contains(AXReadErrors.shared.quietly { axString(button, kAXTitleAttribute) } ?? "") {
             _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
-            report.note("alert dismissed", detail: "\(owner) \(axString(button, kAXTitleAttribute) ?? "")")
+            report.note("alert dismissed", detail: "\(owner) \(AXReadErrors.shared.quietly { axString(button, kAXTitleAttribute) } ?? "")")
         }
     }
 }
@@ -280,7 +329,9 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     guard pinyin else { report.finish() }
     _ = pinyin
 
-    guard let window = velocityWindow(pid), let editor = editorNode(window) else { fail("no editor element") }
+    guard let window = velocityWindow(pid), let editor = editorNode(window) else {
+        fail("no editor element; AX windows: \(axWindowSummary(pid))")
+    }
     bringToFront(pid, report: report)
     if frontmostPid() != pid {
         // Cooperative activation can refuse a background launch; one click on the
@@ -291,75 +342,108 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     }
     report.check(frontmostPid() == pid, "Velocity frontmost before typing", detail: frontmostName())
 
-    // 1a. nihao + space -> 你好
+    // Every text below is compared exactly against what the fixture and the typing
+    // make it, so an unreadable or wrong editor can never pass as "no preedit".
+    let cText = "你好third\n"
+    let bFixture = "second\n"
+    let cBefore = editorText(window)
+    report.check(cBefore == "third\n", "the editor shows c.txt, the last file opened", detail: cBefore.debugDescription)
+
+    // 1a. nihao + space -> 你好. The preedit must show in AXValue while composing:
+    // the "no preedit left" checks below mean nothing otherwise.
     _ = AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     typeKeys("nihao", gap: 55_000)
-    let preview = waitUntil(3) { editorText(window).contains("ni") || editorText(window).contains("你") }
-    report.note("preview while composing", detail: editorText(window).debugDescription)
+    let preview = waitUntil(3) { isComposing(editorText(window), pinyin: "nihao", hanzi: "你") }
+    report.check(preview, "the preedit is exposed through AXValue while composing", detail: editorText(window).debugDescription)
     typeKeys(" ", gap: 55_000)
-    let committed = waitUntil(5) { editorText(window).contains("你好") }
+    let committed = waitUntil(5) { editorText(window) == cText }
     report.check(committed, "nihao + space inserts 你好", detail: editorText(window).debugDescription)
-    if preview == false { report.note("preview", detail: "no preedit text exposed through AXValue before commit") }
 
-    // 1b. zhongwen + Escape inserts nothing and leaves no preedit.
+    // 1b. zhongwen + Escape leaves the text exactly as it was.
     postKey("a", flags: .maskCommand)
     usleep(120_000)
     typeKeys("zhongwen", gap: 55_000)
-    usleep(250_000)
+    let composingB = waitUntil(3) { isComposing(editorText(window)) }
+    report.check(composingB, "composition is live before Escape", detail: editorText(window).debugDescription)
     postKey("escape")
-    usleep(400_000)
-    let escaped = editorText(window)
-    report.check(!escaped.contains("中文") && !escaped.contains("zhongwen"),
-                 "zhongwen + Escape inserts nothing", detail: escaped.debugDescription)
+    let escaped = waitUntil(3) { editorText(window) == cText }
+    report.check(escaped, "zhongwen + Escape inserts nothing and leaves no preedit", detail: editorText(window).debugDescription)
 
-    // 1c. Composing then Cmd+2 discards the composition.
-    postKey("a", flags: .maskCommand)
-    usleep(80_000)
+    // 1c. Cmd+1 while composing is swallowed (keyDown/performKeyEquivalent drop
+    // Command keys while marked text is live, and the menu does not fall back):
+    // the tab does not change.
     postKey("2", flags: .maskCommand)
-    usleep(400_000)
-    let secondSelected = tabs(velocityWindow(pid)!).first { $0.label.hasPrefix("b.txt") }?.selected ?? false
-    report.check(secondSelected, "Cmd+2 selects the second tab", detail: tabSummary(velocityWindow(pid)!))
+    let onB = waitUntil(3) { tab(window, named: "b.txt")?.selected == true }
+    report.check(onB, "Cmd+2 selects b.txt (no composition live)", detail: tabSummary(window))
+    let bShown = editorValue(window)
+    report.check(bShown.text == bFixture, "the editor shows b.txt's file text", detail: bShown.text?.debugDescription ?? bShown.why)
+    let bLabel = tab(window, named: "b.txt")?.label ?? ""
     typeKeys("zhongwen", gap: 55_000)
-    usleep(200_000)
+    let composingC = waitUntil(3) { isComposing(editorText(window)) }
+    report.check(composingC, "composition is live in b.txt", detail: editorText(window).debugDescription)
+    // What AXWindows holds now: the input-method indicator bubble is listed before
+    // the editor window while it is up.
+    report.info("AX windows while composing", detail: axWindowSummary(pid))
     postKey("1", flags: .maskCommand)
-    usleep(500_000)
-    _ = waitUntil(5) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
-    guard let firstWindow = velocityWindow(pid) else { fail("window disappeared after Cmd+1") }
-    let firstText = editorText(firstWindow)
-    let secondWindowText = axFindAll(firstWindow, role: "AXTextArea")
-        .map { axString($0, kAXValueAttribute) ?? "" }.joined(separator: "|")
-    report.check(!firstText.contains("zhongwen") && !secondWindowText.contains("zhongwen") && !secondWindowText.contains("中文"),
-                 "switching tabs discards the composition", detail: "tab1=\(firstText.debugDescription) all=\(secondWindowText.debugDescription)")
+    let leftB = waitUntil(1.0) { tab(window, named: "a.txt")?.selected == true || tab(window, named: "b.txt")?.selected != true }
+    report.check(!leftB && tab(window, named: "b.txt")?.selected == true,
+                 "Cmd+1 during a composition is swallowed: b.txt stays selected", detail: tabSummary(window))
+    report.note("composition after the swallowed Cmd+1", detail: editorText(window).debugDescription)
+    if leftB {
+        postKey("2", flags: .maskCommand)
+        _ = waitUntil(3) { tab(window, named: "b.txt")?.selected == true }
+    }
+    if !isComposing(editorText(window)) {
+        typeKeys("zhongwen", gap: 55_000)
+        _ = waitUntil(3) { isComposing(editorText(window)) }
+    }
+    let liveBeforeClick = editorText(window)
+    report.check(isComposing(liveBeforeClick), "composition is live in b.txt before clicking another tab",
+                 detail: liveBeforeClick.debugDescription)
 
-    // 1d. Two carets (Ctrl+Shift+Down), then ceshi + space inserts 测试 at both and
-    // one Cmd+Z removes both.
-    // The accessibility tree can be empty right after a composition is dropped by a
-    // tab switch; wait, then say exactly what the tree contains if it stays empty.
-    var imeWindow = velocityWindow(pid)
-    if imeWindow.flatMap({ axFindAll($0, role: "AXTextArea").first }) == nil {
-        _ = waitUntil(10) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
-        imeWindow = velocityWindow(pid)
+    // 1d. Leaving a surface with a live composition discards it (documented). A
+    // person leaves by clicking another tab: the click switches, the preedit lands
+    // nowhere, and the tab that was left keeps its text.
+    if let cTab = tab(window, named: "c.txt") {
+        _ = guardedClick(CGPoint(x: cTab.frame.midX, y: cTab.frame.midY), pid: pid, report: report, label: "c.txt tab")
+    } else {
+        report.check(false, "tab c.txt found for the click", detail: tabSummary(window))
     }
-    var textAreas = imeWindow.map { axFindAll($0, role: "AXTextArea").count } ?? -1
-    if textAreas <= 0, let frame = imeWindow.flatMap(axRect) {
-        // A click into the window (and Escape, which cancels a stuck composition)
-        // should restore focus if the app itself is alive.
-        click(at: CGPoint(x: frame.midX, y: frame.midY))
-        postKey("escape")
-        _ = waitUntil(5) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
-        imeWindow = velocityWindow(pid)
-        textAreas = imeWindow.map { axFindAll($0, role: "AXTextArea").count } ?? -1
-    }
-    let tabCount = imeWindow.map { tabs($0).count } ?? -1
-    if imeWindow == nil || textAreas <= 0 {
-        dumpOnFailure(report, pid: pid, label: "ime-empty-tree")
-        report.check(false, "the editor is exposed after switching tabs while composing",
-                     detail: "windows=\(windowTitles(pid)) textAreas=\(textAreas) tabs=\(tabCount) state=\(output("ps -o stat=,pcpu= -p \(pid)") ?? "gone")")
+    let onC = waitUntil(4) { tab(window, named: "c.txt")?.selected == true }
+    report.info("AX windows after the click", detail: axWindowSummary(pid))
+    capture(report, pid: pid, label: "ime-after-tab-click")
+    report.check(onC && tab(window, named: "b.txt")?.selected == false,
+                 "clicking c.txt during the composition selects it", detail: tabSummary(window))
+    let areaAfterClick = editorNode(window)
+    report.check(areaAfterClick != nil, "the editor text area is in the editor window after the click",
+                 detail: "window=\(axWindowTitle(window).debugDescription) all=\(axWindowSummary(pid))")
+    let cShown = editorValue(window)
+    report.check(cShown.text == cText, "c.txt shows exactly its own text: no preedit carried over",
+                 detail: cShown.text?.debugDescription ?? cShown.why)
+    let bLabelAfter = tab(window, named: "b.txt")?.label ?? ""
+    report.check(!bLabel.isEmpty && bLabelAfter == bLabel, "b.txt is not marked edited after being left mid-composition",
+                 detail: "before=\(bLabel.debugDescription) after=\(bLabelAfter.debugDescription)")
+    postKey("2", flags: .maskCommand)
+    let backOnB = waitUntil(3) { tab(window, named: "b.txt")?.selected == true }
+    let bAfter = editorValue(window)
+    report.check(backOnB && bAfter.text == bFixture, "b.txt still holds exactly its file text",
+                 detail: "selected=\(backOnB) text=\(bAfter.text?.debugDescription ?? bAfter.why)")
+    postKey("s", flags: .maskCommand)
+    sleep(seconds: 1.0)
+    let bOnDisk = (try? String(contentsOfFile: b, encoding: .utf8)) ?? "<unreadable>"
+    report.check(bOnDisk == bFixture, "b.txt saved after the round trip is unchanged on disk", detail: bOnDisk.debugDescription)
+
+    // 1e. Two carets (Ctrl+Shift+Down), then ceshi + space inserts 测试 at both and
+    // one Cmd+Z removes both. AX exposes only the primary selection, so the carets
+    // are proven by the text, not by AXSelectedTextRanges.
+    let lines = "line one\nline two\nline three"
+    guard let multiEditor = editorNode(window) else {
+        report.check(false, "editor text area for the multi-caret step", detail: axWindowSummary(pid))
+        dumpOnFailure(report, pid: pid, label: "ime")
         killVelocity(at: environment.launcher)
         report.finish()
     }
-    guard let window = imeWindow, let editor = editorNode(window) else { fail("no editor element") }
-    _ = AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(multiEditor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     postKey("a", flags: .maskCommand)
     postKey("delete")
     usleep(200_000)
@@ -368,61 +452,56 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     typeUnicode("line two")
     postKey("return")
     typeUnicode("line three")
-    usleep(300_000)
+    let typed = waitUntil(3) { editorText(window) == lines }
+    report.check(typed, "three plain lines typed with Pinyin active", detail: editorText(window).debugDescription)
     postKey("a", flags: .maskCommand)
     usleep(120_000)
     postKey("left")
     usleep(150_000)
     postKey("down", flags: [.maskControl, .maskShift])
     usleep(250_000)
-    report.note("carets after Ctrl+Shift+Down", detail: describeRanges(editor))
+    report.note("primary selection after Ctrl+Shift+Down", detail: describeRanges(multiEditor))
     let beforeMulti = editorText(window)
     typeKeys("ceshi", gap: 55_000)
     usleep(250_000)
     typeKeys(" ", gap: 55_000)
-    usleep(400_000)
-    let multi = editorText(window)
-    let commitCount = multi.components(separatedBy: "测试").count - 1
-    report.check(commitCount == 2, "ceshi + space commits 测试 at both carets", detail: multi.debugDescription)
+    let expectedMulti = "测试line one\n测试line two\nline three"
+    let multi = waitUntil(3) { editorText(window) == expectedMulti }
+    report.check(multi, "ceshi + space commits 测试 at both carets", detail: editorText(window).debugDescription)
     postKey("z", flags: .maskCommand)
-    usleep(500_000)
-    let undone = editorText(window)
-    report.check(undone == beforeMulti, "one Cmd+Z removes both commits", detail: undone.debugDescription)
+    let undone = waitUntil(3) { editorText(window) == beforeMulti }
+    report.check(undone, "one Cmd+Z removes both commits", detail: editorText(window).debugDescription)
 
-    // 1e. Cmd+click adds a caret.
+    // 1f. Cmd+click adds a caret. Click targets come from AXBoundsForRange, so a
+    // miss is a real miss rather than guessed font metrics; the outcome is read from
+    // the text. Offsets are UTF-16: the space after "line" is 4 on line one, 22 on
+    // line three; clicking a character's left edge puts the caret before it.
     postKey("a", flags: .maskCommand)
     postKey("delete")
     usleep(150_000)
-    typeUnicode("one")
+    typeUnicode("line one")
     postKey("return")
-    typeUnicode("two")
+    typeUnicode("line two")
     postKey("return")
-    typeUnicode("three")
-    usleep(250_000)
-    if let node = editorNode(window), let rect = axRect(node) {
-        // Click near the start of the third line and Cmd+click the first line.
-        let point = CGPoint(x: rect.minX + 30, y: rect.minY + 60)
-        let second = CGPoint(x: rect.minX + 30, y: rect.minY + 14)
-        _ = guardedClick(point, pid: pid, report: report, label: "caret 1")
-        _ = guardedClick(second, pid: pid, report: report, label: "caret 2", flags: .maskCommand)
+    typeUnicode("line three")
+    _ = waitUntil(3) { editorText(window) == lines }
+    if let node = editorNode(window), let area = axRect(node),
+       let third = textTarget(node, area: area, range: NSRange(location: 22, length: 1), report: report),
+       let first = textTarget(node, area: area, range: NSRange(location: 4, length: 1), report: report) {
+        _ = guardedClick(third, pid: pid, report: report, label: "caret 1")
+        _ = guardedClick(first, pid: pid, report: report, label: "caret 2", flags: .maskCommand)
         usleep(250_000)
-        let carets = axAttr(editor, kAXSelectedTextRangesAttribute as String) as? [NSValue]
-        report.note("cmd-click ranges", detail: carets.map { $0.map { NSStringFromRange($0.rangeValue) }.joined(separator: " ") } ?? "none")
-        if (carets?.count ?? 0) >= 2 {
-            typeUnicode("XY")
-            usleep(250_000)
-            let text = editorText(window)
-            report.check(text.components(separatedBy: "XY").count - 1 == 2, "Cmd+click places a second caret",
-                         detail: text.debugDescription)
-        } else {
-            // The tab-size and font metrics decide where a click lands; only assert
-            // when the two clicks actually created two carets.
-            report.note("cmd-click second caret", detail: "not placed at these coordinates; Ctrl+Shift+Down covers multi-caret above")
-        }
+        typeUnicode("XY")
+        let expected = "lineXY one\nline two\nlineXY three"
+        let placed = waitUntil(3) { editorText(window) == expected }
+        report.check(placed, "Cmd+click places a second caret",
+                     detail: "\(editorText(window).debugDescription) clicks=\(Int(third.x)),\(Int(third.y)) \(Int(first.x)),\(Int(first.y))")
+    } else {
+        report.check(false, "AXBoundsForRange gives click targets inside the text area",
+                     detail: editorNode(window).map(axDescribe) ?? "no text area")
     }
 
-    // 1f. Rename-tab field composes immediately.
-    guard let window = velocityWindow(pid) else { fail("no window") }
+    // 1g. Rename-tab field composes immediately.
     _ = switchToPinyin(report)
     if let tabInfo = tab(window, named: "b.txt") {
         let point = CGPoint(x: tabInfo.frame.midX, y: tabInfo.frame.midY)
@@ -438,9 +517,10 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
             postKey("a", flags: .maskCommand)
             typeKeys("ni", gap: 60_000)
             usleep(500_000)
-            let value = axString(field, kAXValueAttribute) ?? ""
-            report.check(!value.isEmpty && (value.contains("你") || value.contains("ni") || value.contains("n")),
-                         "rename field shows the composed character", detail: value.debugDescription)
+            let read = axRequiredString(field, kAXValueAttribute)
+            let value = read.text ?? ""
+            report.check(isComposing(value, pinyin: "ni", hanzi: "你"),
+                         "rename field shows the composed character", detail: read.text?.debugDescription ?? read.why)
             postKey("escape")
             usleep(200_000)
         } else {
@@ -492,7 +572,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
     report.info("windows after drag-out", detail: after.map { "\($0.id)@\(Int($0.bounds.minX)),\(Int($0.bounds.minY)) \(Int($0.bounds.width))x\(Int($0.bounds.height))" }.joined(separator: " "))
     let newWindows = after.filter { !before.contains($0.id) }
     report.check(!newWindows.isEmpty, "drag below the strip opens a new window")
-    let newWindow = axWindows(pid).first { win in
+    let newWindow = velocityWindows(pid).first { win in
         guard let r = axRect(win) else { return false }
         return newWindows.contains { $0.bounds.intersects(r.insetBy(dx: 6, dy: 6)) }
     }
@@ -500,7 +580,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
     _ = waitUntil(5) { newWindow.map { tabs($0).contains { $0.label.hasPrefix("c.txt") } } ?? false }
     report.check(newWindow.map { tabs($0).contains { $0.label.hasPrefix("c.txt") } } ?? false,
                  "the new window holds c.txt", detail: newWindow.map { tabSummary($0) } ?? "no AX window")
-    if let source = axWindows(pid).first(where: { win in !sameWindow(win, newWindow!) }) {
+    if let source = velocityWindows(pid).first(where: { win in !sameWindow(win, newWindow!) }) {
         report.check(!tabs(source).contains { $0.label.hasPrefix("c.txt") },
                      "the source window lost c.txt", detail: tabSummary(source))
     }
@@ -514,7 +594,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
         sleep(seconds: 0.3)
     }
     // 2b. Drag the tab from the new window into the source strip: merge, source closes.
-    if let newWindow, let mainWindow = axWindows(pid).first(where: { win in !sameWindow(win, newWindow) }),
+    if let newWindow, let mainWindow = velocityWindows(pid).first(where: { win in !sameWindow(win, newWindow) }),
        let moved = tab(newWindow, named: "c.txt"),
        // Dropping on an existing tab lands inside the strip; the window's top edge
        // is the title bar, not the strip.
@@ -523,7 +603,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
         let to = CGPoint(x: target.midX, y: target.midY)
         drag(from: from, to: to, steps: 18, pause: 0.06)
         usleep(600_000)
-        let windowsNow = axWindows(pid).filter { isOnScreen($0, pid: pid) }
+        let windowsNow = velocityWindows(pid).filter { isOnScreen($0, pid: pid) }
         let merged = windowsNow.first { tabs($0).contains { $0.label.hasPrefix("c.txt") } }
         report.check(merged != nil, "dragging into the other strip merges the tab")
         report.check(windowsNow.count == 1, "the emptied source window closes", detail: "\(windowsNow.count) window(s)")
@@ -534,10 +614,10 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
     }
 
     // 2c. Drag out and press Escape: nothing changes.
-    guard let window = axWindows(pid).first(where: { isOnScreen($0, pid: pid) }), let frame = axRect(window) else {
+    guard let window = velocityWindows(pid).first(where: { isOnScreen($0, pid: pid) }), let frame = axRect(window) else {
         report.finish()
     }
-    let windowCount = axWindows(pid).filter { isOnScreen($0, pid: pid) }.count
+    let windowCount = velocityWindows(pid).filter { isOnScreen($0, pid: pid) }.count
     let tabCount = tabs(window).count
     if let victim = tab(window, named: "b.txt") {
         let start = CGPoint(x: victim.frame.midX, y: victim.frame.midY)
@@ -554,7 +634,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
         usleep(200_000)
         mouseEvent(.leftMouseUp, end)
         usleep(600_000)
-        let now = axWindows(pid).filter { isOnScreen($0, pid: pid) }
+        let now = velocityWindows(pid).filter { isOnScreen($0, pid: pid) }
         report.check(now.count == windowCount, "Escape during a drag creates no window", detail: "\(now.count) vs \(windowCount)")
         report.check(now.first.map { tabs($0).count == tabCount } ?? false,
                      "Escape during a drag keeps the tab in place", detail: now.first.map { tabSummary($0) } ?? "")
@@ -590,7 +670,7 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
         report.check(false, "TextEdit came to the front"); report.finish()
     }
     // Keep TextEdit clear of Velocity's tab strip, or the click below hits TextEdit.
-    if let editWindow = axWindows(otherPid).first {
+    if let editWindow = axDocumentWindow(otherPid) {
         _ = moveWindow(editWindow, to: CGRect(x: 560, y: 430, width: 440, height: 320))
     }
     _ = waitUntil(8) { frontmostPid() == otherPid }

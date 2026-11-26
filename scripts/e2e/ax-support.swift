@@ -22,7 +22,15 @@ final class Report: @unchecked Sendable {
         self.name = name
     }
 
+    /// Records a verdict. AX reads that failed since the previous check (see
+    /// `AXReadErrors`) are reported as their own FAIL right before it: a verdict
+    /// built on a tree the harness could not read is not evidence either way.
     func check(_ ok: Bool, _ label: String, detail: String = "") {
+        let errors = AXReadErrors.shared.drain()
+        if !errors.isEmpty {
+            failures += 1
+            emit("FAIL", "AX reads failed before \"\(label)\"", summarizeAXErrors(errors))
+        }
         if ok {
             passes += 1
             emit("PASS", label, detail)
@@ -49,6 +57,9 @@ final class Report: @unchecked Sendable {
 
     /// Summary line every scenario ends with; the workflow greps it.
     func finish() -> Never {
+        // Reads after the last verdict (cleanup, dumps) decided nothing; show them.
+        let trailing = AXReadErrors.shared.drain()
+        if !trailing.isEmpty { note("AX reads failed after the last check", detail: summarizeAXErrors(trailing)) }
         let seconds = String(format: "%.1f", Date().timeIntervalSince(started))
         let verdict = failures == 0 ? "PASS" : "FAIL"
         let line = "SUMMARY [\(name)] \(verdict) \(passes) passed, \(failures) failed, \(seconds)s"
@@ -101,9 +112,84 @@ func output(_ command: String) -> String? {
 
 // MARK: - Accessibility
 
-func axAttr(_ element: AXUIElement, _ name: String) -> AnyObject? {
+/// AX reads that failed. A refused or timed-out call is not "no children" or "no
+/// text": every such read is recorded here, and the next `Report.check` turns it into
+/// a FAIL line, so a negative assertion can never pass on a tree that could not be
+/// read. `attributeUnsupported` and `noValue` are answers, not failures; they are
+/// not recorded. `waitUntil` drops errors from polls that were retried, keeping only
+/// those of the poll that decided the outcome.
+final class AXReadErrors: @unchecked Sendable {
+    static let shared = AXReadErrors()
+    private var pending: [String] = []
+    private var quietDepth = 0
+
+    static let benign: Set<Int32> = [AXError.attributeUnsupported.rawValue, AXError.noValue.rawValue,
+                                     AXError.parameterizedAttributeUnsupported.rawValue]
+
+    func record(_ attribute: String, _ code: AXError) {
+        guard quietDepth == 0, code != .success, !AXReadErrors.benign.contains(code.rawValue) else { return }
+        pending.append("\(attribute) \(axErrorName(code))")
+    }
+
+    func record(_ message: String) {
+        guard quietDepth == 0 else { return }
+        pending.append(message)
+    }
+
+    var mark: Int { pending.count }
+
+    /// Removes and returns the errors recorded after `mark`.
+    func rollback(to mark: Int) -> [String] {
+        guard pending.count > mark else { return [] }
+        let dropped = Array(pending[mark...])
+        pending.removeSubrange(mark...)
+        return dropped
+    }
+
+    func drain() -> [String] { rollback(to: 0) }
+
+    /// Diagnostics (dumps, descriptions in details, other apps' alert sweeps) never
+    /// change a verdict.
+    func quietly<T>(_ body: () -> T) -> T {
+        quietDepth += 1
+        defer { quietDepth -= 1 }
+        return body()
+    }
+}
+
+private let axErrorNames: [Int32: String] = [
+    AXError.failure.rawValue: "failure", AXError.illegalArgument.rawValue: "illegalArgument",
+    AXError.invalidUIElement.rawValue: "invalidUIElement", AXError.cannotComplete.rawValue: "cannotComplete",
+    AXError.attributeUnsupported.rawValue: "attributeUnsupported", AXError.notImplemented.rawValue: "notImplemented",
+    AXError.apiDisabled.rawValue: "apiDisabled", AXError.noValue.rawValue: "noValue",
+    AXError.parameterizedAttributeUnsupported.rawValue: "parameterizedAttributeUnsupported",
+]
+
+func axErrorName(_ code: AXError) -> String {
+    "\(axErrorNames[code.rawValue] ?? "AXError")(\(code.rawValue))"
+}
+
+/// "AXChildren cannotComplete(-25204)×3, AXValue invalidUIElement(-25202)" in first-seen order.
+func summarizeAXErrors(_ errors: [String]) -> String {
+    var order: [String] = []
+    var counts: [String: Int] = [:]
+    for error in errors {
+        if counts[error] == nil { order.append(error) }
+        counts[error, default: 0] += 1
+    }
+    return order.map { counts[$0]! > 1 ? "\($0)×\(counts[$0]!)" : $0 }.joined(separator: ", ")
+}
+
+/// One read with its error code (benign codes included), recording nothing.
+func axCopy(_ element: AXUIElement, _ name: String) -> (value: AnyObject?, error: AXError) {
     var value: AnyObject?
-    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    return (error == .success ? value : nil, error)
+}
+
+func axAttr(_ element: AXUIElement, _ name: String) -> AnyObject? {
+    let (value, error) = axCopy(element, name)
+    AXReadErrors.shared.record(name, error)
     return value
 }
 
@@ -114,19 +200,75 @@ func axString(_ element: AXUIElement, _ name: String) -> String? {
     return nil
 }
 
+/// A string attribute that must be there: nil plus the reason when it is not
+/// (including `noValue`/`attributeUnsupported`, which `axString` treats as answers).
+func axRequiredString(_ element: AXUIElement, _ name: String) -> (text: String?, why: String) {
+    let (value, error) = axCopy(element, name)
+    guard error == .success else {
+        AXReadErrors.shared.record(name, error)
+        return (nil, "\(name) \(axErrorName(error))")
+    }
+    guard let text = value as? String else { return (nil, "\(name) is not a string") }
+    return (text, "")
+}
+
 func axBool(_ element: AXUIElement, _ name: String) -> Bool? {
     (axAttr(element, name) as? NSNumber)?.boolValue
 }
 
-func axChildren(_ element: AXUIElement) -> [AXUIElement] {
-    (axAttr(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+/// An array-of-elements attribute; a failed read is recorded, never just "empty".
+func axElements(_ element: AXUIElement, _ name: String) -> [AXUIElement] {
+    guard let value = axAttr(element, name) else { return [] }
+    guard CFGetTypeID(value) == CFArrayGetTypeID(), let elements = value as? [AXUIElement] else {
+        AXReadErrors.shared.record("\(name) returned a non-array")
+        return []
+    }
+    return elements
 }
 
-func axRange(_ element: AXUIElement, _ name: String) -> NSRange? {
-    guard let value = axAttr(element, name), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+func axChildren(_ element: AXUIElement) -> [AXUIElement] {
+    axElements(element, kAXChildrenAttribute)
+}
+
+func axElement(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    guard let value = axAttr(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
+/// The AX client API hands ranges over as AXValue (kAXValueCFRangeType), never as
+/// NSValue; casting to [NSValue] silently yields nothing.
+func axRangeValue(_ value: AnyObject) -> NSRange? {
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
     var range = CFRange()
     guard AXValueGetValue(value as! AXValue, .cfRange, &range) else { return nil }
     return NSRange(location: range.location, length: range.length)
+}
+
+func axRange(_ element: AXUIElement, _ name: String) -> NSRange? {
+    axAttr(element, name).flatMap(axRangeValue)
+}
+
+/// Every selected range (AXSelectedTextRanges), decoded from AXValue.
+func axRanges(_ element: AXUIElement) -> [NSRange]? {
+    guard let value = axAttr(element, kAXSelectedTextRangesAttribute), CFGetTypeID(value) == CFArrayGetTypeID() else { return nil }
+    return (value as! [AnyObject]).compactMap(axRangeValue)
+}
+
+/// Screen rectangle (top-left origin, like AXFrame) of a text range.
+func axBoundsForRange(_ element: AXUIElement, _ range: NSRange) -> CGRect? {
+    var cf = CFRange(location: range.location, length: range.length)
+    guard let parameter = AXValueCreate(.cfRange, &cf) else { return nil }
+    var value: AnyObject?
+    let error = AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString,
+                                                          parameter, &value)
+    guard error == .success else {
+        AXReadErrors.shared.record(kAXBoundsForRangeParameterizedAttribute, error)
+        return nil
+    }
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    var rect = CGRect.zero
+    guard AXValueGetValue(value as! AXValue, .cgRect, &rect) else { return nil }
+    return rect
 }
 
 func axRect(_ element: AXUIElement) -> CGRect? {
@@ -180,28 +322,67 @@ func axApp(_ pid: pid_t) -> AXUIElement {
 }
 
 func axWindows(_ pid: pid_t) -> [AXUIElement] {
-    (axAttr(axApp(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? []
+    axElements(axApp(pid), kAXWindowsAttribute)
+}
+
+/// The app's document windows (subrole AXStandardWindow), in AXWindows order.
+/// AXWindows also lists windows the system creates inside the app: on macOS 14+,
+/// typing through an input method shows an indicator bubble (a blue "A" near the
+/// caret holding only `AXButton id=InputSource`), and it is the FIRST entry of
+/// AXWindows until it fades a few seconds later. Never take AXWindows.first.
+func axStandardWindows(_ pid: pid_t) -> [AXUIElement] {
+    axWindows(pid).filter { axString($0, kAXSubroleAttribute) == kAXStandardWindowSubrole }
+}
+
+/// The window a person is working in: the app's main window when it is a standard
+/// window, else its focused standard window, else its first standard window; only
+/// when it has no standard window at all, whatever AXMainWindow names.
+func axDocumentWindow(_ pid: pid_t) -> AXUIElement? {
+    let app = axApp(pid)
+    let standard = axStandardWindows(pid)
+    let main = axElement(app, kAXMainWindowAttribute)
+    for candidate in [main, axElement(app, kAXFocusedWindowAttribute)] {
+        if let candidate, standard.contains(where: { CFEqual($0, candidate) }) { return candidate }
+    }
+    return standard.first ?? main
+}
+
+/// "AXStandardWindow "b.txt •", AXUnknown "" [AXButton id=InputSource]" — every
+/// window the app owns, for notes about what AXWindows actually held.
+func axWindowSummary(_ pid: pid_t) -> String {
+    AXReadErrors.shared.quietly {
+        axWindows(pid).map { window in
+            let sub = axString(window, kAXSubroleAttribute) ?? "-"
+            let inner = axChildren(window).prefix(3).map { child in
+                "\(axRole(child))" + (axString(child, kAXIdentifierAttribute).map { " id=\($0)" } ?? "")
+            }
+            return "\(sub) \"\(axWindowTitle(window))\" [\(inner.joined(separator: ", "))]"
+        }.joined(separator: "; ")
+    }
 }
 
 func axWindowTitle(_ window: AXUIElement) -> String {
     axString(window, kAXTitleAttribute) ?? ""
 }
 
-/// Compact description of an element for logs and AX dumps.
+/// Compact description of an element for logs and AX dumps. Diagnostic only: its
+/// reads never record AX errors.
 func axDescribe(_ element: AXUIElement) -> String {
-    var parts: [String] = ["role=\(axRole(element))"]
-    for (key, attr) in [("sub", kAXSubroleAttribute), ("title", kAXTitleAttribute), ("desc", kAXDescriptionAttribute),
-                        ("value", kAXValueAttribute), ("id", kAXIdentifierAttribute), ("help", kAXHelpAttribute)] {
-        if let text = axString(element, attr) {
-            var shown = text.replacingOccurrences(of: "\n", with: "⏎")
-            if shown.count > 200 { shown = String(shown.prefix(200)) + "…(\(text.count))" }
-            parts.append("\(key)=\(shown)")
+    AXReadErrors.shared.quietly {
+        var parts: [String] = ["role=\(axRole(element))"]
+        for (key, attr) in [("sub", kAXSubroleAttribute), ("title", kAXTitleAttribute), ("desc", kAXDescriptionAttribute),
+                            ("value", kAXValueAttribute), ("id", kAXIdentifierAttribute), ("help", kAXHelpAttribute)] {
+            if let text = axString(element, attr) {
+                var shown = text.replacingOccurrences(of: "\n", with: "⏎")
+                if shown.count > 200 { shown = String(shown.prefix(200)) + "…(\(text.count))" }
+                parts.append("\(key)=\(shown)")
+            }
         }
+        if let selected = axBool(element, kAXSelectedAttribute) { parts.append("sel=\(selected)") }
+        if let focused = axBool(element, kAXFocusedAttribute), focused { parts.append("focus") }
+        if let rect = axRect(element) { parts.append("frame=\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height))") }
+        return parts.joined(separator: " ")
     }
-    if let selected = axBool(element, kAXSelectedAttribute) { parts.append("sel=\(selected)") }
-    if let focused = axBool(element, kAXFocusedAttribute), focused { parts.append("focus") }
-    if let rect = axRect(element) { parts.append("frame=\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height))") }
-    return parts.joined(separator: " ")
 }
 
 /// Places and sizes a window through the accessibility API (standard NSWindow
@@ -217,11 +398,18 @@ func moveWindow(_ window: AXUIElement, to rect: CGRect) -> Bool {
     return moved == .success && sized == .success
 }
 
+/// Diagnostic tree dump. A subtree that cannot be read says so with the error code
+/// instead of looking like a leaf.
 func axDump(_ element: AXUIElement, depth: Int = 0, maxDepth: Int = 12, into lines: inout [String]) {
     lines.append(String(repeating: "  ", count: depth) + axDescribe(element))
     guard depth < maxDepth else { return }
-    for child in axChildren(element) {
-        if axRole(child) == "AXMenuBar" {
+    let (value, error) = axCopy(element, kAXChildrenAttribute)
+    if error != .success, !AXReadErrors.benign.contains(error.rawValue) {
+        lines.append(String(repeating: "  ", count: depth + 1) + "<AXChildren \(axErrorName(error))>")
+        return
+    }
+    for child in (value as? [AXUIElement]) ?? [] {
+        if AXReadErrors.shared.quietly({ axRole(child) }) == "AXMenuBar" {
             lines.append(String(repeating: "  ", count: depth + 1) + "AXMenuBar (skipped)")
             continue
         }
@@ -315,7 +503,9 @@ func activate(_ pid: pid_t) -> Bool {
     let ok = app.activate(options: [.activateAllWindows])
     let element = axApp(pid)
     AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-    if let window = axWindows(pid).first {
+    // The document window, not AXWindows.first: that can be an input-method
+    // indicator bubble, and raising it leaves the real window behind.
+    if let window = axDocumentWindow(pid) {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
     }
@@ -356,10 +546,19 @@ func sleep(seconds: Double) {
     Thread.sleep(forTimeInterval: seconds)
 }
 
-/// Polls `probe` until it returns a value or the deadline passes.
+/// Polls `probe` until it returns true or the deadline passes. AX read errors from
+/// polls that were retried are dropped (logged as a count); those of the final
+/// poll, the one that decided the outcome, stay pending for the next check.
 func waitUntil(_ timeout: Double, interval: Double = 0.1, _ probe: () -> Bool) -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
+    let errors = AXReadErrors.shared
+    let mark = errors.mark
+    var retried: [String] = []
+    defer {
+        if !retried.isEmpty { log("AX reads failed in earlier polls of a wait (retried): \(summarizeAXErrors(retried))") }
+    }
     repeat {
+        retried += errors.rollback(to: mark)
         if probe() { return true }
         Thread.sleep(forTimeInterval: interval)
     } while Date() < deadline
