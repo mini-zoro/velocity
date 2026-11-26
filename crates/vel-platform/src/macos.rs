@@ -2235,6 +2235,37 @@ fn cascade_top_left(mut point: NSPoint, size: NSSize, screen: NSRect) -> NSPoint
     point
 }
 
+/// AppKit opens any launch argument that is not part of a `-key value` pair as
+/// a document. The CLI hands its GUI child `--background --data-dir DIR`;
+/// AppKit read the two flags as one pair, so DIR arrived as a foreground
+/// `application:openFiles:` that activated a `-b` launch and opened the profile
+/// folder. The CLI already sends files through the instance request, so
+/// documents only come from Apple events. A registration-domain default is
+/// volatile: it never touches the user's preferences, and an explicit
+/// `-NSTreatUnknownArgumentsAsOpen YES` argument still overrides it.
+fn ignore_launch_arguments_as_documents() {
+    use objc2_foundation::{NSDictionary, NSUserDefaults};
+    let key = NSString::from_str(TREAT_ARGUMENTS_AS_OPEN);
+    let no = NSString::from_str("NO");
+    let value: &AnyObject = &no;
+    let registration = NSDictionary::from_slices(&[&*key], &[value]);
+    // SAFETY: the only value is an NSString, which is a property-list type.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&registration) };
+}
+const TREAT_ARGUMENTS_AS_OPEN: &str = "NSTreatUnknownArgumentsAsOpen";
+
+#[cfg(test)]
+#[test]
+fn launch_arguments_are_not_documents() {
+    use objc2_foundation::NSUserDefaults;
+    ignore_launch_arguments_as_documents();
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(TREAT_ARGUMENTS_AS_OPEN);
+    // An absent key also reads as false; require the registered value.
+    assert!(defaults.objectForKey(&key).is_some());
+    assert!(!defaults.boolForKey(&key));
+}
+
 fn startup_activation_policy(activate: bool) -> NSApplicationActivationPolicy {
     if activate {
         NSApplicationActivationPolicy::Regular
@@ -2667,6 +2698,8 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     {
         return Err("invalid window size".into());
     }
+    // Before run(): finishLaunching reads the launch arguments.
+    ignore_launch_arguments_as_documents();
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(startup_activation_policy(app.activate_on_open()));
     let host = create_host(mtm, &options, app)?;
