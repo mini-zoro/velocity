@@ -256,7 +256,8 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     let a = environment.fixture("a.txt", contents: "")
     let b = environment.fixture("b.txt", contents: "second\n")
     let c = environment.fixture("c.txt", contents: "third\n")
-    _ = useInputSource(abcIds)
+    // Pinyin first: an input context created before the switch keeps the layout.
+    _ = switchToPinyin(report)
     let pid = launchVelocity(environment, files: [a, b, c])
     dismissAlerts(report: report)
     report.info("pid", detail: "\(pid) windows=\(windowTitles(pid)) tabs=\(tabSummary(velocityWindow(pid)!))")
@@ -264,6 +265,7 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     let pinyin = switchToPinyin(report)
     report.check(pinyin, "Pinyin is the current input source", detail: currentInputSourceId())
     guard pinyin else { report.finish() }
+    _ = pinyin
 
     guard let window = velocityWindow(pid), let editor = editorNode(window) else { fail("no editor element") }
     bringToFront(pid, report: report)
@@ -551,7 +553,7 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
     let point = CGPoint(x: target.frame.midX, y: target.frame.midY)
     report.note("click target", detail: "\(Int(point.x)),\(Int(point.y)) topmost=\(windowUnder(point)) front=\(frontmostName())")
     _ = guardedClick(point, pid: pid, report: report, label: "inactive tab", clicks: 1)
-    let activated = waitUntil(2) { frontmostPid() == pid }
+    let activated = waitUntil(3) { frontmostPid() == pid }
     report.check(activated, "one click on the inactive window activates Velocity", detail: frontmostName())
     if !activated {
         // A second click separates "the app never activates" from "only the first

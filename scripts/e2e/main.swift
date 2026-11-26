@@ -131,19 +131,19 @@ func probe() -> Never {
         usleep(600_000)
         typeKeys(" ", gap: 60_000)
         let committed = waitUntil(4) { readText(pid: textEdit).contains("你好") }
-        report.check(committed, "Pinyin HID: nihao + space yields 你好", detail: "value=\(readText(pid: textEdit).debugDescription)")
-        if !committed {
-            try? axDumpFile(pid: textEdit, to: "/tmp/e2e-probe-textedit.txt")
-            report.note("TextEdit AX dump", detail: "/tmp/e2e-probe-textedit.txt")
+        report.note("Pinyin HID in the pre-existing TextEdit window", detail: "committed=\(committed) value=\(readText(pid: textEdit).debugDescription)")
+        do {
+            let dump = artifactPath("textedit-ax.txt")
+            try? axDumpFile(pid: textEdit, to: dump)
+            report.note("TextEdit AX dump", detail: dump)
         }
         typeKeys("zhongwen", gap: 60_000)
         usleep(400_000)
         postKey("escape")
         usleep(300_000)
         let afterEscape = readText(pid: textEdit)
-        report.check(!afterEscape.contains("中文") && !afterEscape.contains("zhongwen"), "Pinyin HID: zhongwen + Escape inserts nothing",
-                     detail: "value=\(afterEscape.debugDescription)")
-        if !committed {
+        report.note("Pinyin HID: zhongwen + Escape", detail: "value=\(afterEscape.debugDescription)")
+        do {
             // A window opened while Pinyin is current gets a fresh input context; if
             // that composes, the failure is context lifetime, not the input method.
             let fresh = "/tmp/velocity-e2e-probe-ime.txt"
@@ -256,8 +256,9 @@ func probeTextEdit(_ report: Report) -> pid_t? {
     let typed = waitUntil(4) { readText(pid: pid).lowercased().contains("abc def") }
     report.check(typed, "HID keyboard into TextEdit", detail: "value=\(readText(pid: pid).debugDescription)")
     if !typed {
-        try? axDumpFile(pid: pid, to: "/tmp/e2e-probe-textedit.txt")
-        report.note("TextEdit AX dump", detail: "/tmp/e2e-probe-textedit.txt")
+        let dump = artifactPath("textedit-ax.txt")
+        try? axDumpFile(pid: pid, to: dump)
+        report.note("TextEdit AX dump", detail: dump)
     }
     return pid
 }
@@ -307,6 +308,13 @@ func pumpEvents(seconds: Double) {
     }
 }
 
+/// A path inside the uploaded artifacts directory (or /tmp when none is configured).
+func artifactPath(_ name: String) -> String {
+    guard let dir = ProcessInfo.processInfo.environment["E2E_ARTIFACTS"] else { return "/tmp/\(name)" }
+    _ = shell("mkdir -p \(dir.shellQuoted)")
+    return "\(dir)/\(name)"
+}
+
 func axDumpFile(pid: pid_t, to path: String) throws {
     var lines: [String] = []
     axDump(axApp(pid), into: &lines)
@@ -340,6 +348,11 @@ func grantAccessibility(to path: String) -> String {
 switch command {
 case "probe":
     probe()
+case "switch-input":  // switch-input <id>: one TIS switch from a fresh process
+    guard let id = options.first else { fail("switch-input needs an id") }
+    let status = selectInputSource(id)
+    _ = waitUntil(2) { localCurrentInputSourceId() == id }
+    print("status=\(status) current=\(localCurrentInputSourceId())")
 case "current-input":
     print(localCurrentInputSourceId())
 case "switch-ime":

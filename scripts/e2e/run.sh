@@ -117,7 +117,7 @@ scenarios() {
     local keyboard=0 pointer=0
     # Selecting Pinyin is the gate, not the TextEdit baseline: the ime scenario is
     # where Velocity's own composition is judged.
-    if grep -q '^PASS \[probe\] Pinyin is the current input source' "$probe_log"; then keyboard=1; fi
+    if grep -q '^PASS \[probe\] Pinyin HID: typing in a window opened after the switch commits' "$probe_log"; then keyboard=1; fi
     if grep -q '^PASS \[probe\] HID click places the caret' "$probe_log"; then pointer=1; fi
     echo "probe: keyboard=$keyboard pointer=$pointer"
     if [ "$keyboard" = 1 ] && [ "$pointer" = 1 ]; then

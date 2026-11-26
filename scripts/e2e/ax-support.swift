@@ -271,23 +271,37 @@ func runningApplications(matching path: String) -> [NSRunningApplication] {
     }
 }
 
-/// The frontmost application as a fresh process sees it. NSWorkspace caches the
-/// value and updates it through notifications that need a run loop; this tool never
-/// runs one, so its own read goes stale exactly like the input source did.
-func frontmostProcess() -> (pid: pid_t, name: String) {
+/// Runs this binary as a child and returns its exit status and output. The parent
+/// never queries AppKit or TIS itself: its view of both goes stale without a run
+/// loop, and one of those calls trapped the probe outright.
+func runSelf(_ arguments: [String], timeout: Double = 30) -> (status: Int32, out: String) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    process.arguments = ["front"]
+    process.arguments = arguments
     process.standardInput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     let pipe = Pipe()
     process.standardOutput = pipe
-    guard (try? process.run()) != nil else { return (0, "none") }
+    guard (try? process.run()) != nil else { return (-1, "") }
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    if process.isRunning {
+        process.terminate()
+        Thread.sleep(forTimeInterval: 0.5)
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    let parts = String(decoding: data, as: UTF8.self)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .split(separator: " ", maxSplits: 1)
+    return (process.terminationStatus, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+/// The frontmost application as a fresh process sees it. NSWorkspace caches the
+/// value and updates it through notifications that need a run loop; this tool never
+/// runs one, so its own read goes stale exactly like the input source did.
+func frontmostProcess() -> (pid: pid_t, name: String) {
+    let parts = runSelf(["front"], timeout: 10).out.split(separator: " ", maxSplits: 1)
     guard let first = parts.first, let pid = pid_t(first) else { return (0, "none") }
     return (pid, parts.count > 1 ? String(parts[1]) : "none")
 }
@@ -522,18 +536,8 @@ func localCurrentInputSourceId() -> String {
 /// so after another process switches the source its own view stays stale. Ask a
 /// fresh process instead.
 func currentInputSourceId() -> String {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    process.arguments = ["current-input"]
-    process.standardInput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    guard (try? process.run()) != nil else { return localCurrentInputSourceId() }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-    return text.isEmpty ? localCurrentInputSourceId() : text
+    let text = runSelf(["current-input"], timeout: 10).out
+    return text.isEmpty ? "unknown" : text
 }
 
 func findInputSource(_ id: String) -> TISInputSource? {
@@ -586,16 +590,14 @@ let abcIds = [
     "com.apple.keylayout.US",
 ]
 
-/// Switches the system input source and waits for every client to see it.
+/// Switches the system input source through a child process and returns the id that
+/// took effect (empty when none did).
 @discardableResult
 func useInputSource(_ ids: [String]) -> String {
-    for id in ids where findInputSource(id) != nil {
-        let status = selectInputSource(id)
-        if status == 0 {
-            _ = waitUntil(3) { currentInputSourceId() == id }
-            return id
-        }
-        log("select \(id) failed status=\(status)")
+    for id in ids {
+        let result = runSelf(["switch-input", id], timeout: 20)
+        log("switch-input \(id) exit=\(result.status) \(result.out)")
+        if result.out.contains("current=\(id)") { return id }
     }
     return ""
 }
@@ -613,6 +615,7 @@ func trace(_ message: String) {
 @discardableResult
 func switchToPinyin(_ report: Report?) -> Bool {
     if currentInputSourceId() == pinyinTarget { return true }
+    // standardOutput from the child lands in the same log stream.
     let process = Process()
     process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
     process.arguments = ["switch-ime"]
@@ -625,7 +628,7 @@ func switchToPinyin(_ report: Report?) -> Bool {
         report?.note("IME child", detail: "spawn failed: \(error)")
         return false
     }
-    _ = waitUntil(30, interval: 0.2) { !process.isRunning }
+    _ = waitUntil(40, interval: 0.2) { !process.isRunning }
     if process.isRunning { process.terminate() }
     report?.note("IME child exit", detail: "\(process.terminationStatus)")
     return waitUntil(2) { currentInputSourceId() == pinyinTarget }
