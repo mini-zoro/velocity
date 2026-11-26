@@ -37,14 +37,17 @@ impl Panels {
                 }
                 "status_bar" => {
                     let e = workspace.editor();
-                    let point = e.text.byte_to_point(e.caret.min(e.text.len_bytes()));
+                    let row = e.text.byte_to_line(e.caret.min(e.text.len_bytes()));
                     (
                         Role::Status,
                         tr.tr_fmt(
                             "Line {line}, column {column}; {count} selections; {encoding}. {message}",
                             &[
-                                ("line", (point.row + 1).to_string()),
-                                ("column", (point.column + 1).to_string()),
+                                ("line", (row + 1).to_string()),
+                                // The spoken column must match the painted status bar (and
+                                // `selection_description_column_type`); a byte column read
+                                // "13" for four CJK characters.
+                                ("column", crate::status_position::selection_column(e, row).to_string()),
                                 ("count", e.regions().len().to_string()),
                                 ("encoding", workspace.tabs[workspace.active].format.display_encoding().to_owned()),
                                 ("message", p.message.to_string()),
