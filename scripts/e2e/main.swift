@@ -74,8 +74,12 @@ func probe() -> Never {
     let trusted = AXIsProcessTrusted()
     report.check(trusted, "AXIsProcessTrusted() for the swift helper", detail: String(describing: ProcessInfo.processInfo.processIdentifier))
     report.info("ppid chain", detail: parentChain())
-    let finderWindows = axWindows(pid_t(output("pgrep -x Finder") ?? "0") ?? 0)
-    report.info("AX read of Finder windows", detail: "\(finderWindows.count) windows (a refusal would be API-disabled)")
+    if let finder = pid_t(output("pgrep -x Finder") ?? "0") {
+        var raw: AnyObject?
+        let status = AXUIElementCopyAttributeValue(axApp(finder), kAXWindowsAttribute as CFString, &raw)
+        let count = (raw as? [AXUIElement])?.count ?? 0
+        report.info("AX read of Finder windows", detail: "status=\(status.rawValue) windows=\(count) (refusal: -25211 API disabled, -25204 cannot complete)")
+    }
     if trusted == false {
         // The fallback every hosted macOS UI test uses: a user-level TCC row for the
         // helper's absolute path. A fresh process (not this one) must see it.
@@ -199,9 +203,10 @@ func probeSelfTyping(_ report: Report) {
     let policy = NSRunningApplication.current.activationPolicy
     report.info("self-typing setup", detail: "frontmost=self:\(front) policy=\(policy.rawValue) front=\(frontmostName())")
     // A Unicode event and a layout key event exercise different event paths.
+    // NSApp.run() is not used here, so dispatch the queued events by hand.
     typeUnicode("xyz")
     typeKeys("abc")
-    usleep(300_000)
+    pumpEvents(seconds: 0.6)
     report.check(field.stringValue.contains("abc"), "HID keyboard into the helper's own window", detail: "value=\(field.stringValue.debugDescription)")
     window.orderOut(nil)
 }
@@ -265,6 +270,16 @@ func waitForApp(bundleId: String, timeout: Double) -> pid_t? {
         return found != nil
     }
     return found
+}
+
+/// Delivers queued NSEvents without running the app's main loop.
+func pumpEvents(seconds: Double) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        guard let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02),
+                                          inMode: .default, dequeue: true) else { continue }
+        NSApp.sendEvent(event)
+    }
 }
 
 func axDumpFile(pid: pid_t, to path: String) throws {
