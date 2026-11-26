@@ -3880,28 +3880,25 @@ impl App {
                 .set_wide_advances(fonts.wide_advances());
         }
     }
-    /// Drops the parked views of sheets that no longer exist. Each live sheet parks at
-    /// most one view, so more views than tabs means some belong to closed sheets: bulk
-    /// closes (close_all, close_others, group closes) removed tabs without their views,
-    /// leaving each view and its layout caches resident (about 2 KB per closed tab).
-    /// The common case costs one length comparison.
+    /// Drops the parked views of sheets that no longer exist. Every close bumps the
+    /// workspace's closed-sheet generation, so closed sheets are pruned on the next sync
+    /// whichever path closed them: bulk closes (close_all, close_others, group closes)
+    /// used to remove tabs without their views, leaving each view, its layout caches and
+    /// any decoded image preview resident. Counting views against tabs is not enough:
+    /// a closed sheet's view can be matched by a live tab that has no parked view.
     fn prune_closed_sheet_views(&mut self) {
-        if self.sheet_views.len() <= self.workspace.tabs.len()
-            && self.inactive_image_decodes.len() <= self.workspace.tabs.len()
-        {
+        if self.closed_sheet_generation == self.workspace.closed_sheet_generation {
             return;
         }
+        self.closed_sheet_generation = self.workspace.closed_sheet_generation;
         let live: std::collections::HashSet<u64> =
             self.workspace.tabs.iter().map(|tab| tab.sheet).collect();
         self.sheet_views.retain(|sheet, _| live.contains(sheet));
         self.inactive_image_decodes
             .retain(|sheet| live.contains(sheet));
+        self.panels.release_closed_matches(&self.workspace);
     }
     fn sync_active_view(&mut self) {
-        if self.closed_sheet_generation != self.workspace.closed_sheet_generation {
-            self.closed_sheet_generation = self.workspace.closed_sheet_generation;
-            self.panels.release_closed_matches(&self.workspace);
-        }
         // Font and glyph caches are byte-bounded and shared by every open document, so a
         // close does not reset them: re-rasterizing and reloading fallback faces after
         // each closed tab would stall the next frame. Memory pressure releases them.

@@ -3235,6 +3235,7 @@ impl Workspace {
     pub(crate) fn discard_goto_preview(&mut self) {
         if let Some(index) = self.tabs.iter().rposition(|tab| tab.goto_preview) {
             let tab = self.tabs.remove(index);
+            self.closed_sheet_generation = self.closed_sheet_generation.wrapping_add(1);
             if tab.editor.text.len_bytes() >= vel_platform::memory_pressure::LARGE_WORK_BYTES {
                 vel_platform::memory_pressure::request();
             }
