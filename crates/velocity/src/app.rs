@@ -621,6 +621,25 @@ impl App {
         phases.emit(&self.reporter)
     }
     /// A real action, or the first headless poll or scene, need not wait for native scanout.
+    /// The scanout wait only times out from a frame callback, and a window that opens
+    /// behind other windows, minimized or on another Space gets none. It then kept the
+    /// prepared first frame (an offscreen texture of the window's pixel size, ~16 MB for
+    /// 1200×832 at 2×) until it was shown. Idle ticks still arrive, so they end the same
+    /// wait; showing the window later draws a normal frame.
+    fn stop_waiting_for_hidden_scanout(&mut self, w: &WindowHandle) {
+        if self.startup_done || w.is_visible() {
+            return;
+        }
+        let waited = self
+            .waiting_since
+            .get_or_insert_with(Instant::now)
+            .elapsed();
+        if stop_waiting_for_scanout(self.options.mode, waited)
+            && let Err(error) = self.start_without_scanout(w, waited)
+        {
+            self.named_error(Some(w), &error);
+        }
+    }
     fn ensure_startup_services(&mut self) -> bool {
         if !self.startup_services_pending {
             return false;
@@ -5827,6 +5846,7 @@ impl AppHandler for App {
         if !w.is_closed() {
             // A minimized or occluded window cannot rely on its display link.
             self.ensure_startup_services();
+            self.stop_waiting_for_hidden_scanout(w);
             if self.settings_window {
                 self.poll_settings_window(w);
             } else {
