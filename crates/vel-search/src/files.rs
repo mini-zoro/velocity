@@ -279,6 +279,21 @@ impl Results {
         self.rows.matched
     }
 
+    /// Releases streaming sort scratch after a search stops publishing rows.
+    /// The display index, match text and jump targets are unchanged.
+    pub fn trim_order_cache(&mut self) -> usize {
+        let bytes = self.key.capacity()
+            + self.parent_keys.capacity() * std::mem::size_of::<(OsString, u16)>()
+            + self
+                .parent_keys
+                .keys()
+                .map(OsString::capacity)
+                .sum::<usize>();
+        self.key = Vec::new();
+        self.parent_keys = HashMap::new();
+        bytes
+    }
+
     fn order_key(&mut self, path: &Path) -> u16 {
         if let Some(parent) = path.parent()
             && let Some(name) = path.file_name()
@@ -1015,6 +1030,28 @@ impl FileChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_trim_preserves_find_result_rows_and_navigation() {
+        let mut results = Results::default();
+        let line = |path: &str, number| Line {
+            path: Arc::from(Path::new(path)),
+            number,
+            text: "matching row".to_owned(),
+            highlights: std::iter::once(0..8).collect(),
+            column_offset: 0,
+            match_count: 1,
+        };
+        let target = results.push(line("parent/z.txt", 20));
+        results.push(line("parent/a.txt", 28));
+        let rows = results.rows.clone();
+        let rank = results.rank(target);
+
+        assert!(results.trim_order_cache() > 0);
+        assert_eq!(results.trim_order_cache(), 0);
+        assert_eq!(results.rank(target), rank);
+        assert!(results.rows.iter().eq(rows.iter()));
+    }
 
     #[test]
     fn perl_lookbehind_search_and_replace_across_files() {

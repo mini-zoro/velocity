@@ -25,6 +25,7 @@ impl Host {
         if !self.ready.get() || self.closing.get() {
             return false;
         }
+        crate::memory_guard::note_input();
         let vk = message.wParam as u16;
         if vk == VK_PROCESSKEY || vk == VK_PACKET || self.ime.borrow().active {
             // IMM processes these keys. VK_PACKET carries Unicode input,
@@ -395,6 +396,7 @@ impl Host {
             model::wheel(i32::from((wparam >> 16) as i16), count, horizontal, page);
         if delta != 0. {
             crate::memory_pressure::note_activity();
+            crate::memory_guard::note_input();
             self.enqueue(Event::Scroll(ScrollEvent {
                 position: model::logical_point(point.x, point.y, self.dpi.get()),
                 delta_x: if horizontal { delta } else { 0. },
@@ -412,6 +414,7 @@ impl Host {
 
     fn text(&self, input: TextInput) {
         crate::memory_pressure::note_activity();
+        crate::memory_guard::note_input();
         self.enqueue(Event::Text(input));
         self.ime_anchor_dirty.set(true);
         self.request(FrameReason::Input);

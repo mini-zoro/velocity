@@ -528,6 +528,7 @@ impl ThemeUi {
         self.now = now;
         self.active = false;
         self.frame += 1;
+        self.metrics.begin_frame();
         if self.frame.is_multiple_of(SWEEP_EVERY) {
             self.sweep();
         }
@@ -542,6 +543,14 @@ impl ThemeUi {
         let fresh = |seen: u64| frame.saturating_sub(seen) <= SWEEP_AGE;
         self.widgets.retain(|_, widget| fresh(widget.seen));
         self.states.retain(|_, state| fresh(state.seen));
+    }
+    /// Reclaims cold widget state and decoded pixels not used in the latest scene.
+    /// Keeps live widget transitions and the latest scene's images intact.
+    pub fn trim_caches(&mut self) -> usize {
+        self.sweep();
+        self.widgets.shrink_to_fit();
+        self.states.shrink_to_fit();
+        self.metrics.trim_caches()
     }
     /// Resolver calls, paint conversion misses and settings-free calls, for diagnostics.
     pub fn cache_stats(&self) -> [usize; 3] {

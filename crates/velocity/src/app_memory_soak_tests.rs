@@ -12,8 +12,12 @@ use vel_text::Text;
 const MIB: isize = 1024 * 1024;
 
 fn app() -> App {
+    app_with_text(Text::new())
+}
+
+fn app_with_text(text: Text) -> App {
     let options = Options::default();
-    let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+    let mut workspace = Workspace::new(text, None, None, false).unwrap();
     workspace.wait_resources();
     let mut a = App::new(
         options.clone(),
@@ -209,4 +213,136 @@ fn memory_soak_painted_tabs_closed_one_by_one_and_together_return_to_baseline() 
         a.workspace.tabs.len()
     );
     assert_flat("painted tabs", base, after, MIB);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "memory soak: run alone with --ignored --test-threads=1"]
+fn memory_soak_pressure_releases_cjk_and_image_caches_without_changing_output() {
+    use vel_render::scene::{Image, ImageQuad, Scene, Surface};
+
+    let mut cjk = String::new();
+    for i in 0..4096 {
+        cjk.push(char::from_u32(0x4e00 + i).unwrap());
+        if i % 64 == 63 {
+            cjk.push('\n');
+        }
+    }
+    let mut a = app_with_text(Text::from(cjk.as_str()));
+    let original = a.workspace.tabs[a.workspace.active].sheet;
+    let size = Size {
+        width: 1400.,
+        height: 1200.,
+    };
+    a.resize_views(size, 1.);
+    let image = |id, side| {
+        Arc::new(Image {
+            id,
+            width: side,
+            height: side,
+            logical_size: [side as f32; 2],
+            rgba: vec![180; side as usize * side as usize * 4].into(),
+        })
+    };
+
+    // Simulate completed decodes in three real parked tabs. Their view state
+    // must survive pressure even though their pixels can be released.
+    for id in 1..=3 {
+        a.workspace.new_file().unwrap();
+        a.sync_active_view();
+        a.view.image_preview.set_test_image(image(id, 512));
+        a.view.scroll_x = id as f64;
+    }
+    a.workspace
+        .select(a.workspace.sheet_index(original).unwrap());
+    a.sync_active_view();
+    let mut fonts = Fonts::load_named("PingFang SC")
+        .or_else(|_| Fonts::load())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    // Complete any asynchronous cascade lookup before comparing frames.
+    loop {
+        for line in cjk.lines() {
+            fonts.shape(line, 13.);
+        }
+        if !fonts.fallback_pending() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "font cascade did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+        fonts.poll_fallbacks();
+    }
+    assert!(fonts.document_cache_bytes().0 > 0);
+    a.fonts = Some(fonts);
+    a.sync_active_view();
+    a.renderer = Renderer::offscreen(size.width as u32, size.height as u32)
+        .inspect_err(|err| eprintln!("skipped pixel readback: no Metal adapter ({err})"))
+        .ok();
+
+    let pictures: Vec<_> = (4..=6).map(|id| image(id, 32)).collect();
+    let scene = |app: &mut App| {
+        let mut scene = app.scene();
+        scene.layers.push(SceneLayer {
+            surfaces: pictures
+                .iter()
+                .enumerate()
+                .map(|(i, image)| {
+                    let rect = Rect {
+                        x: 4. + i as f64 * 34.,
+                        y: 32.,
+                        width: 32.,
+                        height: 32.,
+                    };
+                    Surface::Image(ImageQuad {
+                        image: image.clone(),
+                        rect,
+                        clip: rect,
+                        source: [0., 0., 32., 32.],
+                        color: [1.; 4],
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        });
+        scene
+    };
+    let render = |a: &mut App, scene: &Scene| {
+        a.renderer.as_mut().map(|renderer| {
+            renderer
+                .render_rgba(scene, a.fonts.as_mut().unwrap(), 1.)
+                .unwrap()
+        })
+    };
+    // Prime window geometry and theme before retaining the comparison scene.
+    drop(scene(&mut a));
+    let before_scene = scene(&mut a);
+    let before_pixels = render(&mut a, &before_scene);
+    let parked: Vec<_> = a
+        .sheet_views
+        .iter()
+        .map(|(&sheet, view)| (sheet, view.scroll_x))
+        .collect();
+    let before = live_bytes();
+    a.trim_memory(memory::Trim::Pressure);
+    let after = live_bytes();
+    eprintln!(
+        "pressure trim: live heap {before} -> {after} bytes (released {})",
+        before - after
+    );
+    assert!(before - after >= 2 * MIB);
+    for (sheet, scroll_x) in parked {
+        let view = &a.sheet_views[&sheet];
+        assert_eq!(view.scroll_x, scroll_x);
+        assert!(view.image_preview.image().is_none());
+    }
+    assert_eq!(a.workspace.editor().buffer.text().len_bytes(), cjk.len());
+    let after_scene = scene(&mut a);
+    assert!(
+        format!("{before_scene:?}") == format!("{after_scene:?}"),
+        "trim changed the scene"
+    );
+    assert!(
+        render(&mut a, &after_scene) == before_pixels,
+        "trim changed rendered pixels"
+    );
 }

@@ -398,18 +398,24 @@ impl Fonts {
         }
     }
 
+    /// Releases shaping and raster scratch storage without forgetting resolved
+    /// fallback choices. The first frame after a trim must still show those glyphs.
+    pub fn trim_shaping(&mut self) {
+        self.shaped = HashMap::new();
+        self.shaped_bytes = 0;
+        self.shaper = ShapeContext::new();
+        self.scaler = ScaleContext::new();
+    }
+
     /// Drops optional, document-warmed caches and fallback faces. The primary
     /// face and metrics stay; the renderer must discard identities at the same time.
     pub fn clear_document_caches(&mut self) {
-        self.shaped = HashMap::new();
-        self.shaped_bytes = 0;
+        self.trim_shaping();
         self.choices = HashMap::new();
         self.emoji_choices = HashMap::new();
         self.text_choices = HashMap::new();
         self.choice_bytes = 0;
         self.fallback = Default::default();
-        self.shaper = ShapeContext::new();
-        self.scaler = ScaleContext::new();
         if self.faces.len() > 1 || self.files.len() > 1 {
             self.faces.truncate(1);
             self.faces.shrink_to_fit();

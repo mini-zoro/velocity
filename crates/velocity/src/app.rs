@@ -13,6 +13,8 @@ mod finder;
 #[cfg(test)]
 #[path = "app_lane_c_round20_tests.rs"]
 mod lane_c_round20_tests;
+#[path = "app_memory.rs"]
+mod memory;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
 #[cfg(target_os = "macos")]
@@ -5805,6 +5807,20 @@ impl AppHandler for App {
                 self.named_error(Some(w), &error);
             }
         }
+    }
+    fn memory_guard_document_bytes(&self) -> Option<u64> {
+        (self.options.mode == Mode::Interactive).then(|| self.loaded_document_bytes())
+    }
+    fn on_background_memory_idle(&mut self) -> Option<MemoryCacheBytes> {
+        (self.options.mode == Mode::Interactive).then(|| self.trim_memory(memory::Trim::Idle))
+    }
+    fn on_memory_pressure(&mut self, level: MemoryPressure) -> Option<MemoryCacheBytes> {
+        (self.options.mode == Mode::Interactive).then(|| {
+            self.trim_memory(match level {
+                MemoryPressure::Warning => memory::Trim::Pressure,
+                MemoryPressure::Critical => memory::Trim::Critical,
+            })
+        })
     }
     fn command_enabled(&self, name: &str, args: &str) -> bool {
         if let Some(enabled) = self.settings_window_command_enabled(name) {

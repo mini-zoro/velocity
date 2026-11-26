@@ -310,6 +310,21 @@ struct DynamicPool {
 static POOL: LazyLock<Mutex<Pool>> = LazyLock::new(Mutex::default);
 static DYNAMIC: LazyLock<Mutex<DynamicPool>> = LazyLock::new(Mutex::default);
 
+/// Drops cached dynamic regexes and dead intern entries without disturbing
+/// regexes actively used by a parser. Skip pools currently busy on a worker.
+pub fn trim_runtime_caches() {
+    if let Ok(mut pool) = DYNAMIC.try_lock() {
+        let old = std::mem::take(&mut *pool);
+        drop(pool);
+        drop(old);
+    }
+    if let Ok(mut pool) = POOL.try_lock() {
+        pool.entries
+            .retain(|_, pattern| pattern.strong_count() != 0);
+        pool.entries.shrink_to_fit();
+    }
+}
+
 #[cfg(test)]
 mod pool_budget_tests {
     use super::*;
