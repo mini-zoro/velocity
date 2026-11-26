@@ -11,6 +11,9 @@ const DEFAULTS: &str = include_str!("../resources/Packages/Default/Preferences.s
 // A native window changes policy on its next full-screen transition. There is
 // no such transition in the headless sweep; the reference must say when it applies.
 const NEXT_WINDOW_TRANSITION: &[&str] = &["use_simple_full_screen"];
+// These drive a background worker or native policy only; toggling them changes neither
+// the scene nor an operation the sweep can run, and the reference says what they gate.
+const BACKGROUND_ONLY: &[&str] = &["update_check"];
 const SOURCE: &str = "// glorfword is intentionally misspelled\nfn brace() {\n\tcall(some_really_long_argument, other_argument);\n\tif ready {\n\t\tcall(1);\n\t}\n}\n\n[<x>]\n// \u{200b}\u{00a0}\u{202e}\u{202c}\u{7}\n";
 
 /// Pinned to lane C's reference: its --check independently regenerates these
@@ -1418,7 +1421,7 @@ fn shipped_user_settings_change_the_scene_or_operation() {
     }
     let unexpected: Vec<_> = unchanged
         .iter()
-        .filter(|key| !NEXT_WINDOW_TRANSITION.contains(key))
+        .filter(|key| !NEXT_WINDOW_TRANSITION.contains(key) && !BACKGROUND_ONLY.contains(key))
         .collect();
     assert!(
         unexpected.is_empty() && no_operation_diff.is_empty(),

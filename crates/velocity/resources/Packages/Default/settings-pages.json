@@ -29,7 +29,8 @@
           "title": "Startup",
           "items": [
             {"key": "remember_open_files", "label": "Reopen files from the last session"},
-            {"key": "hot_exit", "label": "Keep unsaved changes", "choices": ["always", "only_on_quit", "disabled"]}
+            {"key": "hot_exit", "label": "Keep unsaved changes", "choices": ["always", "only_on_quit", "disabled"]},
+            {"key": "update_check", "label": "Automatically check for updates"}
           ]
         },
         {

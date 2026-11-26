@@ -7,6 +7,7 @@ pub(super) struct Controller {
     data: Option<PathBuf>,
     sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     closed_id: u64,
+    automatic_updates: bool,
     layout: vel_ui::workbench::Layout,
     dark: bool,
 }
@@ -24,6 +25,7 @@ impl Controller {
             data: app.workspace.data_path().map(Path::to_owned),
             sessions: app.sessions.clone(),
             closed_id: app.session_id,
+            automatic_updates: app.workspace.global_bool("update_check", true),
             layout: app.workspace.workbench.layout.clone(),
             dark: app.workspace.dark,
         }
@@ -63,6 +65,39 @@ impl AppHandler for Controller {
     fn on_named_command(&mut self, window: &WindowHandle, name: &str, args: &str) {
         self.run(|app| app.on_named_command(window, name, args));
     }
+    fn command_enabled(&self, name: &str, args: &str) -> bool {
+        if !matches!(name, crate::updates::CHECK | crate::updates::ACTION) {
+            return true;
+        }
+        let sessions = self.sessions.borrow();
+        let args = serde_json::from_str::<Value>(args).unwrap_or_default();
+        sessions.updates.as_ref().is_some_and(|update| {
+            !update.worker_busy()
+                && (name == crate::updates::CHECK
+                    || update.notice.as_ref().is_some_and(|notice| {
+                        args["action"]
+                            .as_str()
+                            .is_some_and(|action| notice.actions(action))
+                    }))
+        })
+    }
+    fn on_quit_approved(&mut self, w: &WindowHandle) -> bool {
+        let proceed = self
+            .sessions
+            .borrow_mut()
+            .updates
+            .as_mut()
+            .is_none_or(crate::updates::Updates::quit_approved);
+        if !proceed {
+            self.on_reopen(w);
+        }
+        proceed
+    }
+    fn on_session_ending(&mut self, _window: &WindowHandle) {
+        if let Some(update) = self.sessions.borrow_mut().updates.as_mut() {
+            update.ending_session();
+        }
+    }
     fn on_reopen(&mut self, window: &WindowHandle) {
         self.run(|app| app.on_reopen(window));
     }
@@ -70,6 +105,12 @@ impl AppHandler for Controller {
         self.run(|app| app.on_finder_new_text_file(window, directory));
     }
     fn on_idle(&mut self, window: &WindowHandle) {
+        if let Some(update) = self.sessions.borrow_mut().updates.as_mut() {
+            update.poll(self.automatic_updates, Instant::now());
+            if update.take_immediate() {
+                window.request_app_quit();
+            }
+        }
         let incoming = self
             .sessions
             .borrow()

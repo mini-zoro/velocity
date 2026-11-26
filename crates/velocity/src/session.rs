@@ -150,6 +150,7 @@ pub struct Sessions {
     closed_window_files: Vec<PathBuf>,
     system_recent_enabled: Option<bool>,
     pub messages: Vec<String>,
+    pub(crate) updates: Option<crate::updates::Updates>,
     windows: BTreeMap<u64, (Window, Vec<Document>)>,
     departures: departures::Journal,
     writer: Option<Writer>,
@@ -243,6 +244,7 @@ impl Sessions {
             recent_opened: Vec::new(),
             system_recent_enabled: None,
             messages,
+            updates: None,
             windows: BTreeMap::new(),
             departures,
             writer: None,
@@ -582,12 +584,27 @@ impl Sessions {
         } else {
             policy.hot
         };
-        self.publish_application(
-            hot,
-            policy.quitting,
-            policy.remember,
-            policy.remember_layout,
-        )?;
+        // Keep all windows for this one restart without overriding what the user
+        // allows us to write to external project workspace files.
+        if policy.quitting
+            && self
+                .updates
+                .as_ref()
+                .is_some_and(crate::updates::Updates::preparing_quit)
+        {
+            self.start_writer();
+            if self.writer.is_none() {
+                return Err("The session writer is unavailable".into());
+            }
+            self.publish_application(HotExit::Always, true, true, true)?;
+        } else {
+            self.publish_application(
+                hot,
+                policy.quitting,
+                policy.remember,
+                policy.remember_layout,
+            )?;
+        }
         self.publish_project(window, documents, Policy { hot, ..policy })?;
         if changed_project {
             self.evict_unused_workspaces()?;

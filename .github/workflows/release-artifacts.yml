@@ -71,6 +71,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -96,6 +97,26 @@ jobs:
           assets=(*)
           sha256sum -- "${assets[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
           cat SHA256SUMS
+      - name: Sign the release checksums
+        env:
+          VELOCITY_UPDATE_SIGNING_KEY: ${{ secrets.VELOCITY_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VELOCITY_UPDATE_SIGNING_KEY" ]]; then
+            echo '::error::VELOCITY_UPDATE_SIGNING_KEY is required to publish a release'
+            exit 1
+          fi
+          umask 077
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$VELOCITY_UPDATE_SIGNING_KEY" > "$key"
+          unset VELOCITY_UPDATE_SIGNING_KEY
+          public=$(sh scripts/update-signing.sh public-hex "$key")
+          if ! grep -Fqx -- "$public" crates/vel-update/src/public-keys.hex; then
+            echo '::error::The signing secret does not match a public key embedded in this tag'
+            exit 1
+          fi
+          sh scripts/update-signing.sh sign "$key" dist/SHA256SUMS dist/SHA256SUMS.sig
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -121,7 +142,8 @@ jobs:
           the terminal. The Windows builds are unsigned and may trigger SmartScreen;
           check the SHA-256 digest before choosing whether to run them.
 
-          Verify downloads with `shasum -a 256 -c SHA256SUMS`.
+          `SHA256SUMS.sig` is Velocity's detached Ed25519 signature over `SHA256SUMS`.
+          After verifying the signature, check downloads with `shasum -a 256 -c SHA256SUMS`.
           NOTES
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Velocity $TAG" \
             --notes-file notes.md --generate-notes

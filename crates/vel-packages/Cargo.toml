@@ -9,6 +9,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-loopback-http = []
+
 [dependencies]
 vel-config = { path = "../vel-config" }
 vel-fileio = { path = "../vel-fileio" }

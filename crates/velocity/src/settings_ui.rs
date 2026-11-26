@@ -48,6 +48,7 @@ mod model {
     pub(super) enum Group {
         #[default]
         Editing,
+        General,
         Appearance,
         Fonts,
         Files,
@@ -63,6 +64,7 @@ mod model {
     impl Group {
         pub(super) fn name(self, tr: &Translator) -> std::borrow::Cow<'static, str> {
             match self {
+                Self::General => tr.tr("General"),
                 Self::Editing => tr.tr("Editing"),
                 Self::Appearance => tr.tr("Appearance"),
                 Self::Fonts => tr.tr("Fonts and Lines"),

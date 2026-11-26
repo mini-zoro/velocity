@@ -60,6 +60,8 @@ Requires the Rust toolchain pinned in `rust-toolchain.toml` and a checkout with 
   `scripts/package-windows.ps1` builds the portable zip and, with Inno Setup installed, the
   setup program.
 
+See [Release updates](docs/releases.md) for updater behavior and release signing.
+
 ```sh
 cargo build --release
 cargo test --workspace

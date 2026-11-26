@@ -54,6 +54,13 @@ pub(crate) fn arrange(entries: &mut Vec<MenuEntry>, tr: &Translator, keys: &Keym
     if let Some(help) = entries.iter_mut().find(|entry| entry.id == "help") {
         help.children.extend([
             separator(),
+            row(tr.tr("Check for Updates…"), crate::updates::CHECK, 'U'),
+            MenuEntry {
+                id: crate::updates::ACTIONS.into(),
+                caption: tr.tr("Update Actions…").into_owned(),
+                children: crate::updates::menu(tr, None),
+                ..Default::default()
+            },
             row(tr.tr("About Velocity"), "native_about", 'A'),
         ]);
     }
@@ -95,9 +102,9 @@ fn native_roles_and_mnemonics_are_stable_in_both_languages() {
         "../resources/Packages/Default/Main.sublime-menu"
     ))
     .unwrap();
-    for (language, exit, about) in [
-        ("en", "Exit", "About Velocity"),
-        ("zh-Hans", "退出", "关于 Velocity"),
+    for (language, exit, about, update) in [
+        ("en", "Exit", "About Velocity", "Check for Updates…"),
+        ("zh-Hans", "退出", "关于 Velocity", "检查更新…"),
     ] {
         tr.select(Language::parse(language).unwrap());
         let mut entries = menu
@@ -119,6 +126,13 @@ fn native_roles_and_mnemonics_are_stable_in_both_languages() {
         let file_exit = entries[0].children.last().unwrap();
         assert_eq!(file_exit.caption, exit);
         assert_eq!(file_exit.shortcut.as_deref(), Some("ctrl+q"));
+        let help = entries.last().unwrap();
+        assert!(
+            help.children
+                .iter()
+                .any(|row| row.command.as_deref() == Some(crate::updates::CHECK)
+                    && row.caption == update)
+        );
         assert_eq!(
             entries.last().unwrap().children.last().unwrap().caption,
             about

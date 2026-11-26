@@ -287,16 +287,26 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
     while !grandchild_path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    let child: i32 = std::fs::read_to_string(&child_path)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let grandchild: i32 = std::fs::read_to_string(&grandchild_path)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    // `echo $! > path` creates the file and then writes it, so a reader can see it
+    // empty; wait for the digits rather than racing the shell.
+    let pid_in = |path: &std::path::Path| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no pid written to {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let child: i32 = pid_in(&child_path);
+    let grandchild: i32 = pid_in(&grandchild_path);
     let next = BuildSystem::parse("next", r#"{"cmd":["/bin/echo","replacement"]}"#)
         .unwrap()
         .resolve(&Variables::default())
