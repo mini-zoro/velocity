@@ -891,6 +891,9 @@ pub struct Workspace {
     pub(crate) pane_minimum: (f64, f64),
     pub(crate) restore_original: Option<Arc<crate::session_restore::Original>>,
     pub telemetry: Vec<Value>,
+    /// Whether measurement records are wanted: unknown (`None`) until the owning App
+    /// applies its options, so startup opens are still recorded for automatic modes.
+    pub telemetry_enabled: Option<bool>,
     pub(crate) settings: Settings,
     pub(crate) keymap: Keymap,
     pub(crate) watcher: Option<Watcher>,
@@ -2402,6 +2405,7 @@ impl Workspace {
             pane_minimum: (120., 112.),
             restore_original: None,
             telemetry: Vec::new(),
+            telemetry_enabled: None,
             settings,
             keymap,
             watcher,
@@ -3127,7 +3131,11 @@ impl Workspace {
             tab.disk_saved = vel_session::DiskStamp::read(path);
             tab.disk_stamp = stamp(path);
         }
-        self.telemetry.push(serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}));
+        record_telemetry(
+            &mut self.telemetry,
+            self.telemetry_enabled,
+            || serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}),
+        );
         Ok(tab)
     }
     fn watch_open_path(&mut self, path: &Path) -> Result<(), String> {
@@ -3901,7 +3909,11 @@ impl Workspace {
                 tab.editor.document_metrics = snapshot.metrics;
                 tab.editor.read_only = true;
                 tab.editor.refresh_policy();
-                self.telemetry.push(serde_json::json!({"kind":"file_open","phase":"prefix","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"loaded_bytes":tab.editor.text.len_bytes(),"source_bytes":source_bytes}));
+                record_telemetry(
+                    &mut self.telemetry,
+                    self.telemetry_enabled,
+                    || serde_json::json!({"kind":"file_open","phase":"prefix","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"loaded_bytes":tab.editor.text.len_bytes(),"source_bytes":source_bytes}),
+                );
                 changed = true;
             }
             if let Some(result) =
@@ -3948,7 +3960,11 @@ impl Workspace {
                     Err(e) => Some(Err(format!("file worker disconnected: {e}"))),
                 });
             if let Some(result) = result {
-                self.telemetry.push(serde_json::json!({"kind":"file_open","phase":"fully_loaded","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"source_bytes":tab.loading.as_ref().map(|t|t.total),"path":tab.path,"success":result.is_ok(),"background":true}));
+                record_telemetry(
+                    &mut self.telemetry,
+                    self.telemetry_enabled,
+                    || serde_json::json!({"kind":"file_open","phase":"fully_loaded","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"source_bytes":tab.loading.as_ref().map(|t|t.total),"path":tab.path,"success":result.is_ok(),"background":true}),
+                );
                 tab.load_started = None;
                 let binary = tab.loading.as_ref().is_some_and(LoadTask::binary);
                 tab.loading = None;
@@ -6207,5 +6223,20 @@ mod resource_log_tests {
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(text.contains("second warning") && !text.contains('x'));
         assert!(reports.is_empty());
+    }
+}
+
+/// Records a measurement only when telemetry is (or may yet be) enabled. Normal editing
+/// has none: every file open used to build and keep a JSON record with its path, and a
+/// window that never drew a frame never drained them. Until the App decides, records
+/// are capped so they cannot grow without bound.
+fn record_telemetry(
+    telemetry: &mut Vec<Value>,
+    enabled: Option<bool>,
+    record: impl FnOnce() -> Value,
+) {
+    const CAP: usize = 1024;
+    if enabled != Some(false) && telemetry.len() < CAP {
+        telemetry.push(record());
     }
 }

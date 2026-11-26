@@ -34,6 +34,10 @@ jobs:
       - name: Test (including Win32 DX12 presentation and handle inheritance)
         if: success() || failure()
         run: cargo test --workspace --locked --release --no-fail-fast
+      - name: Memory soak
+        # Repeated workloads must return the heap to its baseline (counting allocator).
+        if: success() || failure()
+        run: cargo test -p velocity --bin velocity --locked --release -- --ignored --test-threads=1 memory_soak
       - name: Package and validate
         # Packages whenever the release build succeeded, so a test failure still shows the zip.
         if: (success() || failure()) && steps.build.outcome == 'success'

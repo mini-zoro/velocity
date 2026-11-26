@@ -378,6 +378,10 @@ impl App {
     ) -> Self {
         #[cfg(test)]
         crate::test_login::install();
+        workspace.telemetry_enabled = Some(options.telemetry_enabled());
+        if !options.telemetry_enabled() {
+            workspace.telemetry = Vec::new();
+        }
         if workspace.restore_original.is_none() {
             workspace.restore_original = sessions.borrow().original.clone();
         }
@@ -3748,7 +3752,25 @@ impl App {
                 .set_wide_advances(fonts.wide_advances());
         }
     }
+    /// Drops the parked views of sheets that no longer exist. Each live sheet parks at
+    /// most one view, so more views than tabs means some belong to closed sheets: bulk
+    /// closes (close_all, close_others, group closes) removed tabs without their views,
+    /// leaving each view and its layout caches resident (about 2 KB per closed tab).
+    /// The common case costs one length comparison.
+    fn prune_closed_sheet_views(&mut self) {
+        if self.sheet_views.len() <= self.workspace.tabs.len()
+            && self.inactive_image_decodes.len() <= self.workspace.tabs.len()
+        {
+            return;
+        }
+        let live: std::collections::HashSet<u64> =
+            self.workspace.tabs.iter().map(|tab| tab.sheet).collect();
+        self.sheet_views.retain(|sheet, _| live.contains(sheet));
+        self.inactive_image_decodes
+            .retain(|sheet| live.contains(sheet));
+    }
     fn sync_active_view(&mut self) {
+        self.prune_closed_sheet_views();
         let tab = &self.workspace.tabs[self.workspace.active];
         let (current, document) = (tab.sheet, tab.session_document);
         let replaced = self
@@ -7147,6 +7169,9 @@ mod app_chrome;
 #[path = "app_lane_b_round18_tests.rs"]
 mod lane_b_round18_tests;
 
+#[cfg(test)]
+#[path = "app_memory_soak_tests.rs"]
+mod memory_soak_tests;
 #[cfg(test)]
 #[path = "app_paste_tests.rs"]
 mod paste_tests;

@@ -118,6 +118,8 @@ struct State {
     key: Option<PaintKey>,
     active: bool,
     settled: Option<Style>,
+    /// Frame that last sampled this state; see `ThemeUi::sweep`.
+    seen: u64,
 }
 type PaintKey = (usize, u64, u32, u32, bool);
 #[derive(Debug)]
@@ -133,6 +135,8 @@ struct WidgetStyle {
     settings: u64,
     key: PaintKey,
     animations: bool,
+    /// Frame that last styled this widget; see `ThemeUi::sweep`.
+    seen: u64,
 }
 #[derive(Debug)]
 struct Prepared {
@@ -315,6 +319,10 @@ impl Style {
         }
     }
 }
+/// Painted frames between sweeps of per-widget theme entries.
+const SWEEP_EVERY: u64 = 120;
+/// Painted frames a widget may go unstyled before its entries are dropped.
+const SWEEP_AGE: u64 = 240;
 /// One UI-thread resolver. Call `begin_frame` before painting, and request another frame only
 /// while `animating` is true. Resource loading and decoding happen before `insert_texture`.
 #[derive(Debug)]
@@ -341,6 +349,8 @@ pub struct ThemeUi {
     unconditional_calls: usize,
     prepared: fnv::FnvHashMap<PaintKey, Prepared>,
     widgets: fnv::FnvHashMap<u64, WidgetStyle>,
+    /// Counts painted frames, so per-widget entries can age out.
+    frame: u64,
     now: Instant,
     origin: Instant,
     active: bool,
@@ -407,6 +417,7 @@ impl ThemeUi {
             unconditional_calls: 0,
             prepared: Default::default(),
             widgets: Default::default(),
+            frame: 0,
             now,
             origin: now,
             active: false,
@@ -516,6 +527,21 @@ impl ThemeUi {
     pub fn begin_frame(&mut self, now: Instant) {
         self.now = now;
         self.active = false;
+        self.frame += 1;
+        if self.frame.is_multiple_of(SWEEP_EVERY) {
+            self.sweep();
+        }
+    }
+    /// Forgets widgets that have not been painted for a while. Widget ids name live UI
+    /// elements (a tab, its close button); once the element is gone its style and
+    /// transition state are never read again. Only the 4096-entry cap reclaimed them,
+    /// so closed tabs stayed resident and the cap cleared every live transition at once.
+    /// An evicted widget that paints again resolves through the shared paint cache.
+    fn sweep(&mut self) {
+        let frame = self.frame;
+        let fresh = |seen: u64| frame.saturating_sub(seen) <= SWEEP_AGE;
+        self.widgets.retain(|_, widget| fresh(widget.seen));
+        self.states.retain(|_, state| fresh(state.seen));
     }
     /// Resolver calls, paint conversion misses and settings-free calls, for diagnostics.
     pub fn cache_stats(&self) -> [usize; 3] {
@@ -552,10 +578,11 @@ impl ThemeUi {
     /// Resolves changed widget inputs; unchanged paths/settings reuse paint data while
     /// transitions and texture sequences continue sampling the current frame clock.
     pub fn style(&mut self, id: u64, path: &ElementPath<'_>, settings: &Settings) -> Style {
-        if let Some(cached) = self.widgets.get(&id)
+        if let Some(cached) = self.widgets.get_mut(&id)
             && cached.settings == settings.cache_identity()
             && cached.input.matches(path)
         {
+            cached.seen = self.frame;
             let (style, key, enabled) = (cached.input.style.clone(), cached.key, cached.animations);
             return self.animate(id, style, key, enabled);
         }
@@ -688,6 +715,7 @@ impl ThemeUi {
                 settings: input_settings,
                 key,
                 animations: enabled,
+                seen: self.frame,
             },
         );
         self.animate(id, style, key, enabled)
@@ -698,6 +726,7 @@ impl ThemeUi {
             self.states.clear();
         }
         let state = self.states.entry(id).or_default();
+        state.seen = self.frame;
         if state.key == Some(key) && !state.active {
             return state.settled.as_ref().unwrap_or(&style).clone();
         }
@@ -2057,6 +2086,32 @@ mod tests {
             theme.states.keys().all(|id| theme.widgets.contains_key(id)),
             "capacity eviction must discard states whose input paths are no longer retained"
         );
+    }
+    #[test]
+    fn widgets_of_closed_elements_age_out_while_painted_ones_keep_their_state() {
+        let source = r##"{"rules":[{"class":"tab","fg":"#112233"}]}"##;
+        let palette = Palette::default();
+        let mut ui = ThemeUi::new(Arc::new(Theme::parse(source, &palette).unwrap()), palette);
+        let settings = Settings::default();
+        let path = ElementPath(&[Element::new("window", &[]), Element::new("tab", &[])]);
+        let now = Instant::now();
+        // A stream of short-lived tabs, each painted for a few frames and then closed,
+        // beside one tab that stays open and is painted every frame.
+        for tab in 0..3_000u64 {
+            for _ in 0..2 {
+                ui.begin_frame(now);
+                ui.style(1, &path, &settings);
+                ui.style(1_000 + tab, &path, &settings);
+            }
+        }
+        let live = (SWEEP_EVERY + SWEEP_AGE) as usize;
+        assert!(
+            ui.widgets.len() <= live && ui.states.len() <= live,
+            "closed widgets are dropped by age, not kept until the hard cap: {} widgets, {} states",
+            ui.widgets.len(),
+            ui.states.len()
+        );
+        assert!(ui.widgets.contains_key(&1) && ui.states.contains_key(&1));
     }
     #[test]
     fn retained_widgets_invalidate_on_ancestor_settings_and_theme_changes() {

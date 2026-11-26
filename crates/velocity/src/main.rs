@@ -5,6 +5,8 @@ mod annotation_commands;
 mod annotations;
 // The legacy in-App test modules have AppKit/macOS-specific fixtures. Windows
 // exercises the production binary via its separate headless integration tests.
+#[cfg(test)]
+mod alloc_count;
 #[cfg(any(target_os = "macos", all(windows, not(test))))]
 mod app;
 mod bench;
@@ -24,6 +26,9 @@ mod editor;
 mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: alloc_count::Counting = alloc_count::Counting;
 #[cfg(any(target_os = "macos", windows))]
 mod field_chrome;
 mod git_ui;

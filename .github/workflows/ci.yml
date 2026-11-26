@@ -27,6 +27,11 @@ jobs:
         env:
           # Native IPC fixtures have short wall-clock deadlines; avoid test-worker contention.
           {} # Default parallelism; readiness is signalled by the IPC fixture.
+      # Memory soak: repeated workloads must return the heap to its baseline. These use
+      # a counting allocator, so they run alone and single-threaded.
+      - name: Memory soak
+        if: success() || failure()
+        run: cargo test -p velocity --bin velocity --locked --release -- --ignored --test-threads=1 memory_soak
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
