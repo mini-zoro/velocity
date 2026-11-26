@@ -146,6 +146,7 @@ fn huge_scene_instance_bytes_retire_after_sustained_small_frames() {
     renderer.prepare(&small, &mut fonts, 1.).unwrap();
     renderer.discard_staged_writes();
     let baseline = gpu(&renderer);
+    let baseline_capacity = renderer.capacity;
     let huge = Scene {
         layers: vec![Layer {
             rects: vec![rect; 60_000],
@@ -155,9 +156,13 @@ fn huge_scene_instance_bytes_retire_after_sustained_small_frames() {
     };
     renderer.prepare(&huge, &mut fonts, 1.).unwrap();
     renderer.discard_staged_writes();
-    let peak = gpu(&renderer);
-    assert!(peak.buffer_bytes > baseline.buffer_bytes);
+    // Metal's HAL does not report buffer memory (the counter stays 0), so growth is read
+    // from the renderer's own instance capacity; object counts still come from wgpu.
     let capacity = renderer.capacity;
+    assert!(
+        capacity > baseline_capacity,
+        "{capacity} > {baseline_capacity}"
+    );
     for _ in 0..INSTANCE_SHRINK_FRAMES - 1 {
         renderer.prepare(&small, &mut fonts, 1.).unwrap();
         renderer.discard_staged_writes();
