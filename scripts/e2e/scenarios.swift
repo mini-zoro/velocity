@@ -403,8 +403,8 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     }
 
     _ = useInputSource(abcIds)
-    killVelocity(at: environment.launcher)
     if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "ime") }
+    killVelocity(at: environment.launcher)
     report.finish()
 }
 
@@ -426,6 +426,7 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
     }
     _ = moveWindow(source, to: CGRect(x: 20, y: 30, width: 900, height: 640))
     sleep(seconds: 0.3)
+    _ = waitUntil(10) { !tabs(source).isEmpty }
     let initialTabs = tabs(source)
     report.info("start", detail: "tabs=\(tabSummary(source)) windows=\(onScreenWindows(pid).count)")
     report.check(initialTabs.count == 3, "three tabs in one window", detail: tabSummary(source))
@@ -454,10 +455,13 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
                      "the source window lost c.txt", detail: tabSummary(source))
     }
 
-    // The torn-off window opens on top of the source; separate them before a drag
-    // between their strips, or the pointer lands on the wrong window.
-    if let newWindow, let mainWindow = axWindows(pid).first(where: { win in !sameWindow(win, newWindow) }) {
-        arrangeSideBySide(mainWindow, newWindow, report: report)
+    // The torn-off window opens on top of the source strip; move it clear (its own
+    // strip stays reachable) so the pointer reaches the source for the merge drag.
+    if let newWindow {
+        let moved = moveWindow(newWindow, to: CGRect(x: 20, y: 420, width: 700, height: 300))
+        report.note("torn-off window", detail: "moved=\(moved)")
+        _ = waitUntil(5) { !tabs(newWindow).isEmpty }
+        sleep(seconds: 0.3)
     }
     // 2b. Drag the tab from the new window into the source strip: merge, source closes.
     if let newWindow, let mainWindow = axWindows(pid).first(where: { win in !sameWindow(win, newWindow) }),
@@ -506,8 +510,8 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
                      "Escape during a drag keeps the tab in place", detail: now.first.map { tabSummary($0) } ?? "")
     }
 
-    killVelocity(at: environment.launcher)
     if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "tabs") }
+    killVelocity(at: environment.launcher)
     report.finish()
 }
 
@@ -543,18 +547,27 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
     report.check(frontmostPid() == otherPid, "another app is frontmost", detail: frontmostName())
     guard let target = tab(window, named: "a.txt") else { report.check(false, "a.txt tab"); report.finish() }
     let point = CGPoint(x: target.frame.midX, y: target.frame.midY)
+    report.note("click target", detail: "\(Int(point.x)),\(Int(point.y)) topmost=\(windowUnder(point)) front=\(frontmostName())")
     _ = guardedClick(point, pid: pid, report: report, label: "inactive tab", clicks: 1)
-    let activated = waitUntil(3) { frontmostPid() == pid }
+    let activated = waitUntil(2) { frontmostPid() == pid }
     report.check(activated, "one click on the inactive window activates Velocity", detail: frontmostName())
+    if !activated {
+        // A second click separates "the app never activates" from "only the first
+        // click is swallowed".
+        click(at: point)
+        let second = waitUntil(2) { frontmostPid() == pid }
+        report.note("second click", detail: second ? "activates" : "still \(frontmostName())")
+        dumpOnFailure(report, pid: pid, label: "activate-click")
+    }
     let switched = waitUntil(2) {
         guard let window = velocityWindow(pid) else { return false }
         return tabs(window).first { $0.label.hasPrefix("a.txt") }?.selected ?? false
     }
     report.check(switched, "the same click selects the clicked tab",
                  detail: velocityWindow(pid).map { tabSummary($0) } ?? "no window")
+    if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "activate") }
     killQuietly("TextEdit")
     killVelocity(at: environment.launcher)
-    if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "activate") }
     report.finish()
 }
 
@@ -578,9 +591,9 @@ func scenarioBackground(_ options: ArraySlice<String>) -> Never {
     report.check(frontmostPid() == otherPid, "velocity -b leaves the other app frontmost",
                  detail: "front=\(frontmostName()) velocity=\(pid)")
     report.check(!windowTitles(pid).isEmpty, "velocity -b still opens the file", detail: "\(windowTitles(pid))")
+    if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "background") }
     killQuietly("TextEdit")
     killVelocity(at: environment.launcher)
-    if report.failures > 0 { dumpOnFailure(report, pid: pid, label: "background") }
     report.finish()
 }
 

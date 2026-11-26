@@ -497,8 +497,26 @@ func inputSources(includeDisabled: Bool = true) -> [TISInputSource] {
     (TISCreateInputSourceList(nil, includeDisabled).takeRetainedValue() as? [TISInputSource]) ?? []
 }
 
-func currentInputSourceId() -> String {
+func localCurrentInputSourceId() -> String {
     stringProperty(TISCopyCurrentKeyboardInputSource().takeRetainedValue(), kTISPropertyInputSourceID as String)
+}
+
+/// TIS caches the current source per process and this tool never pumps a main loop,
+/// so after another process switches the source its own view stays stale. Ask a
+/// fresh process instead.
+func currentInputSourceId() -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = ["current-input"]
+    process.standardInput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    guard (try? process.run()) != nil else { return localCurrentInputSourceId() }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? localCurrentInputSourceId() : text
 }
 
 func findInputSource(_ id: String) -> TISInputSource? {
@@ -599,7 +617,7 @@ func switchToPinyin(_ report: Report?) -> Bool {
 /// The switching itself: every step is traced before it runs, so a crash names
 /// the call that caused it.
 func switchInputMethodToPinyin() {
-    trace("start target=\(pinyinTarget) current=\(currentInputSourceId())")
+    trace("start target=\(pinyinTarget) current=\(localCurrentInputSourceId())")
     trace("info-basics \(inputSourceBasics(pinyinTarget))")
     trace("info-extra \(inputSourceInfo(pinyinTarget))")
     trace("enable method")
@@ -611,28 +629,28 @@ func switchInputMethodToPinyin() {
     for attempt in 1...3 {
         trace("select mode attempt \(attempt)")
         let status = selectInputSource(pinyinTarget)
-        trace("select mode attempt \(attempt) status=\(status) current=\(currentInputSourceId())")
-        if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == pinyinTarget }) { return }
+        trace("select mode attempt \(attempt) status=\(status) current=\(localCurrentInputSourceId())")
+        if waitUntil(1.5, interval: 0.1, { localCurrentInputSourceId() == pinyinTarget }) { return }
     }
     trace("select method")
     let parentStatus = selectInputSource("com.apple.inputmethod.SCIM")
-    trace("select method status=\(parentStatus) current=\(currentInputSourceId())")
-    _ = waitUntil(1) { currentInputSourceId().contains("SCIM") }
+    trace("select method status=\(parentStatus) current=\(localCurrentInputSourceId())")
+    _ = waitUntil(1) { localCurrentInputSourceId().contains("SCIM") }
     trace("select mode after method")
     let again = selectInputSource(pinyinTarget)
-    trace("select mode after method status=\(again) current=\(currentInputSourceId())")
-    if waitUntil(1.5, interval: 0.1, { currentInputSourceId() == pinyinTarget }) { return }
+    trace("select mode after method status=\(again) current=\(localCurrentInputSourceId())")
+    if waitUntil(1.5, interval: 0.1, { localCurrentInputSourceId() == pinyinTarget }) { return }
     for step in 1...4 {
         trace("control+space \(step)")
         postKey("space", flags: .maskControl)
         sleep(seconds: 0.6)
-        trace("control+space \(step) current=\(currentInputSourceId())")
-        if currentInputSourceId() == pinyinTarget { return }
+        trace("control+space \(step) current=\(localCurrentInputSourceId())")
+        if localCurrentInputSourceId() == pinyinTarget { return }
     }
     trace("defaults write")
     let list = "[{InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
     let enabled = "[{InputSourceKind = \"Keyboard Layout\"; \"KeyboardLayout ID\" = 252; \"KeyboardLayout Name\" = ABC; }, {InputSourceKind = \"Input Method\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; }, {InputSourceKind = \"Input Mode\"; \"Bundle ID\" = \"com.apple.inputmethod.SCIM\"; \"Input Mode\" = \"ITABC\"; }]"
     _ = shell("defaults write com.apple.HIToolbox AppleEnabledInputSources -array \(enabled) && defaults write com.apple.HIToolbox AppleSelectedInputSources -array \(list) && killall TextInputMenuAgent 2>/dev/null; true")
-    _ = waitUntil(3) { currentInputSourceId() == pinyinTarget }
-    trace("end current=\(currentInputSourceId())")
+    _ = waitUntil(3) { localCurrentInputSourceId() == pinyinTarget }
+    trace("end current=\(localCurrentInputSourceId())")
 }

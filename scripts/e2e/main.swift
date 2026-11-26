@@ -314,6 +314,8 @@ func grantAccessibility(to path: String) -> String {
 switch command {
 case "probe":
     probe()
+case "current-input":
+    print(localCurrentInputSourceId())
 case "switch-ime":
     switchInputMethodToPinyin()
 case "move-window":  // move-window <pid> <title-substring> <x> <y> <w> <h>
