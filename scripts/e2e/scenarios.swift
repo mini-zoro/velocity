@@ -448,6 +448,8 @@ func scenarioTabs(_ options: ArraySlice<String>) -> Never {
         guard let r = axRect(win) else { return false }
         return newWindows.contains { $0.bounds.intersects(r.insetBy(dx: 6, dy: 6)) }
     }
+    // The torn-off window paints its strip a moment after the drop.
+    _ = waitUntil(5) { newWindow.map { tabs($0).contains { $0.label.hasPrefix("c.txt") } } ?? false }
     report.check(newWindow.map { tabs($0).contains { $0.label.hasPrefix("c.txt") } } ?? false,
                  "the new window holds c.txt", detail: newWindow.map { tabSummary($0) } ?? "no AX window")
     if let source = axWindows(pid).first(where: { win in !sameWindow(win, newWindow!) }) {

@@ -118,8 +118,14 @@ func probe() -> Never {
     let pinyinCurrent = switchToPinyin(report)
     report.check(pinyinCurrent, "Pinyin is the current input source", detail: currentInputSourceId())
     if pinyinCurrent, let textEdit {
+        // The input method must be attached to the focused text view: say who is
+        // frontmost and whether the IME process is up before typing.
+        report.info("input method processes", detail: output("pgrep -fl 'SCIM|imklaunchagent' | head -5") ?? "none")
+        report.info("before IME typing", detail: "front=\(frontmostName()) pid=\(frontmostPid()) textEdit=\(textEdit)")
         let area = axFind(axApp(textEdit), role: "AXTextArea")
-        if let area { _ = AXUIElementSetAttributeValue(area, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
+        if let area {
+            _ = AXUIElementSetAttributeValue(area, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
         selectAll(pid: textEdit)
         typeKeys("nihao", gap: 60_000)
         usleep(600_000)
@@ -137,6 +143,26 @@ func probe() -> Never {
         let afterEscape = readText(pid: textEdit)
         report.check(!afterEscape.contains("中文") && !afterEscape.contains("zhongwen"), "Pinyin HID: zhongwen + Escape inserts nothing",
                      detail: "value=\(afterEscape.debugDescription)")
+        if !committed {
+            // A window opened while Pinyin is current gets a fresh input context; if
+            // that composes, the failure is context lifetime, not the input method.
+            let fresh = "/tmp/velocity-e2e-probe-ime.txt"
+            try? "".write(toFile: fresh, atomically: true, encoding: .utf8)
+            _ = shell("open -e \(fresh.shellQuoted)")
+            usleep(1_500_000)
+            if let freshPid = waitForApp(bundleId: "com.apple.TextEdit", timeout: 10) {
+                _ = waitUntil(5) { axWindows(freshPid).count > 1 || !readText(pid: freshPid).isEmpty }
+                selectAll(pid: freshPid)
+                typeKeys("nihao", gap: 60_000)
+                usleep(300_000)
+                typeKeys(" ", gap: 60_000)
+                let second = waitUntil(4) { readText(pid: freshPid).contains("你好") }
+                report.check(second, "Pinyin HID: typing in a window opened after the switch commits 你好",
+                             detail: "value=\(readText(pid: freshPid).debugDescription)")
+            }
+            report.info("HIToolbox enabled sources",
+                        detail: shell("defaults read com.apple.HIToolbox AppleEnabledInputSources 2>&1 | tr '\\n' ' ' | cut -c1-400").out)
+        }
     }
     // Restore the ABC layout so later checks can type plainly.
     let abc = useInputSource(abcIds)
@@ -366,7 +392,9 @@ case "windows":  // windows [owner]
         print("id=\(window.id) pid=\(window.pid) owner=\(window.owner) layer=\(window.layer) name=\(window.name) bounds=\(Int(window.bounds.minX)),\(Int(window.bounds.minY)) \(Int(window.bounds.width))x\(Int(window.bounds.height))")
     }
 case "front":
-    print("\(frontmostPid()) \(frontmostName())")
+    // The child every other command asks; read NSWorkspace once, here only.
+    let front = NSWorkspace.shared.frontmostApplication
+    print("\(front?.processIdentifier ?? 0) \(front?.localizedName ?? "none")")
 case "activate":
     guard let pid = pid_t(options.first ?? "") else { fail("activate needs a pid") }
     print("activate=\(activate(pid)) front=\(frontmostPid() == pid)")

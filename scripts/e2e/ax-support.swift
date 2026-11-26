@@ -271,13 +271,30 @@ func runningApplications(matching path: String) -> [NSRunningApplication] {
     }
 }
 
-func frontmostPid() -> pid_t {
-    NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+/// The frontmost application as a fresh process sees it. NSWorkspace caches the
+/// value and updates it through notifications that need a run loop; this tool never
+/// runs one, so its own read goes stale exactly like the input source did.
+func frontmostProcess() -> (pid: pid_t, name: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = ["front"]
+    process.standardInput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    guard (try? process.run()) != nil else { return (0, "none") }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    let parts = String(decoding: data, as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: " ", maxSplits: 1)
+    guard let first = parts.first, let pid = pid_t(first) else { return (0, "none") }
+    return (pid, parts.count > 1 ? String(parts[1]) : "none")
 }
 
-func frontmostName() -> String {
-    NSWorkspace.shared.frontmostApplication?.localizedName ?? "none"
-}
+func frontmostPid() -> pid_t { frontmostProcess().pid }
+
+func frontmostName() -> String { frontmostProcess().name }
 
 func activate(_ pid: pid_t) -> Bool {
     guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
