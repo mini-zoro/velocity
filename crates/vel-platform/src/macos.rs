@@ -916,6 +916,8 @@ struct Host {
     ax_announcements: RefCell<accessibility::Announcements>,
     ax_focus: Cell<Option<accessibility::Id>>,
     ax_layout: Cell<u64>,
+    /// The inactive-window click `acceptsFirstMouse:` let through, until `mouseDown:` sees it.
+    first_mouse: Cell<first_mouse::FirstMouse>,
 }
 impl Host {
     // Keep the native object, not a RefCell borrow, across reentrant AppKit calls.
@@ -1469,14 +1471,19 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))] fn accepts_first_mouse(&self, event: Option<&NSEvent>) -> bool {
             let point = event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None));
             self.ivars().host.upgrade().is_some_and(|host| {
-                host.app.try_borrow().ok().is_some_and(|app| {
-                    app.as_ref().is_some_and(|app| {
-                        app.accepts_first_mouse()
-                            || point.is_some_and(|p| {
-                                app.accepts_first_mouse_at(Point { x: p.x, y: p.y })
-                            })
+                let accepted = host.app.try_borrow().ok().is_some_and(|app| {
+                    app.as_deref().is_some_and(|app| {
+                        first_mouse::accepts(app, point.map(|p| Point { x: p.x, y: p.y }))
                     })
-                })
+                });
+                // `mouse()` finishes this click's activation; a query without an event keeps
+                // the answer already recorded for the real mouse-down.
+                if let Some(e) = event {
+                    let mut first = host.first_mouse.get();
+                    first.answered(accepted, e.timestamp());
+                    host.first_mouse.set(first);
+                }
+                accepted
             })
         }
         #[unsafe(method(isAccessibilityElement))] fn ax_element(&self) -> bool { true }
@@ -1753,7 +1760,26 @@ impl EditorView {
             if kind == MouseKind::Down
                 && let Some(w) = self.window()
             {
+                // This only changes which responder in the window gets keys; it does not make
+                // the window key or activate the app:
+                // <https://developer.apple.com/documentation/appkit/nswindow/makefirstresponder(_:)>
                 w.makeFirstResponder(Some(self));
+                let mut first = h.first_mouse.get();
+                let activate = first.take(first_mouse::Down {
+                    timestamp: e.timestamp(),
+                    left: e.buttonNumber() == 0,
+                    command: e.modifierFlags().contains(NSEventModifierFlags::Command),
+                    app_active: NSApplication::sharedApplication(h.mtm).isActive(),
+                });
+                h.first_mouse.set(first);
+                // A click accepted as first mouse acts on the tab, so it must also leave the
+                // window key in the active app, as the activation click it replaced would.
+                // AppKit's own activation is only a request (see `first_mouse`); repeating it
+                // through the `focus()` path used for Finder opens is harmless when it already
+                // landed, and the answer is consumed, so later clicks never ask again.
+                if activate {
+                    h.handle().focus();
+                }
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             let event = MouseEvent {
@@ -3055,6 +3081,7 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         ax_announcements: Default::default(),
         ax_focus: Cell::new(None),
         ax_layout: Cell::new(0),
+        first_mouse: Cell::default(),
     })
 }
 fn create_delegate(

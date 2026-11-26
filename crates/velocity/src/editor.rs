@@ -730,7 +730,17 @@ impl Editor {
         {
             return Ok(());
         }
-        self.unmark();
+        // Window and application commands are only queued here for the host, which
+        // may leave, close or cover this sheet; its composition routing then discards
+        // the preedit. Committing now would type raw Pinyin into a sheet being left.
+        if self
+            .registry
+            .kind(name)
+            .is_none_or(|kind| kind == vel_commands::Kind::TextCommand)
+            || matches!(name, "chain" | "run_macro" | "run_macro_file")
+        {
+            self.unmark();
+        }
         self.sync();
         if !matches!(
             name,
