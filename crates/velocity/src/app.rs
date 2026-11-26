@@ -2094,6 +2094,12 @@ impl App {
         if !self.transferable_tab(tab_index) {
             return Err("Finish loading or close the other views before moving this tab".into());
         }
+        // The sheet leaves this window's input context: discard its preedit, never
+        // carry or commit it (docs/behavior.md, input method composition).
+        let editor = &mut self.workspace.tabs[tab_index].editor;
+        if editor.marked.is_some() {
+            editor.cancel_composition();
+        }
         if tab_index == self.workspace.active {
             self.workspace.tabs[tab_index].scroll = (self.view.scroll_x, self.view.scroll_y);
             self.workspace.tabs[tab_index].scroll_line_height = self.view.line_height;
