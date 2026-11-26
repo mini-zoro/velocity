@@ -50,14 +50,17 @@ fn destinations(hosts: &[Rc<Host>]) -> Vec<OpenHost> {
 }
 
 pub(super) fn hosts_busy() -> bool {
-    let busy = |host: &Rc<Host>| {
+    let busy = |host: &Host| {
         host.dispatching.get()
             || host.drawing.get()
             || host.input_depth.get() != 0
             || host.context_tracking.get()
             || host.app.try_borrow_mut().is_err()
     };
-    hosts().iter().any(busy) || template().as_ref().is_some_and(busy)
+    WINDOWS.with_borrow(|windows| {
+        windows.owners().any(|d| busy(&d.ivars().host))
+            || windows.template().is_some_and(|host| busy(host))
+    })
 }
 pub(super) fn register_context(host: &Rc<Host>) {
     APPLICATION.with(|app| {
@@ -342,6 +345,7 @@ pub(super) fn idle() {
         for host in hosts.iter().filter(|host| needs_idle(host)) {
             host.dispatch(Event::Idle);
         }
+        poll_memory(hosts[0].mtm);
         update_idle_timer();
         return;
     }
@@ -350,6 +354,53 @@ pub(super) fn idle() {
     }
     schedule();
     update_idle_timer();
+}
+
+pub(super) fn poll_memory(mtm: MainThreadMarker) {
+    let ready = |host: &Host| host.ready.get() && !host.starting.get() && !host.stopped.get();
+    memory_guard::service(
+        Instant::now(),
+        || {
+            !hosts_busy()
+                && WINDOWS.with_borrow(|windows| windows.owners().any(|d| ready(&d.ivars().host)))
+        },
+        || {
+            let foreground = NSApplication::sharedApplication(mtm).isActive()
+                && WINDOWS.with_borrow(|windows| {
+                    windows.owners().any(|delegate| {
+                        let host = &delegate.ivars().host;
+                        ready(host)
+                            && host
+                                .window()
+                                .is_some_and(|w| w.isVisible() && !w.isMiniaturized())
+                    })
+                });
+            (
+                foreground,
+                foreground && NSEvent::pressedMouseButtons() != 0,
+            )
+        },
+        || None, // libdispatch queues the event independently of this poll.
+        || {
+            WINDOWS.with_borrow(|windows| {
+                memory_guard::sum_documents(windows.owners().filter_map(|delegate| {
+                    let host = &delegate.ivars().host;
+                    if !ready(host) {
+                        return None;
+                    }
+                    host.app.borrow().as_ref()?.memory_guard_document_bytes()
+                }))
+            })
+        },
+        |request| {
+            memory_guard::sum_caches(live_hosts().iter().filter_map(|host| {
+                if !ready(host) {
+                    return None;
+                }
+                request.deliver(host.app.borrow_mut().as_deref_mut()?)
+            }))
+        },
+    );
 }
 
 pub(super) fn launched() {

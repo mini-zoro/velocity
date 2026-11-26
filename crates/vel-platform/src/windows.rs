@@ -6,6 +6,7 @@ mod model;
 mod shell;
 mod window;
 
+use crate::memory_guard;
 use crate::requests::{ContextRequest, OpenHost, WindowTitle, open_target};
 use crate::{
     AppHandler, Appearance, Command, FrameContext, FrameReason, MenuEntry, MouseEvent, MouseKind,
@@ -30,8 +31,8 @@ use windows_sys::Win32::{
     System::{
         LibraryLoader::GetModuleHandleW,
         Threading::{
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE,
-            SetWaitableTimer, TIMER_ALL_ACCESS,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentProcessId,
+            INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
         },
     },
     UI::{
@@ -549,9 +550,50 @@ struct Runtime {
     failure: RefCell<Option<String>>,
     external_open: RefCell<Vec<PathBuf>>,
     reopen_not_before: Cell<Instant>,
+    memory_pressure: Option<memory_guard::windows::PressureSource>,
 }
 
 impl Runtime {
+    fn poll_memory(&self, now: Instant, windows: &[Rc<Host>]) {
+        let ready = |host: &Host| host.ready.get() && !host.closing.get();
+        memory_guard::service(
+            now,
+            || windows.iter().any(|host| ready(host)),
+            || {
+                if !windows.iter().any(|host| ready(host) && host.is_drawable()) {
+                    return (false, false);
+                }
+                let mut pid = 0;
+                // SAFETY: these are read-only queries, and pid is a writable DWORD.
+                let foreground = unsafe {
+                    GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+                    pid == GetCurrentProcessId()
+                };
+                (
+                    foreground,
+                    foreground && windows.iter().any(|host| host.pressed.get() != 0),
+                )
+            },
+            || self.memory_pressure.as_ref()?.poll(now),
+            || {
+                memory_guard::sum_documents(windows.iter().filter_map(|host| {
+                    if !ready(host) {
+                        return None;
+                    }
+                    host.app.borrow().as_ref()?.memory_guard_document_bytes()
+                }))
+            },
+            |request| {
+                memory_guard::sum_caches(windows.iter().filter_map(|host| {
+                    if !ready(host) {
+                        return None;
+                    }
+                    request.deliver(host.app.borrow_mut().as_deref_mut()?)
+                }))
+            },
+        );
+    }
+
     fn launch(
         self: &Rc<Self>,
         options: WindowOptions,
@@ -825,6 +867,7 @@ impl Runtime {
             {
                 continue;
             }
+            self.poll_memory(Instant::now(), &windows);
             let template = self.template.borrow().clone();
             if windows.is_empty()
                 && let Some(template) = &template
@@ -933,6 +976,7 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         }
         Class(instance)
     };
+    memory_guard::reset();
     let session = Session(Rc::new(Runtime {
         instance: class.0,
         // SAFETY: This is the terminated name of a Shell notification.
@@ -946,6 +990,7 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         failure: RefCell::default(),
         external_open: RefCell::default(),
         reopen_not_before: Cell::new(Instant::now()),
+        memory_pressure: memory_guard::windows::PressureSource::new(),
     }));
     session.0.launch(options, app)?;
     session.0.run_loop()
@@ -1143,7 +1188,15 @@ impl Host {
                 }
                 return None;
             }
-            WM_ACTIVATE | WM_SETFOCUS => self.request(FrameReason::Resize),
+            WM_ACTIVATEAPP if wparam != 0 => memory_guard::became_foreground(),
+            WM_ACTIVATE | WM_SETFOCUS => {
+                if self.is_drawable()
+                    && (message == WM_SETFOCUS || wparam as u16 != WA_INACTIVE as u16)
+                {
+                    memory_guard::became_foreground();
+                }
+                self.request(FrameReason::Resize);
+            }
             WM_KILLFOCUS => {
                 self.finish_ime(hwnd);
                 self.context.borrow_mut().cancel();

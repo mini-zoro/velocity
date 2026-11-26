@@ -32,6 +32,17 @@ impl std::fmt::Debug for Metrics {
     }
 }
 impl Metrics {
+    pub(crate) fn begin_frame(&self) {
+        self.images.begin_frame();
+    }
+    pub(crate) fn trim_caches(&self) -> usize {
+        *self.cache.borrow_mut() = HashMap::new();
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(fonts) = self.native.borrow_mut().as_mut() {
+            fonts.trim_shaping();
+        }
+        self.images.trim_inactive()
+    }
     /// Installs package image bytes; decoding is asynchronous and never runs in painting.
     pub fn set_image_resources(
         &self,

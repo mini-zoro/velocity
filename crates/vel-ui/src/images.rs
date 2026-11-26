@@ -122,6 +122,7 @@ pub(crate) struct Images {
     resource_epoch: Cell<u64>,
     serial: Cell<u64>,
     clock: Rc<Cell<u64>>,
+    frame_start: Cell<Option<u64>>,
     tx: mpsc::Sender<ResultMessage>,
     rx: RefCell<mpsc::Receiver<ResultMessage>>,
     pending: Cell<usize>,
@@ -136,6 +137,7 @@ impl Default for Images {
             resource_epoch: Cell::new(0),
             serial: Cell::new(0),
             clock: Rc::default(),
+            frame_start: Cell::new(None),
             tx,
             rx: RefCell::new(rx),
             pending: Cell::new(0),
@@ -144,6 +146,36 @@ impl Default for Images {
     }
 }
 impl Images {
+    pub fn begin_frame(&self) {
+        self.frame_start.set(Some(self.clock.get()));
+    }
+
+    pub fn trim_inactive(&self) -> usize {
+        let mut cache = self.cache.borrow_mut();
+        let mut changed = cache.prune();
+        let before = cache.entries.values().map(|entry| entry.pixels).sum();
+        let mut freed = 0;
+        if let Some(frame_start) = self.frame_start.get() {
+            for entry in cache.entries.values_mut() {
+                if entry.pixels != 0
+                    && let Some(slot) = entry.slot.upgrade()
+                    && slot.used.get() <= frame_start
+                {
+                    slot.image.borrow_mut().take();
+                    freed += std::mem::take(&mut entry.pixels);
+                }
+            }
+        }
+        cache.bytes -= freed;
+        changed |= freed != 0;
+        cache.entries.shrink_to_fit();
+        if changed {
+            // A popup that becomes visible later can request its pixels again.
+            self.generation.set(self.generation.get() + 1);
+        }
+        before
+    }
+
     pub fn set_resources(&self, resources: BTreeMap<String, Arc<[u8]>>) {
         *self.resources.borrow_mut() = Arc::new(resources);
         self.resource_epoch.set(self.resource_epoch.get() + 1);
@@ -416,6 +448,25 @@ mod tests {
         assert!(weak.upgrade().is_none());
         images.poll();
         assert_eq!(images.cache.borrow().bytes, 0);
+    }
+
+    #[test]
+    fn memory_trim_releases_cold_pixels_but_preserves_the_current_frame() {
+        let images = Images::default();
+        let shown = fake_slot(&images, Key::Data([1; 32]));
+        let cold = fake_slot(&images, Key::Data([2; 32]));
+        complete(&images, Key::Data([1; 32]), 0);
+        complete(&images, Key::Data([2; 32]), 0);
+        let old_pixels = Arc::downgrade(&cold.pixels().unwrap());
+        images.begin_frame();
+        let current = shown.pixels().unwrap();
+        let generation = images.generation.get();
+
+        assert_eq!(images.trim_inactive(), 2 * current.rgba.len());
+        assert!(Arc::ptr_eq(&shown.pixels().unwrap(), &current));
+        assert!(old_pixels.upgrade().is_none() && cold.pixels().is_none());
+        assert_eq!(cold.size.get(), Some(current.logical_size));
+        assert_eq!(images.generation.get(), generation + 1);
     }
 
     #[test]

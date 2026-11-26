@@ -180,6 +180,59 @@ fn huge_scene_instance_bytes_retire_after_sustained_small_frames() {
 }
 
 #[test]
+fn memory_trim_right_sizes_instances_and_rebuilds_the_atlas_on_draw() {
+    let Some((mut renderer, mut fonts)) = renderer() else {
+        return;
+    };
+    let area = Rect {
+        x: 0.,
+        y: 0.,
+        width: 8.,
+        height: 8.,
+    };
+    let huge = Scene {
+        layers: vec![Layer {
+            rects: vec![
+                SolidRect {
+                    rect: area,
+                    clip: area,
+                    radius: 0.,
+                    color: [1.; 4]
+                };
+                60_000
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    renderer.prepare(&huge, &mut fonts, 1.).unwrap();
+    renderer.discard_staged_writes();
+    let peak = renderer.capacity;
+    let small = page(0);
+    // Use just the ASCII part of this fixture so asynchronous fallback is not a
+    // variable in the pixel comparison.
+    let mut small = small;
+    for run in &mut small.layers[0].text {
+        run.text.truncate(run.text.find(" 网关").unwrap());
+    }
+    let before = renderer.render_rgba(&small, &mut fonts, 1.).unwrap();
+    assert!(peak > MIN_INSTANCE_BYTES);
+    assert_eq!(renderer.capacity, peak);
+    assert!(renderer.memory_cache_bytes().0 > 0);
+
+    renderer.trim_memory(true);
+    assert_eq!(renderer.capacity, MIN_INSTANCE_BYTES);
+    assert!(renderer.data.capacity() <= MIN_INSTANCE_BYTES as usize / size_of::<super::Instance>());
+    assert_eq!(renderer.memory_cache_bytes().0, 0);
+    assert!(renderer.atlas.is_empty());
+    assert_eq!(
+        renderer.render_rgba(&small, &mut fonts, 1.).unwrap(),
+        before
+    );
+    eprintln!("GPU instance bytes {peak} -> {}", renderer.capacity);
+}
+
+#[test]
 fn cjk_scroll_and_document_close_release_cpu_glyph_caches() {
     let Some((mut renderer, mut fonts)) = renderer() else {
         return;

@@ -136,7 +136,7 @@ impl Worker {
 }
 
 #[cfg(target_os = "macos")]
-fn release_free_pages() -> usize {
+pub(crate) fn release_free_pages() -> usize {
     unsafe extern "C" {
         fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize;
     }

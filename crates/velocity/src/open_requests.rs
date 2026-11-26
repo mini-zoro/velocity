@@ -410,6 +410,12 @@ impl ImagePreview {
             self.path = None;
         }
     }
+    /// Drops a parked, unselected tab's pixels and cancels any decode. A tab
+    /// selected again requests the image lazily using the same decode path.
+    pub fn release_inactive(&mut self) {
+        self.suspend();
+        self.evicted |= self.pixels.take().is_some();
+    }
 
     #[cfg(test)]
     pub fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> {

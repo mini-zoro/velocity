@@ -3119,6 +3119,16 @@ impl Panels {
             self.file_complete = false;
         }
     }
+
+    pub(crate) fn trim_find_caches(&mut self, workspace: &Workspace, pressure: bool) -> usize {
+        self.release_closed_matches(workspace);
+        if pressure && self.file_task.is_none() {
+            // Published rows and replacement plans remain usable even when
+            // their panel isn't visible. Only discard the streaming scratch.
+            return self.result_view.trim_order_cache();
+        }
+        0
+    }
     /// Refuse to paint an older snapshot even before the next worker poll.
     pub fn current_highlights(&self, workspace: &Workspace) -> &[Range<usize>] {
         if self.overlay == Some(Overlay::Goto)

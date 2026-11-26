@@ -71,6 +71,12 @@ struct Raster {
     top: i32,
     color: bool,
 }
+#[derive(Debug)]
+struct AtlasTexture {
+    bind: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    pages: u32,
+}
 /// CPU presentation boundaries for one successful frame.
 #[derive(Clone, Debug)]
 pub struct FrameTimes {
@@ -101,12 +107,10 @@ pub struct Renderer {
     window: Option<NativeWindow>,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
-    bind: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     screen: wgpu::Buffer,
     atlas: PagedAtlas,
-    texture: wgpu::Texture,
-    texture_pages: u32,
+    atlas_texture: Option<AtlasTexture>,
     rasters: HashMap<GlyphKey, Raster>,
     blanks: HashSet<GlyphKey>,
     instances: wgpu::Buffer,
@@ -445,12 +449,14 @@ impl Renderer {
             window,
             pipeline,
             bind_layout,
-            bind,
             sampler,
             screen,
             atlas: PagedAtlas::new(ATLAS_SIDE, MAX_PAGES),
-            texture,
-            texture_pages: 1,
+            atlas_texture: Some(AtlasTexture {
+                bind,
+                texture,
+                pages: 1,
+            }),
             rasters: HashMap::new(),
             blanks: HashSet::new(),
             instances,
@@ -505,39 +511,81 @@ impl Renderer {
         self.layouts = LineLayoutCache::new(2048);
         self.offscreen = None;
     }
+    /// Retains only enough instance storage for the latest scene. Under pressure,
+    /// also drops the atlas texture; the next actual draw recreates and fills it.
+    pub fn trim_memory(&mut self, pressure: bool) {
+        let required = std::mem::size_of_val(self.data.as_slice()) as u64;
+        let capacity = required.next_power_of_two().max(MIN_INSTANCE_BYTES);
+        if capacity < self.capacity {
+            self.instances = make_instances(&self.device, capacity);
+            self.capacity = capacity;
+        }
+        self.data
+            .shrink_to((self.capacity as usize) / size_of::<Instance>());
+        self.batches.shrink();
+        self.small_frames = 0;
+        self.small_peak = 0;
+        if pressure {
+            self.reset_fonts();
+            self.atlas_texture = None;
+        } else {
+            self.layouts = LineLayoutCache::new(2048);
+        }
+        // In-flight commands keep their resources until completion. Reap what
+        // has already finished, never wait for a drawable or for the device.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+    }
+    /// Allocated atlas texture and GPU/CPU instance bytes, excluding driver overhead.
+    pub fn memory_cache_bytes(&self) -> (u64, u64) {
+        let pages = self.atlas_texture.as_ref().map_or(0, |atlas| atlas.pages);
+        (
+            u64::from(ATLAS_SIDE).pow(2) * 4 * u64::from(pages),
+            self.capacity + (self.data.capacity() * size_of::<Instance>()) as u64,
+        )
+    }
     /// Physical framebuffer dimensions.
     pub fn physical_size(&self) -> [u32; 2] {
         [self.config.width, self.config.height]
     }
     /// Allocation diagnostics (texture storage excludes driver overhead).
     pub fn atlas_info(&self) -> Value {
-        json!({"side":ATLAS_SIDE,"pages":self.atlas.pages(),"allocated_array_layers":self.texture_pages,"allocated_texture_bytes":u64::from(ATLAS_SIDE).pow(2)*4*u64::from(self.texture_pages),"glyph_keys":self.atlas.len(),"page_evictions":self.atlas.evictions(),"layout_cache_entries":self.layouts.len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
+        let pages = self.atlas_texture.as_ref().map_or(0, |atlas| atlas.pages);
+        json!({"side":ATLAS_SIDE,"pages":self.atlas.pages(),"allocated_array_layers":pages,"allocated_texture_bytes":self.memory_cache_bytes().0,"glyph_keys":self.atlas.len(),"page_evictions":self.atlas.evictions(),"layout_cache_entries":self.layouts.len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
     }
     fn grow_texture(&mut self, pages: u32) {
-        if pages <= self.texture_pages {
+        if self
+            .atlas_texture
+            .as_ref()
+            .is_some_and(|old| pages <= old.pages)
+        {
             return;
         }
         let texture = make_texture(&self.device, pages);
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_texture(
-            self.texture.as_image_copy(),
-            texture.as_image_copy(),
-            wgpu::Extent3d {
-                width: ATLAS_SIDE,
-                height: ATLAS_SIDE,
-                depth_or_array_layers: self.texture_pages,
-            },
-        );
-        self.queue.submit([encoder.finish()]);
-        self.texture = texture;
-        self.texture_pages = pages;
-        self.bind = make_bind(
+        if let Some(old) = &self.atlas_texture {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_texture(
+                old.texture.as_image_copy(),
+                texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: ATLAS_SIDE,
+                    height: ATLAS_SIDE,
+                    depth_or_array_layers: old.pages,
+                },
+            );
+            self.queue.submit([encoder.finish()]);
+        }
+        let bind = make_bind(
             &self.device,
             &self.bind_layout,
-            &self.texture,
+            &texture,
             &self.sampler,
             &self.screen,
         );
+        self.atlas_texture = Some(AtlasTexture {
+            bind,
+            texture,
+            pages,
+        });
     }
     fn glyph(
         &mut self,
@@ -590,7 +638,11 @@ impl Renderer {
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture: &self
+                    .atlas_texture
+                    .as_ref()
+                    .expect("atlas allocated")
+                    .texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: slot.x - 1,
@@ -646,7 +698,11 @@ impl Renderer {
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture: &self
+                    .atlas_texture
+                    .as_ref()
+                    .expect("atlas allocated")
+                    .texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: entry.slot.x - 1,
@@ -670,6 +726,7 @@ impl Renderer {
         Ok(entry)
     }
     fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
+        self.grow_texture(1);
         if fonts.poll_fallbacks() {
             self.layouts = LineLayoutCache::new(2048);
         }
@@ -1135,7 +1192,11 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_bind_group(
+                0,
+                &self.atlas_texture.as_ref().expect("prepared atlas").bind,
+                &[],
+            );
             pass.set_vertex_buffer(0, self.instances.slice(..));
             for batch in &batches[range.clone()] {
                 pass.draw(0..6, batch.instances.clone());

@@ -23,6 +23,8 @@ pub use services::{
 };
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", windows, test))]
+mod memory_guard;
 pub mod memory_pressure;
 pub mod metrics;
 #[cfg(target_os = "macos")]
@@ -315,6 +317,29 @@ pub struct Presentation {
     /// Receipt time, reported separately from scanout.
     pub callback: Instant,
 }
+/// A system request to release rebuildable memory.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MemoryPressure {
+    /// Available system memory is low.
+    Warning,
+    /// The system urgently needs memory back.
+    Critical,
+}
+
+/// Approximate sizes, in bytes, of the largest rebuildable caches before trimming.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryCacheBytes {
+    /// Glyph and image atlas texture storage (without driver overhead).
+    pub atlas: u64,
+    /// GPU and CPU instance buffers.
+    pub instances: u64,
+    /// Document shaping and font cache payload.
+    pub fonts: u64,
+    /// Decoded image pixels.
+    pub images: u64,
+    /// Cached find results.
+    pub find: u64,
+}
 /// Application callbacks. The app owns text; the platform owns native objects.
 ///
 /// `on_start`, both startup frames, and orderFront happen within one
@@ -409,6 +434,19 @@ pub trait AppHandler: 'static {
     fn on_frame(&mut self, context: &mut FrameContext<'_>) -> Result<(), String>;
     /// Observe system light/dark changes.
     fn on_appearance(&mut self, _window: &WindowHandle, _appearance: Appearance) {}
+    /// Loaded document bytes owned by this window, or `None` to opt out of the footprint check.
+    fn memory_guard_document_bytes(&self) -> Option<u64> {
+        None
+    }
+    /// Release rebuildable caches on an idle tick, after system pressure or a soft-ceiling warning.
+    /// Return cache sizes before the pass, or `None` if there was nothing to trim.
+    fn on_memory_pressure(&mut self, _level: MemoryPressure) -> Option<MemoryCacheBytes> {
+        None
+    }
+    /// Release cheap-to-rebuild caches once per prolonged period in the background.
+    fn on_background_memory_idle(&mut self) -> Option<MemoryCacheBytes> {
+        None
+    }
     /// Approve a user initiated close/quit. Automatic completion uses `quit`.
     fn on_quit_requested(&mut self, _window: &WindowHandle) -> bool {
         true
@@ -493,6 +531,24 @@ pub struct MenuEntry {
 pub struct Platform;
 #[cfg(target_os = "macos")]
 impl Platform {
+    /// Current process footprint in bytes (physical footprint on macOS, private commit on Windows).
+    pub fn memory_footprint() -> Option<u64> {
+        #[cfg(target_os = "macos")]
+        return metrics::phys_footprint_bytes().ok();
+        #[cfg(windows)]
+        return memory_guard::windows::footprint();
+        #[cfg(not(any(target_os = "macos", windows)))]
+        None
+    }
+
+    /// Ask the native allocator to return unused heap pages, without evicting live pages.
+    pub fn release_free_heap_pages() {
+        #[cfg(target_os = "macos")]
+        memory_pressure::release_free_pages();
+        #[cfg(windows)]
+        memory_guard::windows::compact_heap();
+    }
+
     /// The Finder Sync extension embedded in the running application, if installed.
     pub fn finder_new_text_file_extension() -> Option<std::path::PathBuf> {
         macos::finder::extension_bundle()

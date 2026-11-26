@@ -24,6 +24,7 @@ pub use syntax_set::{SyntaxReference, SyntaxSet, SyntaxSetBuilder};
 pub use tm_language::TmLanguageError;
 #[cfg(feature = "matcher-profile")]
 pub use vel_regex::profile as matcher_profile;
+pub use vel_regex::trim_runtime_caches as trim_regex_caches;
 pub use vel_scope::{Scope, ScopeOp, ScopeStack, ScopeStackOp};
 pub use yaml_load::ParseSyntaxError;
 

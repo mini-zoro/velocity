@@ -103,6 +103,17 @@ fn restore_simple_presentation(mtm: MainThreadMarker) {
         });
     }
 }
+
+pub(super) fn queue_memory_pressure(level: MemoryPressure) {
+    memory_guard::queue_pressure(level);
+    if let Some(delegate) = lifecycle::delegate() {
+        // SAFETY: this selector runs once on a later default-mode turn, not
+        // from libdispatch. A continuously drawing window may defer its poll timer.
+        unsafe {
+            delegate.performSelector_withObject_afterDelay(sel!(pollMemoryGuard:), None, 0.);
+        }
+    }
+}
 impl WindowHandle {
     /// Font families currently exposed by AppKit's font manager.
     pub fn font_families(&self) -> Vec<String> {
@@ -993,6 +1004,7 @@ impl Host {
     fn dispatch(self: &Rc<Self>, event: Event) {
         if matches!(event, Event::Key(_) | Event::Text(_) | Event::Scroll(_)) {
             crate::memory_pressure::note_activity();
+            memory_guard::note_input();
         }
         self.pending.borrow_mut().push_back(event);
         self.drain();
@@ -1077,6 +1089,7 @@ impl Host {
             return false;
         }
         crate::memory_pressure::note_activity();
+        memory_guard::note_input();
         self.dispatching.set(true);
         let previous = self.input.borrow().clone();
         let handled = if let Some(app) = self.app.borrow_mut().as_mut() {
@@ -1370,7 +1383,14 @@ define_class!(
             }
         }
         #[unsafe(method(tick:))] fn tick(&self, _link: &CADisplayLink) { if let Some(h) = self.ivars().host.upgrade() { h.render(FrameReason::DisplayLink, false); } }
-        #[unsafe(method(wake:))] fn wake(&self, _timer: &NSTimer) { if let Some(h) = self.ivars().host.upgrade() { h.timer.take(); h.render(FrameReason::Timer, true); } }
+        #[unsafe(method(wake:))]
+        fn wake(&self, _timer: &NSTimer) {
+            if let Some(h) = self.ivars().host.upgrade() {
+                h.timer.take();
+                h.render(FrameReason::Timer, true);
+                lifecycle::poll_memory(h.mtm);
+            }
+        }
         #[unsafe(method(settleDrawablePool:))]
         fn settle_drawable_pool(&self, _timer: &NSTimer) {
             if let Some(h) = self.ivars().host.upgrade() { h.settle_drawable_pool(); }
@@ -1715,6 +1735,7 @@ define_class!(
     unsafe impl NSApplicationDelegate for ApplicationDelegate {
         #[unsafe(method(applicationDidBecomeActive:))]
         fn became_active(&self, _n: &NSNotification) {
+            memory_guard::became_foreground();
             promote_to_regular(&NSApplication::sharedApplication(self.mtm()));
         }
 
@@ -1798,6 +1819,10 @@ define_class!(
         fn drain_platform_requests(&self, _sender: Option<&AnyObject>) { lifecycle::drain(); }
         #[unsafe(method(pollClosedWindow:))]
         fn poll_closed_window(&self, _timer: &NSTimer) { lifecycle::idle(); }
+        #[unsafe(method(pollMemoryGuard:))]
+        fn poll_memory_guard(&self, _sender: Option<&AnyObject>) {
+            lifecycle::poll_memory(self.mtm());
+        }
 
         #[unsafe(method(velocityCommand:))]
         fn named_command(&self, item: &NSMenuItem) {
@@ -1939,6 +1964,9 @@ define_class!(
         #[unsafe(method(windowDidBecomeKey:))]
         fn became_key(&self, _n: &NSNotification) {
             let h = &self.ivars().host;
+            if NSApplication::sharedApplication(h.mtm).isActive() {
+                memory_guard::became_foreground();
+            }
             h.dirty.set(true);
             h.pace();
         }
@@ -2738,7 +2766,10 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
                 None,
             );
     }
+    memory_guard::reset();
+    let pressure = memory_guard::macos::PressureSource::new();
     nsapp.run();
+    drop(pressure);
     // SAFETY: this target is still retained and the event codes match registration.
     unsafe {
         let _: () = msg_send![&*apple_events, removeEventHandlerForEventClass: finder::INTERNET_EVENT,
