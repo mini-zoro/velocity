@@ -212,6 +212,9 @@ fn loopback_latest_etag_schedule_skip_and_stage() {
                     Err(e) => panic!("awaiting {path}: {e}"),
                 }
             };
+            // BSD/macOS hands the accepted socket the listener's O_NONBLOCK flag (Linux
+            // does not), so a read here would fail with EAGAIN before the request arrives.
+            client.set_nonblocking(false).unwrap();
             client
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
