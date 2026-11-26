@@ -1,13 +1,16 @@
 //! Windows primary listener and instance election.
-use super::{BUSY, ENQUEUED, Entry, Forward, Incoming, MAX_REQUEST, Request, TIMEOUT};
+#[cfg(test)]
+use super::ENQUEUED;
+use super::{Entry, Forward, Inbox, Incoming, Ingress, MAX_REQUEST, Request, TIMEOUT, enqueue};
 use crate::instance_pipe::{Endpoint, Pipe, code};
+#[cfg(test)]
+use std::io::Write;
 use std::{
-    io::{self, Read, Write},
+    io::{self, Read},
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -20,12 +23,13 @@ pub struct Claim {
 }
 impl Claim {
     pub fn listen(self) -> io::Result<Instance> {
-        let (tx, rx) = mpsc::sync_channel(32);
+        let rx = Ingress::start(32)?;
+        let tx = rx.0.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker = stop.clone();
         std::thread::Builder::new()
             .name("velocity-instance".into())
-            .spawn(move || serve(self, tx, &worker))?;
+            .spawn(move || serve(self, &tx, &worker))?;
         Ok(Instance { rx, stop })
     }
 }
@@ -35,7 +39,7 @@ fn serve(
         endpoint,
         mut first,
     }: Claim,
-    tx: mpsc::SyncSender<Incoming>,
+    tx: &Inbox,
     stop: &AtomicBool,
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -91,28 +95,15 @@ fn serve(
         let Ok(request) = serde_json::from_slice::<Request>(&bytes) else {
             continue;
         };
-        let (reply, ready) = mpsc::sync_channel(1);
-        let wait = request.wait;
-        match tx.try_send(Incoming {
-            request,
-            reply: wait.then_some(ready),
-        }) {
-            Ok(()) => {
-                if stream.write_all(&[ENQUEUED]).is_ok() && wait {
-                    let _ = reply.send(stream);
-                }
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                let _ = stream.write_all(&[BUSY]);
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        if !enqueue(tx, request, len, stream) {
+            break;
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Instance {
-    rx: mpsc::Receiver<Incoming>,
+    rx: Ingress,
     stop: Arc<AtomicBool>,
 }
 pub enum Start {
@@ -158,8 +149,12 @@ impl Instance {
                 .map_err(|e| e.to_string()),
         }
     }
+    #[cfg(test)]
     pub fn drain(&self) -> Vec<Incoming> {
-        self.rx.try_iter().collect()
+        self.rx.drain()
+    }
+    pub fn next(&self) -> Option<Incoming> {
+        self.rx.next()
     }
 }
 impl Drop for Instance {

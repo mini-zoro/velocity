@@ -3135,6 +3135,7 @@ dependencies = [
  "thiserror",
  "vel-buffer",
  "vel-color-scheme",
+ "vel-mailbox",
  "vel-scope",
  "vel-syntax",
  "vel-text",
@@ -3187,6 +3188,10 @@ dependencies = [
  "unicode-width",
  "vel-text",
 ]
+
+[[package]]
+name = "vel-mailbox"
+version = "0.1.3"
 
 [[package]]
 name = "vel-minihtml"
@@ -3477,6 +3482,7 @@ dependencies = [
  "vel-i18n",
  "vel-index",
  "vel-largefile",
+ "vel-mailbox",
  "vel-minihtml",
  "vel-packages",
  "vel-platform",

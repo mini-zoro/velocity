@@ -262,6 +262,12 @@ pub struct Session {
     /// Files from explicitly closed windows, newest first. Never opened at startup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closed_window_files: Vec<PathBuf>,
+    /// Highest detached Hot Exit record adopted into this application generation.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub adopted_departure: u64,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 impl Default for Session {
     fn default() -> Self {
@@ -273,6 +279,7 @@ impl Default for Session {
             recent_folders: vec![],
             recent_projects: vec![],
             closed_window_files: vec![],
+            adopted_departure: 0,
         }
     }
 }
@@ -413,7 +420,6 @@ pub fn save(path: &Path, session: &Session) -> Result<(), String> {
 #[derive(Debug)]
 enum Request {
     Changed,
-    Retire(Session),
     Flush(mpsc::Sender<Result<Duration, String>>),
     Stop,
 }
@@ -422,7 +428,7 @@ enum Request {
 #[derive(Debug)]
 pub struct Writer {
     latest: Arc<Mutex<Option<Session>>>,
-    tx: mpsc::Sender<Request>,
+    tx: mpsc::SyncSender<Request>,
     /// Completion times and errors from background autosaves.
     pub results: mpsc::Receiver<Result<Duration, String>>,
     /// Nonfatal checkpoint notices (e.g. bypassing an unreadable old generation).
@@ -464,9 +470,9 @@ impl Writer {
     ) -> Result<Self, String> {
         let latest = Arc::new(Mutex::new(None::<Session>));
         let copy = latest.clone();
-        let (tx, rx) = mpsc::channel();
-        let (report, results) = mpsc::channel();
-        let (warn, warnings) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let (report, results) = mpsc::sync_channel(8);
+        let (warn, warnings) = mpsc::sync_channel(8);
         let thread = std::thread::Builder::new()
             .name("velocity-session".into())
             .spawn(move || {
@@ -492,11 +498,10 @@ impl Writer {
                             let began = *first.get_or_insert(now);
                             due = Some((now + debounce).min(began + max_wait));
                         }
-                        Ok(Request::Retire(old)) => drop(old),
                         Ok(Request::Flush(reply)) => {
                             let result = write_latest(&path, &copy, &mut saved);
                             for warning in saved.warnings.drain(..) {
-                                let _ = warn.send(warning);
+                                let _ = warn.try_send(warning);
                             }
                             let _ = reply.send(result);
                             first = None;
@@ -504,9 +509,9 @@ impl Writer {
                         }
                         Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = report.send(write_latest(&path, &copy, &mut saved));
+                            let _ = report.try_send(write_latest(&path, &copy, &mut saved));
                             for warning in saved.warnings.drain(..) {
-                                let _ = warn.send(warning);
+                                let _ = warn.try_send(warning);
                             }
                             first = None;
                             due = None;
@@ -523,20 +528,19 @@ impl Writer {
             thread: Some(thread),
         })
     }
-    /// Replaces the pending snapshot. Old snapshots are retired on the worker.
+    /// Replaces the pending snapshot and coalesces redundant wakeups.
     pub fn changed(&self, session: Session) -> Result<(), String> {
-        // Dropping Text roots is inexpensive; full history retirement stays bounded by limits.
         let old = self
             .latest
             .lock()
             .map_err(|e| e.to_string())?
             .replace(session);
-        if let Some(old) = old {
-            self.tx
-                .send(Request::Retire(old))
-                .map_err(|e| e.to_string())?;
+        drop(old);
+        match self.tx.try_send(Request::Changed) {
+            // A queued Changed or Flush already covers the new snapshot.
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+            Err(error) => Err(error.to_string()),
         }
-        self.tx.send(Request::Changed).map_err(|e| e.to_string())
     }
     /// Durably writes the latest snapshot and reports worker elapsed time.
     pub fn flush(&self) -> Result<Duration, String> {
@@ -572,4 +576,36 @@ impl Drop for Writer {
             let _ = t.join();
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn suspended_session_writer_has_only_one_snapshot_and_wakeup() {
+    let (tx, requests) = mpsc::sync_channel(1);
+    let (_, results) = mpsc::channel();
+    let (_, warnings) = mpsc::channel();
+    let writer = Writer {
+        latest: Arc::new(Mutex::new(None)),
+        tx,
+        results,
+        warnings,
+        thread: None, // keep the consumer suspended throughout the burst
+    };
+    for revision in 0..1000 {
+        writer
+            .changed(Session {
+                recent_files: vec![PathBuf::from(revision.to_string())],
+                ..Session::default()
+            })
+            .unwrap();
+    }
+    assert!(matches!(requests.try_recv(), Ok(Request::Changed)));
+    assert!(matches!(
+        requests.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        writer.latest.lock().unwrap().as_ref().unwrap().recent_files,
+        [PathBuf::from("999")]
+    );
 }

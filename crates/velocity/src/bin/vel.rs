@@ -99,7 +99,8 @@ fn run() -> Result<i32, String> {
     } else {
         None
     };
-    let request = Request::new(&options, cli_stdin::read(&options, false, false)?)?;
+    let mut request = Request::new(&options, cli_stdin::read(&options, false, false)?)?;
+    request.confirm_delivery = true;
     if request.wait {
         cli_console::install_client_interrupt().map_err(|e| e.to_string())?;
     }
@@ -125,7 +126,7 @@ fn run() -> Result<i32, String> {
     if options.safe_mode {
         command.arg("--safe-mode");
     }
-    if options.background {
+    if request.background {
         command.arg("--background");
     }
     if options.log_input {

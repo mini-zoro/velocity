@@ -5,7 +5,7 @@ use crate::cli::Options;
 pub use crate::instance_protocol::Stdin;
 #[cfg(unix)]
 use crate::instance_protocol::submit;
-use crate::instance_protocol::{BUSY, ENQUEUED, MAX_REQUEST, TIMEOUT};
+use crate::instance_protocol::{BUSY, ENQUEUED, MAX_REQUEST, REJECTED, TIMEOUT};
 pub use crate::instance_protocol::{Forward, Request};
 use crate::workspace::Workspace;
 #[cfg(unix)]
@@ -16,6 +16,12 @@ use std::os::{
         net::{UnixListener, UnixStream},
         process::CommandExt,
     },
+};
+use std::{
+    collections::VecDeque,
+    io::Write,
+    sync::{Condvar, Mutex, OnceLock, mpsc},
+    time::{Duration, Instant},
 };
 #[cfg(unix)]
 use std::{
@@ -28,12 +34,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Instant, SystemTime},
-};
-use std::{
-    io::Write,
-    sync::{OnceLock, mpsc},
-    time::Duration,
+    time::SystemTime,
 };
 #[cfg(windows)]
 mod win;
@@ -57,12 +58,91 @@ pub const INHERITED_LOCK: &str = "VELOCITY_INSTANCE_LOCK_FD";
 pub struct Incoming {
     pub request: Request,
     reply: Option<mpsc::Receiver<ReplyStream>>,
+    delivery: Option<Delivery>,
+}
+const DELIVERY_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const DELIVERY_EXPIRED: &str =
+    "no editor window accepted the request before the deadline";
+
+#[derive(Debug)]
+pub(crate) struct Delivery {
+    deadline: Instant,
+    stream: Option<ReplyStream>,
+}
+
+impl Delivery {
+    pub(crate) fn expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    pub(crate) fn reject(mut self, error: &str) {
+        if let Some(mut stream) = self.stream.take() {
+            let mut reply = vec![REJECTED];
+            // Stay within the client's bounded reply. Preserve UTF-8.
+            reply.extend_from_slice(&error.as_bytes()[..error.floor_char_boundary(1024)]);
+            let _ = stream.write_all(&reply);
+        }
+    }
+
+    fn busy(mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            let _ = stream.write_all(&[BUSY]);
+        }
+    }
+
+    fn acknowledge(mut self, wait: bool) -> Option<mpsc::Receiver<ReplyStream>> {
+        let mut stream = self.stream.take()?;
+        stream.write_all(&[ENQUEUED]).ok()?;
+        if wait {
+            let (tx, rx) = mpsc::sync_channel(1);
+            tx.send(stream).ok()?;
+            Some(rx)
+        } else {
+            None
+        }
+    }
+}
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            let _ = stream.write_all(if self.expired() {
+                b"\x03no editor window accepted the request before the deadline"
+            } else {
+                b"\x03the destination window closed or could not accept the request"
+            });
+        }
+    }
 }
 impl Incoming {
     pub fn local(request: Request) -> Self {
         Self {
             request,
             reply: None,
+            delivery: None,
+        }
+    }
+    pub(crate) fn confirmed(&self) -> bool {
+        self.delivery.is_some()
+    }
+    pub(crate) fn expired(&self) -> bool {
+        self.delivery.as_ref().is_some_and(Delivery::expired)
+    }
+    pub(crate) fn busy(mut self) {
+        if let Some(delivery) = self.delivery.take() {
+            delivery.busy();
+        }
+    }
+    pub(crate) fn reject(mut self, error: &str) {
+        if let Some(delivery) = self.delivery.take() {
+            delivery.reject(error);
+        }
+    }
+    pub(crate) fn discard_payload(&mut self) {
+        self.request.files = Vec::new();
+        self.request.project = None;
+        self.request.command = None;
+        if self.request.stdin.is_some() {
+            self.request.stdin = Some(crate::instance_protocol::Stdin::Bytes(Vec::new()));
         }
     }
     #[cfg(all(test, unix))]
@@ -71,7 +151,175 @@ impl Incoming {
         stream.write_all(&[1]).unwrap();
         tx.send(stream).unwrap();
         let reply = request.wait.then_some(rx);
-        Self { request, reply }
+        Self {
+            request,
+            reply,
+            delivery: None,
+        }
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn confirmed_fixture(
+        request: Request,
+        stream: UnixStream,
+        expires_in: Duration,
+    ) -> Self {
+        Self {
+            request,
+            reply: None,
+            delivery: Some(Delivery {
+                deadline: Instant::now() + expires_in,
+                stream: Some(stream),
+            }),
+        }
+    }
+}
+
+/// One expiring ingress queue per profile; expiry does not require a UI tick.
+#[derive(Debug)]
+struct Inbox {
+    state: Mutex<InboxState>,
+    changed: Condvar,
+    capacity: usize,
+}
+#[derive(Debug, Default)]
+struct InboxState {
+    pending: VecDeque<(Incoming, u64)>,
+    bytes: u64,
+    closed: bool,
+}
+#[derive(Debug)]
+struct Ingress(std::sync::Arc<Inbox>);
+impl Ingress {
+    fn start(capacity: usize) -> std::io::Result<Self> {
+        let inbox = std::sync::Arc::new(Inbox {
+            state: Mutex::new(InboxState::default()),
+            changed: Condvar::new(),
+            capacity,
+        });
+        let timer = inbox.clone();
+        std::thread::Builder::new()
+            .name("velocity-cli-expiry".into())
+            .spawn(move || timer.expire())?;
+        Ok(Self(inbox))
+    }
+    fn next(&self) -> Option<Incoming> {
+        let mut state = self.0.state.lock().unwrap();
+        let (incoming, bytes) = state.pending.pop_front()?;
+        state.bytes -= bytes;
+        Some(incoming)
+    }
+    #[cfg(test)]
+    fn drain(&self) -> Vec<Incoming> {
+        std::iter::from_fn(|| self.next()).collect()
+    }
+    #[cfg(all(test, unix))]
+    fn recv_timeout(&self, timeout: Duration) -> Option<Incoming> {
+        let state = self.0.state.lock().unwrap();
+        let (mut state, _) = self
+            .0
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.pending.is_empty() && !state.closed
+            })
+            .unwrap();
+        let (incoming, bytes) = state.pending.pop_front()?;
+        state.bytes -= bytes;
+        Some(incoming)
+    }
+}
+impl Drop for Ingress {
+    fn drop(&mut self) {
+        let pending = {
+            let mut state = self.0.state.lock().unwrap();
+            state.closed = true;
+            std::mem::take(&mut state.pending)
+        };
+        self.0.changed.notify_all();
+        drop(pending);
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    Accepted,
+    Full,
+    Closed,
+}
+impl Inbox {
+    fn push(&self, incoming: Incoming, size: u64) -> Admission {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return Admission::Closed;
+        }
+        if state.pending.len() >= self.capacity || state.bytes + size > MAX_REQUEST {
+            drop(state);
+            incoming.busy();
+            return Admission::Full;
+        }
+        state.bytes += size;
+        state.pending.push_back((incoming, size));
+        drop(state);
+        self.changed.notify_all();
+        Admission::Accepted
+    }
+    fn expire(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.closed {
+            if let Some(index) = state.pending.iter().position(|(item, _)| item.expired()) {
+                let (item, size) = state.pending.remove(index).unwrap();
+                state.bytes -= size;
+                drop(state);
+                item.reject(DELIVERY_EXPIRED);
+                state = self.state.lock().unwrap();
+            } else if let Some(deadline) = state
+                .pending
+                .iter()
+                .filter_map(|(item, _)| item.delivery.as_ref().map(|reply| reply.deadline))
+                .min()
+            {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                (state, _) = self.changed.wait_timeout(state, timeout).unwrap();
+            } else {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+    }
+}
+
+fn enqueue(tx: &Inbox, request: Request, size: u64, mut stream: ReplyStream) -> bool {
+    if request.confirm_delivery {
+        return tx.push(
+            Incoming {
+                request,
+                reply: None,
+                delivery: Some(Delivery {
+                    deadline: Instant::now() + DELIVERY_WAIT,
+                    stream: Some(stream),
+                }),
+            },
+            size,
+        ) != Admission::Closed;
+    }
+    let (reply, ready) = mpsc::sync_channel(1);
+    let wait = request.wait;
+    match tx.push(
+        Incoming {
+            request,
+            reply: wait.then_some(ready),
+            delivery: None,
+        },
+        size,
+    ) {
+        Admission::Accepted => {
+            if stream.write_all(&[ENQUEUED]).is_ok() && wait {
+                let _ = reply.send(stream);
+            }
+            true
+        }
+        Admission::Full => {
+            let _ = stream.write_all(&[BUSY]);
+            true
+        }
+        Admission::Closed => false,
     }
 }
 #[derive(Debug)]
@@ -89,7 +337,13 @@ impl Waiter {
         workspace: &mut Workspace,
         ids: std::collections::BTreeSet<u64>,
     ) -> Result<Option<Self>, String> {
-        let Incoming { request, reply } = incoming;
+        let Incoming {
+            request,
+            reply,
+            delivery,
+        } = incoming;
+        let reply =
+            reply.or_else(|| delivery.and_then(|delivery| delivery.acknowledge(request.wait)));
         if let Some(reply) = reply {
             let stdin_sheet = request.stdin.as_ref().and_then(|_| {
                 ids.iter()
@@ -654,7 +908,8 @@ impl Claim {
             Err(e) => return Err(e),
         }
         let listener = BoundSocket::bind(&self.path)?;
-        let (tx, rx) = mpsc::sync_channel(16);
+        let rx = Ingress::start(16)?;
+        let tx = rx.0.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = stop.clone();
         let (wake, wake_read) = UnixStream::pair()?;
@@ -664,7 +919,7 @@ impl Claim {
             .spawn(move || {
                 // Keep Claim (and the lock) until cleanup is done.
                 let _claim = self;
-                serve(listener, wake_read, tx, &cancel);
+                serve(listener, wake_read, &tx, &cancel);
             })?;
         Ok(Instance {
             rx,
@@ -719,12 +974,7 @@ impl Drop for BoundSocket {
 }
 
 #[cfg(unix)]
-fn serve(
-    mut socket: BoundSocket,
-    wake: UnixStream,
-    tx: mpsc::SyncSender<Incoming>,
-    stop: &AtomicBool,
-) {
+fn serve(mut socket: BoundSocket, wake: UnixStream, tx: &Inbox, stop: &AtomicBool) {
     let mut fds = [
         libc::pollfd {
             fd: socket.listener.as_raw_fd(),
@@ -789,24 +1039,10 @@ fn serve(
         let Ok(request) = serde_json::from_slice::<Request>(&bytes) else {
             continue;
         };
-        let (reply, ready) = mpsc::sync_channel(1);
-        let wait = request.wait;
         // The listener drains into this bounded queue even during a native
         // modal. The App only applies those requests on its regular event path.
-        match tx.try_send(Incoming {
-            request,
-            reply: wait.then_some(ready),
-        }) {
-            Ok(()) => {
-                if stream.write_all(&[ENQUEUED]).is_ok() && wait {
-                    let _ = reply.send(stream);
-                }
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                // The client may retry only after this explicit rejection.
-                let _ = stream.write_all(&[BUSY]);
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        if !enqueue(tx, request, size, stream) {
+            break;
         }
     }
 }
@@ -842,7 +1078,7 @@ fn read_request(
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct Instance {
-    rx: mpsc::Receiver<Incoming>,
+    rx: Ingress,
     stop: Arc<AtomicBool>,
     // Releasing this descriptor wakes the listener without a main-thread join.
     _wake: UnixStream,
@@ -959,8 +1195,12 @@ impl Instance {
                 .map_err(|e| e.to_string()),
         }
     }
+    #[cfg(test)]
     pub fn drain(&self) -> Vec<Incoming> {
-        self.rx.try_iter().collect()
+        self.rx.drain()
+    }
+    pub fn next(&self) -> Option<Incoming> {
+        self.rx.next()
     }
 }
 #[cfg(unix)]
@@ -1384,6 +1624,77 @@ mod tests {
 mod round15_tests {
     use super::*;
     use vel_text::Text;
+    #[test]
+    fn confirmed_request_expires_without_a_consumer_and_frees_ingress() {
+        let queue = Ingress::start(1).unwrap();
+        let request = Request::new(&Options::default(), None).unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(
+            queue.0.push(Incoming::local(request.clone()), MAX_REQUEST),
+            Admission::Accepted
+        );
+        assert_eq!(
+            queue.0.push(Incoming::local(request.clone()), 1),
+            Admission::Full
+        );
+        assert!(queue.next().is_some());
+        assert_eq!(
+            queue.0.push(
+                Incoming::confirmed_fixture(request.clone(), server, Duration::from_millis(40)),
+                MAX_REQUEST,
+            ),
+            Admission::Accepted
+        );
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert_eq!(response, format!("\x03{DELIVERY_EXPIRED}"));
+        assert!(queue.next().is_none());
+        assert_eq!(
+            queue.0.push(Incoming::local(request), MAX_REQUEST),
+            Admission::Accepted
+        );
+        assert!(queue.next().is_some());
+    }
+
+    #[test]
+    fn explicit_busy_retries_but_delivery_failure_does_not() {
+        let request = Request::new(&Options::default(), None).unwrap();
+        let (first, mut busy) = UnixStream::pair().unwrap();
+        let (second, mut reject) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            let read = |stream: &mut UnixStream| {
+                let mut len = [0; 8];
+                stream.read_exact(&mut len).unwrap();
+                let mut bytes = vec![0; u64::from_le_bytes(len) as usize];
+                stream.read_exact(&mut bytes).unwrap();
+                bytes
+            };
+            let body = read(&mut busy);
+            busy.write_all(&[BUSY]).unwrap();
+            assert_eq!(read(&mut reject), body);
+            reject.write_all(b"\x03destination closed").unwrap();
+        });
+        let second = std::cell::RefCell::new(Some(second));
+        let attempts = std::cell::Cell::new(0);
+        let error = submit(
+            first,
+            &request,
+            Duration::from_secs(5),
+            || {
+                let attempt = attempts.replace(attempts.get() + 1);
+                (attempt > 0).then(|| second.borrow_mut().take().expect("one replay after BUSY"))
+            },
+            || panic!("must not acknowledge a rejected request"),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("destination closed"));
+        assert_eq!(attempts.get(), 2);
+        thread.join().unwrap();
+    }
     #[test]
     fn unresponsive_primary_owns_submitted_request_even_without_an_ack() {
         let dir = tempfile::tempdir().unwrap();

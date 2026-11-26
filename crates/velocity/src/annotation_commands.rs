@@ -81,8 +81,8 @@ impl Editor {
                         annotations.inline.remove(&hunk.new.start);
                     } else {
                         annotations.inline.insert(hunk.new.start);
-                        annotations.load_inline(hunk.new.start);
                     }
+                    annotations.update_inline();
                 } else {
                     let range =
                         line_byte(&self.text, hunk.new.start)..line_byte(&self.text, hunk.new.end);

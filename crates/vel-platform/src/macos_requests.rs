@@ -290,8 +290,14 @@ pub(super) fn drain() {
     }
 }
 
-fn update_idle_timer() {
-    let needed = live_hosts().is_empty() && template().is_some();
+fn needs_idle(host: &Host) -> bool {
+    host.ready.get() && !host.starting.get() && !host.visible.get()
+}
+
+pub(super) fn update_idle_timer() {
+    let hosts = live_hosts();
+    let needed =
+        hosts.iter().any(|host| needs_idle(host)) || (hosts.is_empty() && template().is_some());
     if !needed {
         APPLICATION.with(|app| {
             if let Some(timer) = app.idle_timer.take() {
@@ -331,7 +337,11 @@ pub(super) fn idle() {
     if hosts_busy() || APPLICATION.with(|app| app.processing.get()) {
         return;
     }
-    if !live_hosts().is_empty() {
+    let hosts = live_hosts();
+    if !hosts.is_empty() {
+        for host in hosts.iter().filter(|host| needs_idle(host)) {
+            host.dispatch(Event::Idle);
+        }
         update_idle_timer();
         return;
     }

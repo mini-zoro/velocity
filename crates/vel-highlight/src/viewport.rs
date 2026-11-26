@@ -565,12 +565,21 @@ impl ViewportHighlighter {
         self.stats = HighlightStats::default();
         Ok(())
     }
+    /// Installs a snapshot when incremental predecessors were coalesced away.
+    pub fn apply_snapshot(&mut self, after: Text, version: ChangeId) -> Result<(), Error> {
+        let changes = super::replacement(&self.text, &after);
+        self.apply_change(after, version, &changes)
+    }
     /// Recolors through bounded reparsing; old batches carry an older scheme_revision.
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) {
+        self.set_scheme_revision(scheme, self.scheme_revision + 1);
+    }
+    /// Installs the latest palette at its original frontend revision.
+    pub fn set_scheme_revision(&mut self, scheme: Arc<ColorScheme>, revision: u64) {
         self.resolver = Highlighter::new(scheme);
         self.interner = ScopeInterner::new(Arc::new(MetadataSet::new()));
         self.visual = SpanCache::default();
-        self.scheme_revision += 1;
+        self.scheme_revision = revision;
         self.checkpoints = BTreeMap::from([(0, self.initial.clone())]);
         self.background = Cursor::new(self.initial.clone(), 0, true);
         self.visible.clear();

@@ -1,19 +1,43 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, Weak, mpsc},
     thread,
 };
 
 type Job = Box<dyn FnOnce() + Send>;
+const MAX_PENDING_READS: usize = 32;
+const DEFAULT_WORKERS: usize = 4;
+/// Transient admission failure; an automatic reload can defer without closing its tab.
+pub const IO_QUEUE_FULL: &str =
+    "file I/O queue is full; try again after pending files load or close";
+
+#[derive(Debug)]
+pub(crate) struct PendingRead(Weak<Mutex<State>>, u64);
+
+impl PendingRead {
+    pub(crate) fn cancel(&self) {
+        let Some(queue) = self.0.upgrade() else {
+            return;
+        };
+        let removed = {
+            let mut state = queue.lock().expect("file worker queue");
+            let index = state.pending.iter().position(|(id, _)| *id == self.1);
+            index.and_then(|i| state.pending.remove(i))
+        };
+        drop(removed);
+    }
+}
 
 #[derive(Default)]
 struct State {
     limit: usize,
     active: usize,
-    pending: VecDeque<Job>,
+    next: u64,
+    pending: VecDeque<(u64, Job)>,
+    write: Option<Job>,
 }
 
-/// A window's optionally bounded executor for file reads and writes.
+/// A window's bounded executor for background file reads and explicit writes.
 #[derive(Clone, Default)]
 pub struct IoWorkers(Arc<Mutex<State>>);
 
@@ -24,14 +48,15 @@ impl std::fmt::Debug for IoWorkers {
 }
 
 impl IoWorkers {
-    /// Queues work without blocking the caller. Zero keeps standalone worker scheduling.
-    pub fn submit(
+    /// Queues a cancellable read without blocking the caller.
+    pub(crate) fn submit(
         &self,
         limit: usize,
         name: &str,
         job: impl FnOnce() + Send + 'static,
-    ) -> Result<(), String> {
-        self.schedule(limit, name, Box::new(job), false)
+    ) -> Result<PendingRead, String> {
+        let id = self.schedule(limit, name, Box::new(job), false)?;
+        Ok(PendingRead(Arc::downgrade(&self.0), id))
     }
 
     /// Waits for an explicit write; it takes priority over background jobs not yet started.
@@ -52,14 +77,20 @@ impl IoWorkers {
         receive.recv().map_err(|e| e.to_string())
     }
 
-    fn schedule(&self, limit: usize, name: &str, job: Job, priority: bool) -> Result<(), String> {
+    fn schedule(&self, limit: usize, name: &str, job: Job, priority: bool) -> Result<u64, String> {
         let builder = thread::Builder::new().name(name.into());
-        if limit == 0 {
-            return builder.spawn(job).map(|_| ()).map_err(|e| e.to_string());
-        }
-        let limit = limit.min(64);
+        let limit = if limit == 0 {
+            DEFAULT_WORKERS
+        } else {
+            limit.min(64)
+        };
         let shared = self.0.clone();
         let mut state = self.0.lock().expect("file worker queue");
+        if (priority && state.write.is_some())
+            || (!priority && state.pending.len() >= MAX_PENDING_READS)
+        {
+            return Err(IO_QUEUE_FULL.into());
+        }
         state.limit = limit;
         if state.active < limit {
             builder
@@ -67,12 +98,14 @@ impl IoWorkers {
                 .map_err(|e| e.to_string())?;
             state.active += 1;
         }
+        let id = state.next;
+        state.next += 1;
         if priority {
-            state.pending.push_front(job);
+            state.write = Some(job);
         } else {
-            state.pending.push_back(job);
+            state.pending.push_back((id, job));
         }
-        Ok(())
+        Ok(id)
     }
 }
 
@@ -81,7 +114,10 @@ fn work(queue: Arc<Mutex<State>>) {
         let job = {
             let mut state = queue.lock().expect("file worker queue");
             let next = if state.active <= state.limit {
-                state.pending.pop_front()
+                state
+                    .write
+                    .take()
+                    .or_else(|| state.pending.pop_front().map(|(_, job)| job))
             } else {
                 None
             };
@@ -126,5 +162,36 @@ mod tests {
         assert_eq!(finished.recv_timeout(timeout).unwrap(), 3);
         stop.send(()).unwrap();
         assert_eq!(pool.write(2, || 42).unwrap(), 42);
+    }
+
+    #[test]
+    fn full_read_queue_recovers_capacity_when_a_tab_closes() {
+        let pool = IoWorkers::default();
+        let (started, running) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        pool.submit(1, "blocked-read", move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        })
+        .unwrap();
+        running.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (did_run, cancelled) = mpsc::channel();
+        let first = pool
+            .submit(1, "closed-tab", move || did_run.send(()).unwrap())
+            .unwrap();
+        for _ in 1..MAX_PENDING_READS {
+            pool.submit(1, "queued-read", || {}).unwrap();
+        }
+        assert!(pool.submit(1, "overflow", || {}).is_err());
+        first.cancel();
+        assert!(matches!(
+            cancelled.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        let (finished, done) = mpsc::channel();
+        pool.submit(1, "replacement", move || finished.send(()).unwrap())
+            .unwrap();
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 }

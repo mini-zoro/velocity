@@ -96,10 +96,9 @@ enum Command {
     Buffer(PathBuf, u64, Text),
     Analyzed(PathBuf, u64, Text, FileAnalysis),
     Close(PathBuf),
-    Rescan,
     Flush(mpsc::Sender<std::io::Result<()>>),
-    Stop,
 }
+const INDEX_COMMAND_LIMIT: usize = 16;
 #[derive(Debug)]
 struct Task {
     path: PathBuf,
@@ -124,7 +123,9 @@ pub struct ProjectIndex {
     root: PathBuf,
     source_root: PathBuf,
     shared: Arc<RwLock<Index>>,
-    commands: mpsc::Sender<Command>,
+    commands: mpsc::SyncSender<Command>,
+    rescan: Arc<AtomicBool>,
+    flushing: Mutex<()>,
     wake: mpsc::SyncSender<()>,
     status: Arc<Mutex<IndexStatus>>,
     cancelled: Arc<AtomicBool>,
@@ -208,7 +209,8 @@ impl ProjectIndex {
             ..IndexStatus::default()
         }));
         let cancelled = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(INDEX_COMMAND_LIMIT);
+        let rescan = Arc::new(AtomicBool::new(false));
         let (wake, signals) = mpsc::sync_channel(1);
         let mut hash = blake3::Hasher::new();
         hash.update(root.to_string_lossy().as_bytes());
@@ -256,6 +258,7 @@ impl ProjectIndex {
             status: status.clone(),
             cancelled: cancelled.clone(),
             commands: rx,
+            rescan: rescan.clone(),
             wake: wake.clone(),
             signals,
             cache,
@@ -276,6 +279,8 @@ impl ProjectIndex {
             source_root,
             shared,
             commands: tx,
+            rescan,
+            flushing: Mutex::new(()),
             wake,
             status,
             cancelled,
@@ -295,6 +300,11 @@ impl ProjectIndex {
         status
     }
     fn send(&self, command: Command) -> Result<(), ()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(());
+        }
+        // A backlog of overlay Texts/analyses must backpressure the background
+        // publisher. The UI offers work to that publisher without blocking.
         self.commands.send(command).map_err(|_| ())?;
         let _ = self.wake.try_send(());
         Ok(())
@@ -336,11 +346,13 @@ impl ProjectIndex {
     }
     /// Rescans after project/ignore file or directory changes.
     pub fn rescan(&self) {
-        let _ = self.send(Command::Rescan);
+        self.rescan.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
     }
     /// Barrier for all current debounced/in-flight updates, followed by durable journal sync.
     /// Intended for tests/shutdown/background callers, never the editor's typing thread.
     pub fn flush(&self) -> std::io::Result<()> {
+        let _flush = self.flushing.lock().unwrap();
         if self.cancelled.load(Ordering::Acquire) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
@@ -356,7 +368,7 @@ impl ProjectIndex {
     /// Permanently cancels indexing without blocking on a regex. Already indexed queries remain.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        let _ = self.send(Command::Stop);
+        let _ = self.wake.try_send(());
     }
     /// Exact definition query.
     pub fn lookup_definition(&self, name: &str) -> Vec<SymbolLocation> {
@@ -833,6 +845,7 @@ struct Coordinator {
     status: Arc<Mutex<IndexStatus>>,
     cancelled: Arc<AtomicBool>,
     commands: mpsc::Receiver<Command>,
+    rescan: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
     signals: mpsc::Receiver<()>,
     cache: PathBuf,
@@ -928,7 +941,7 @@ impl Coordinator {
             #[cfg(all(test, unix))]
             self.idle_counters.turns.fetch_add(1, Ordering::Relaxed);
             let (overflow, events) = std::mem::take(&mut *notices.lock().unwrap());
-            scan |= overflow;
+            scan |= overflow || self.rescan.swap(false, Ordering::AcqRel);
             let now = Instant::now();
             let mut native_confirmed = events.iter().any(|path| {
                 path.starts_with(&self.root)
@@ -1037,11 +1050,6 @@ impl Coordinator {
                     break;
                 }
                 match command {
-                    Command::Stop => {
-                        self.cancelled.store(true, Ordering::Release);
-                        break;
-                    }
-                    Command::Rescan => scan = true,
                     Command::Flush(reply) => flushes.push(reply),
                     Command::Analyzed(path, revision, text, analysis) => {
                         let path = aliases.primary(&path).to_owned();
@@ -1493,7 +1501,7 @@ impl Coordinator {
                 status.pending_files = pending.len() + inflight;
                 status.active = active;
             }
-            if !active {
+            if !active && !self.rescan.load(Ordering::Acquire) {
                 if let Err(e) = journal.compact(&self.cancelled) {
                     self.log(format!("compact: {e}"));
                 }
@@ -1607,6 +1615,69 @@ fn analyze_task(
 #[cfg(all(test, unix))]
 mod idle_tests {
     use super::*;
+
+    #[test]
+    fn bounded_overlay_burst_keeps_the_newest_revision_and_close_restores_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("words.txt");
+        fs::write(&path, "diskword\n").unwrap();
+        let mut builder = vel_syntax::SyntaxSetBuilder::new();
+        builder.add_plain_text_syntax();
+        let index = ProjectIndex::open(
+            &root,
+            Arc::new(builder.build()),
+            Arc::new(MetadataSet::default()),
+            IndexOptions {
+                cache_dir: Some(temp.path().join("cache")),
+                watch: false,
+                index_skip_unknown_extensions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for revision in 1..=256 {
+            let word = if revision == 256 {
+                "newestword"
+            } else {
+                "staleoverlay"
+            };
+            index.update_buffer(&path, revision, Text::from(word));
+        }
+        index.update_buffer(&path, 255, Text::from("staleoverlay"));
+        index.flush().unwrap();
+        assert_eq!(
+            index
+                .shared_index()
+                .read()
+                .unwrap()
+                .word_count("newestword"),
+            1
+        );
+        assert_eq!(
+            index
+                .shared_index()
+                .read()
+                .unwrap()
+                .word_count("staleoverlay"),
+            0
+        );
+        index.close_buffer(&path);
+        index.flush().unwrap();
+        assert_eq!(
+            index.shared_index().read().unwrap().word_count("diskword"),
+            1
+        );
+        assert_eq!(
+            index
+                .shared_index()
+                .read()
+                .unwrap()
+                .word_count("newestword"),
+            0
+        );
+    }
 
     fn cpu_seconds() -> f64 {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();

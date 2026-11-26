@@ -23,18 +23,53 @@ use vel_text::Text;
 #[derive(Debug)]
 enum HighlightCommand {
     Edit(Text, ChangeId, ChangeSet, usize),
-    Scheme(Arc<ColorScheme>, usize),
+    Scheme(Arc<ColorScheme>, usize, u64),
     Request(ChangeId, Vec<Range<usize>>),
     Measure(mpsc::Sender<Option<vel_highlight::HighlightMemory>>),
-    Stop,
+}
+type HighlightEdit = (Text, ChangeId, Option<ChangeSet>, usize);
+#[derive(Debug, Default)]
+struct HighlightCommands {
+    edit: Option<HighlightEdit>,
+    scheme: Option<(Arc<ColorScheme>, usize, u64)>,
+    request: Option<(ChangeId, Vec<Range<usize>>)>,
+    measure: Option<mpsc::Sender<Option<vel_highlight::HighlightMemory>>>,
+}
+#[derive(Debug, Default)]
+struct HighlightResults {
+    batches: BTreeMap<(usize, usize), HighlightBatch>,
+    error: Option<String>,
+}
+fn publish_batch(
+    results: &vel_mailbox::Sender<HighlightResults>,
+    batch: Result<HighlightBatch, String>,
+) -> bool {
+    match batch {
+        Ok(batch) => results
+            .update(|pending| {
+                let key = (batch.lines.start, batch.lines.end);
+                if pending
+                    .batches
+                    .get(&key)
+                    .is_some_and(|old| old.complete && !batch.complete)
+                {
+                    return Some(batch);
+                }
+                pending.batches.insert(key, batch)
+            })
+            .is_ok(),
+        Err(error) => results
+            .update(|pending| pending.error = Some(error))
+            .is_ok(),
+    }
 }
 /// The service's cooperative 2ms request can include an indivisible regex call.
 /// A dispatcher keeps that call, as well as all parsing, off the UI thread.
 #[derive(Debug)]
 struct HighlightFrontend {
-    tx: mpsc::Sender<HighlightCommand>,
-    rx: mpsc::Receiver<Result<HighlightBatch, String>>,
-    scopes: mpsc::Receiver<Arc<ScopeSnapshot>>,
+    tx: vel_mailbox::Sender<HighlightCommands>,
+    rx: vel_mailbox::Receiver<HighlightResults>,
+    scopes: vel_mailbox::Receiver<Arc<ScopeSnapshot>>,
     complete: Arc<std::sync::atomic::AtomicBool>,
     latest: Arc<AtomicU64>,
 }
@@ -60,9 +95,9 @@ impl HighlightFrontend {
         scheme: Arc<ColorScheme>,
         settings: &vel_config::settings::Settings,
     ) -> Result<Self, String> {
-        let (tx, commands) = mpsc::channel();
-        let (results, rx) = mpsc::channel();
-        let (_scope_tx, scopes) = mpsc::channel();
+        let (tx, commands) = vel_mailbox::channel::<HighlightCommands>();
+        let (results, rx) = vel_mailbox::channel();
+        let (_scope_tx, scopes) = vel_mailbox::channel();
         let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ready = complete.clone();
         let latest = Arc::new(AtomicU64::new(version.0));
@@ -88,27 +123,38 @@ impl HighlightFrontend {
                 let mut refresh = true;
                 loop {
                     match commands.recv_timeout(std::time::Duration::from_millis(16)) {
-                        Ok(HighlightCommand::Edit(text, version, changes, _)) => {
-                            if let Err(e) = engine.apply_change(text, version, &changes) {
-                                let _ = results.send(Err(e.to_string()));
+                        Ok(commands) => {
+                            if let Some((text, version, changes, _)) = commands.edit {
+                                let result = match changes {
+                                    Some(changes) => engine.apply_change(text, version, &changes),
+                                    None => engine.apply_snapshot(text, version),
+                                };
+                                if let Err(e) = result {
+                                    publish_batch(&results, Err(e.to_string()));
+                                }
+                                watched.clear();
+                                refresh = true;
                             }
-                            refresh = true;
+                            if let Some((scheme, _, revision)) = commands.scheme {
+                                engine.set_scheme_revision(scheme, revision);
+                                refresh = true;
+                            }
+                            if let Some((version, lines)) = commands.request
+                                && version == engine.version()
+                            {
+                                watched = lines;
+                                refresh = true;
+                            }
+                            if refresh {
+                                let _ = results.update(|pending: &mut HighlightResults| {
+                                    std::mem::take(&mut pending.batches)
+                                });
+                            }
+                            if let Some(reply) = commands.measure {
+                                let _ = reply.send(None);
+                            }
                         }
-                        Ok(HighlightCommand::Scheme(scheme, _)) => {
-                            engine.set_color_scheme(scheme);
-                            refresh = true;
-                        }
-                        Ok(HighlightCommand::Request(version, lines))
-                            if version == engine.version() =>
-                        {
-                            watched = lines;
-                            refresh = true;
-                        }
-                        Ok(HighlightCommand::Request(..)) => {}
-                        Ok(HighlightCommand::Measure(reply)) => {
-                            let _ = reply.send(None);
-                        }
-                        Ok(HighlightCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
                             break;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -126,7 +172,7 @@ impl HighlightFrontend {
                                     std::time::Duration::from_millis(2),
                                 )
                                 .map_err(|e| e.to_string());
-                            if results.send(batch).is_err() {
+                            if !publish_batch(&results, batch) {
                                 return;
                             }
                         }
@@ -138,7 +184,7 @@ impl HighlightFrontend {
                             engine.advance(std::time::Duration::from_millis(2))
                         };
                         if let Err(e) = result {
-                            let _ = results.send(Err(e.to_string()));
+                            publish_batch(&results, Err(e.to_string()));
                         }
                     }
                     let after = engine.progress();
@@ -160,14 +206,14 @@ impl HighlightFrontend {
         mut text: Text,
         mut scheme: Arc<ColorScheme>,
         mut tab: usize,
-        analysis: mpsc::Sender<Job>,
+        analysis: vel_mailbox::Sender<Job>,
         indexing: bool,
     ) -> Result<Self, String> {
         let version = engine.version().0;
         let mut service = HighlightService::new(engine).map_err(|e| e.to_string())?;
-        let (tx, commands) = mpsc::channel();
-        let (results, rx) = mpsc::channel();
-        let (scope_tx, scopes) = mpsc::channel();
+        let (tx, commands) = vel_mailbox::channel::<HighlightCommands>();
+        let (results, rx) = vel_mailbox::channel();
+        let (scope_tx, scopes) = vel_mailbox::channel();
         let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ready = complete.clone();
         let latest = Arc::new(AtomicU64::new(version));
@@ -187,48 +233,71 @@ impl HighlightFrontend {
                     } else {
                         1
                     })) {
-                        Ok(HighlightCommand::Edit(after, version, changes, size)) => {
-                            text = after;
-                            tab = size;
-                            published = false;
-                            viewport = None;
-                            pending.clear();
-                            validated = false;
-                            if let Err(e) = service.apply_change(text.clone(), version, changes) {
-                                let _ = results.send(Err(e.to_string()));
+                        Ok(commands) => {
+                            if commands.edit.is_some() || commands.scheme.is_some() {
+                                published = false;
+                                viewport = None;
+                                pending.clear();
+                                validated = false;
+                            }
+                            if commands.edit.is_some()
+                                || commands.scheme.is_some()
+                                || commands.request.is_some()
+                            {
+                                let _ = results.update(|pending: &mut HighlightResults| {
+                                    std::mem::take(&mut pending.batches)
+                                });
+                            }
+                            if let Some((after, version, changes, size)) = commands.edit {
+                                text = after;
+                                tab = size;
+                                let result = match changes {
+                                    Some(changes) => {
+                                        service.apply_change(text.clone(), version, changes)
+                                    }
+                                    None => service.apply_snapshot(text.clone(), version),
+                                };
+                                if let Err(e) = result {
+                                    publish_batch(&results, Err(e.to_string()));
+                                }
+                            }
+                            if let Some((palette, size, revision)) = commands.scheme {
+                                scheme = palette;
+                                tab = size;
+                                if let Err(e) =
+                                    service.set_scheme_revision(scheme.clone(), revision)
+                                {
+                                    publish_batch(&results, Err(e.to_string()));
+                                }
+                            }
+                            if let Some((version, lines)) = commands.request {
+                                pending = lines.iter().cloned().collect();
+                                viewport = Some((version, lines));
+                                refresh = std::time::Instant::now();
+                            }
+                            if let Some(reply) = commands.measure {
+                                let _ = reply.send(service.memory_usage());
                             }
                         }
-                        Ok(HighlightCommand::Scheme(palette, size)) => {
-                            scheme = palette;
-                            tab = size;
-                            published = false;
-                            viewport = None;
-                            pending.clear();
-                            validated = false;
-                            if let Err(e) = service.set_color_scheme(scheme.clone()) {
-                                let _ = results.send(Err(e.to_string()));
-                            }
-                        }
-                        Ok(HighlightCommand::Request(version, lines)) => {
-                            pending = lines.iter().cloned().collect();
-                            viewport = Some((version, lines));
-                            refresh = std::time::Instant::now();
-                        }
-                        Ok(HighlightCommand::Measure(reply)) => {
-                            let _ = reply.send(service.memory_usage());
-                        }
-                        Ok(HighlightCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
                             break;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     while let Some(batch) = service.try_recv() {
                         if let Ok(batch) = &batch
+                            && !viewport.as_ref().is_some_and(|(version, lines)| {
+                                *version == batch.version && lines.contains(&batch.lines)
+                            })
+                        {
+                            continue;
+                        }
+                        if let Ok(batch) = &batch
                             && batch.complete
                         {
                             pending.retain(|r| *r != batch.lines);
                         }
-                        if results.send(batch.map_err(|e| e.to_string())).is_err() {
+                        if !publish_batch(&results, batch.map_err(|e| e.to_string())) {
                             return;
                         }
                     }
@@ -258,7 +327,7 @@ impl HighlightFrontend {
                                     published = true;
                                 }
                                 Err(e) => {
-                                    let _ = results.send(Err(e.to_string()));
+                                    publish_batch(&results, Err(e.to_string()));
                                     published = true;
                                 }
                                 _ => {}
@@ -292,7 +361,7 @@ impl HighlightFrontend {
                             if result.as_ref().is_ok_and(|b| !b.complete) {
                                 pending.push_back(lines);
                             }
-                            if results.send(result.map_err(|e| e.to_string())).is_err() {
+                            if !publish_batch(&results, result.map_err(|e| e.to_string())) {
                                 return;
                             }
                         }
@@ -314,17 +383,36 @@ impl HighlightFrontend {
                 self.latest.store(version.0, Ordering::Release);
                 self.complete.store(false, Ordering::Release);
             }
-            HighlightCommand::Scheme(_, _) => {
+            HighlightCommand::Scheme(..) => {
                 self.complete.store(false, Ordering::Release);
             }
             _ => {}
         }
-        let _ = self.tx.send(command);
+        let _ = self.tx.update(|pending| match command {
+            HighlightCommand::Edit(text, version, changes, tab) => {
+                pending.request = None;
+                let changes = pending.edit.is_none().then_some(changes);
+                pending.edit.replace((text, version, changes, tab))
+            }
+            HighlightCommand::Scheme(scheme, tab, revision) => {
+                pending.request = None;
+                pending.scheme = Some((scheme, tab, revision));
+                None
+            }
+            HighlightCommand::Request(version, lines) => {
+                pending.request = Some((version, lines));
+                None
+            }
+            HighlightCommand::Measure(reply) => {
+                pending.measure = Some(reply);
+                None
+            }
+        });
     }
 }
 impl Drop for HighlightFrontend {
     fn drop(&mut self) {
-        let _ = self.tx.send(HighlightCommand::Stop);
+        self.tx.cancel();
     }
 }
 
@@ -635,8 +723,8 @@ impl Analysis {
 }
 #[derive(Debug)]
 struct AnalysisTask {
-    tx: mpsc::Sender<Job>,
-    rx: mpsc::Receiver<Result<Arc<Analysis>, String>>,
+    tx: vel_mailbox::Sender<Job>,
+    rx: vel_mailbox::Receiver<Result<Arc<Analysis>, String>>,
     latest: Arc<AtomicU64>,
     /// Test probe: the version of the last job the worker finished with, whether it
     /// published an analysis or dropped the job as stale.
@@ -661,6 +749,7 @@ struct Job {
 impl Drop for AnalysisTask {
     fn drop(&mut self) {
         self.latest.store(u64::MAX, Ordering::Release);
+        self.tx.cancel();
         while let Ok(Ok(old)) = self.rx.try_recv() {
             retire(old);
         }
@@ -668,8 +757,8 @@ impl Drop for AnalysisTask {
 }
 impl AnalysisTask {
     fn new(version: ChangeId) -> Result<Self, String> {
-        let (tx, jobs) = mpsc::channel::<Job>();
-        let (results, rx) = mpsc::channel();
+        let (tx, jobs) = vel_mailbox::channel::<Job>();
+        let (results, rx) = vel_mailbox::channel();
         let latest = Arc::new(AtomicU64::new(version.0));
         let current = latest.clone();
         #[cfg(test)]
@@ -679,10 +768,7 @@ impl AnalysisTask {
         std::thread::Builder::new()
             .name("velocity-language".into())
             .spawn(move || {
-                while let Ok(mut job) = jobs.recv() {
-                    while let Ok(next) = jobs.try_recv() {
-                        job = next;
-                    }
+                while let Ok(job) = jobs.recv() {
                     if current.load(Ordering::Acquire) != job.scopes.version.0 {
                         #[cfg(test)]
                         finished.store(job.scopes.version.0, Ordering::Release);
@@ -755,10 +841,7 @@ impl Language {
         timeout: std::time::Duration,
     ) -> Option<vel_highlight::HighlightMemory> {
         let (reply, answer) = mpsc::channel();
-        self.service
-            .tx
-            .send(HighlightCommand::Measure(reply))
-            .ok()?;
+        self.service.send(HighlightCommand::Measure(reply));
         answer.recv_timeout(timeout).ok().flatten()
     }
     #[allow(clippy::too_many_arguments)]
@@ -939,8 +1022,11 @@ impl Language {
             return;
         }
         let viewport = self.requested.as_ref().map(|(_, _, r)| r.clone());
-        self.service
-            .send(HighlightCommand::Scheme(scheme.clone(), tab));
+        self.service.send(HighlightCommand::Scheme(
+            scheme.clone(),
+            tab,
+            self.scheme_revision + 1,
+        ));
         self.scheme = scheme.clone();
         self.scheme_revision += 1;
         self.styled.clear();
@@ -1066,10 +1152,12 @@ impl Language {
                 retire(scopes);
             }
         }
-        while let Ok(result) = self.service.rx.try_recv() {
-            match result {
-                Ok(batch) => changed |= self.accept(batch),
-                Err(e) => self.errors.push(e),
+        if let Ok(result) = self.service.rx.try_recv() {
+            for batch in result.batches.into_values() {
+                changed |= self.accept(batch);
+            }
+            if let Some(e) = result.error {
+                self.errors.push(e);
             }
         }
         while let Ok(result) = self.task.rx.try_recv() {
@@ -1203,9 +1291,9 @@ impl Drop for Language {
 }
 /// Releases analysis allocations away from native event and frame callbacks.
 pub(crate) fn retire<T: Send + 'static>(value: T) {
-    static RETIRE: OnceLock<mpsc::Sender<Box<dyn Send>>> = OnceLock::new();
+    static RETIRE: OnceLock<mpsc::SyncSender<Box<dyn Send>>> = OnceLock::new();
     let tx = RETIRE.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Box<dyn Send>>();
+        let (tx, rx) = mpsc::sync_channel::<Box<dyn Send>>(8);
         std::thread::Builder::new()
             .name("velocity-analysis-retire".into())
             .spawn(move || {
@@ -1216,7 +1304,9 @@ pub(crate) fn retire<T: Send + 'static>(value: T) {
             .expect("analysis retirement worker");
         tx
     });
-    let _ = tx.send(Box::new(value));
+    // When the worker cannot keep up, the producer pays for destruction. A
+    // backlog of superseded structures must not become another snapshot cache.
+    let _ = tx.try_send(Box::new(value));
 }
 
 pub fn rgba(color: vel_color_scheme::Color) -> vel_render::scene::Color {
