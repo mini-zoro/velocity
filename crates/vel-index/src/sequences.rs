@@ -15,6 +15,7 @@ pub(crate) struct Sequences {
     entries: crate::slab::Slab<Entry>,
     table: Vec<u32>,
     heads: HashMap<[u32; 2], u32>,
+    pub(crate) dead: usize,
 }
 fn hash(key: &[u32; 3]) -> usize {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -47,6 +48,9 @@ impl Sequences {
     }
     pub(crate) fn add(&mut self, key: [u32; 3], count: u32) {
         if let Some(id) = self.find(key) {
+            if self.entries[id as usize].count == 0 {
+                self.dead -= 1;
+            }
             self.entries[id as usize].count = self.entries[id as usize].count.saturating_add(count);
             return;
         }
@@ -76,8 +80,24 @@ impl Sequences {
     }
     pub(crate) fn subtract(&mut self, key: [u32; 3], count: u32) {
         if let Some(id) = self.find(key) {
-            self.entries[id as usize].count = self.entries[id as usize].count.saturating_sub(count);
+            let total = &mut self.entries[id as usize].count;
+            let previous = *total;
+            *total = total.saturating_sub(count);
+            self.dead += usize::from(previous != 0 && *total == 0);
         }
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub(crate) fn dead_bytes(&self) -> usize {
+        self.dead * (size_of::<Entry>() + size_of::<u32>())
+    }
+    pub(crate) fn compact(&mut self, names: &[u32]) {
+        let mut compact = Self::default();
+        for entry in self.entries.iter().filter(|entry| entry.count != 0) {
+            compact.add(remap(entry.words, names), entry.count);
+        }
+        *self = compact;
     }
     pub(crate) fn count(&self, key: [u32; 3]) -> u32 {
         self.find(key)
@@ -117,4 +137,8 @@ impl Sequences {
             + self.table.capacity() * 4
             + self.heads.capacity() * 16
     }
+}
+
+pub(crate) fn remap(key: [u32; 3], names: &[u32]) -> [u32; 3] {
+    key.map(|id| if id == NONE { NONE } else { names[id as usize] })
 }

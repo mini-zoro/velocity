@@ -50,6 +50,11 @@ unsafe fn win32_surface(
 
 const ATLAS_SIDE: u32 = 1024;
 const MAX_PAGES: usize = 8;
+const MIN_INSTANCE_BYTES: u64 = 1024 * 1024;
+const INSTANCE_SHRINK_FRAMES: u32 = 120;
+// CPU rasters are placement metadata, not a second copy of atlas pixels.
+const RASTER_BYTES: usize = 1024 * 1024;
+const RASTER_KEYS: usize = RASTER_BYTES / (4 * (size_of::<(GlyphKey, Raster)>() + 1));
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Instance {
@@ -106,6 +111,8 @@ pub struct Renderer {
     blanks: HashSet<GlyphKey>,
     instances: wgpu::Buffer,
     capacity: u64,
+    small_frames: u32,
+    small_peak: u64,
     data: Vec<Instance>,
     batches: BatchPlan,
     layouts: LineLayoutCache,
@@ -424,7 +431,7 @@ impl Renderer {
         });
         let pipeline_ms = ms(start.elapsed());
         phase("pipeline_ready");
-        let capacity = 1024 * 1024;
+        let capacity = MIN_INSTANCE_BYTES;
         let instances = make_instances(&device, capacity);
         let queries = has_queries.then(|| Queries::new(&device, &queue));
         let minimap_queries = has_queries.then(|| Queries::new(&device, &queue));
@@ -448,6 +455,8 @@ impl Renderer {
             blanks: HashSet::new(),
             instances,
             capacity,
+            small_frames: 0,
+            small_peak: 0,
             data: Vec::new(),
             batches: BatchPlan::default(),
             layouts: LineLayoutCache::new(2048),
@@ -487,8 +496,8 @@ impl Renderer {
     pub fn reset_fonts(&mut self) {
         self.atlas = PagedAtlas::new(ATLAS_SIDE, MAX_PAGES);
         self.layouts = LineLayoutCache::new(2048);
-        self.rasters.clear();
-        self.blanks.clear();
+        self.rasters = HashMap::new();
+        self.blanks = HashSet::new();
         self.offscreen = None;
     }
     /// Drops pending-glyph layout results after asynchronous fallback completion.
@@ -602,7 +611,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        if self.rasters.len() > 32_768 {
+        if self.rasters.len() >= RASTER_KEYS {
             self.rasters.clear();
         }
         self.rasters.insert(key, raster);
@@ -1015,10 +1024,7 @@ impl Renderer {
             }
         }
         let required = std::mem::size_of_val(self.data.as_slice()) as u64;
-        if required > self.capacity {
-            self.capacity = required.next_power_of_two();
-            self.instances = make_instances(&self.device, self.capacity);
-        }
+        self.resize_instances(required);
         if required > 0 {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
@@ -1030,6 +1036,31 @@ impl Renderer {
             window.request_frame_at(Instant::now() + Duration::from_millis(8));
         }
         Ok(())
+    }
+
+    fn resize_instances(&mut self, required: u64) {
+        if required > self.capacity {
+            self.capacity = required.next_power_of_two();
+            self.instances = make_instances(&self.device, self.capacity);
+        } else if self.capacity > MIN_INSTANCE_BYTES && required < self.capacity / 4 {
+            self.small_peak = self.small_peak.max(required);
+            self.small_frames += 1;
+            if self.small_frames < INSTANCE_SHRINK_FRAMES {
+                return;
+            }
+            // Two times the recent high-water mark leaves room for normal scrolling.
+            self.capacity = (self.small_peak * 2)
+                .next_power_of_two()
+                .max(MIN_INSTANCE_BYTES);
+            self.instances = make_instances(&self.device, self.capacity);
+            self.data
+                .shrink_to(self.capacity as usize / size_of::<Instance>());
+            self.batches.shrink();
+        } else if self.small_frames == 0 {
+            return;
+        }
+        self.small_frames = 0;
+        self.small_peak = 0;
     }
     fn batch(&mut self, layer: usize, kind: PrimitiveKind, first: u32) {
         let end = self.data.len() as u32;

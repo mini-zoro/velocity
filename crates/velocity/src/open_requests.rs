@@ -9,18 +9,160 @@ use crate::{
 #[cfg(test)]
 use std::fs::File;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
 };
 
-/// Read-only image representation of a named binary document.
-type ImageResult = Option<Arc<vel_render::scene::Image>>;
+use vel_render::scene::Image;
+
+const PREVIEW_BYTES: usize = 128 * 1024 * 1024;
+static PREVIEW_CLOCK: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ImageKey {
+    path: PathBuf,
+    disk: Option<(u64, std::time::SystemTime)>,
+}
+
+#[derive(Debug)]
+struct PreviewPixels {
+    image: Mutex<Option<Arc<Image>>>,
+    active: AtomicUsize,
+    last_used: AtomicU64,
+}
+impl PreviewPixels {
+    fn new(image: Arc<Image>) -> Self {
+        Self {
+            image: Mutex::new(Some(image)),
+            active: AtomicUsize::new(0),
+            last_used: AtomicU64::new(PREVIEW_CLOCK.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+    fn touch(&self) {
+        self.last_used.store(
+            PREVIEW_CLOCK.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+    fn resident(&self) -> bool {
+        self.image.lock().expect("preview pixels").is_some()
+    }
+}
+
+#[derive(Default)]
+struct PreviewCache {
+    entries: HashMap<ImageKey, Weak<PreviewPixels>>,
+    // An evicted image can still be borrowed by the current renderer scene.
+    // Keep charging its bytes until that scene releases its last reference.
+    charged: Vec<(Weak<Image>, usize)>,
+}
+impl PreviewCache {
+    fn lookup(&self, key: &ImageKey) -> Option<Arc<PreviewPixels>> {
+        self.entries
+            .get(key)?
+            .upgrade()
+            .filter(|entry| entry.resident())
+    }
+    fn bytes(&mut self) -> usize {
+        self.charged.retain(|(image, _)| image.strong_count() > 0);
+        self.charged.iter().map(|(_, bytes)| bytes).sum()
+    }
+    fn make_room(&mut self, needed: usize, limit: usize) -> bool {
+        while self.bytes().saturating_add(needed) > limit {
+            let Some(victim) = self
+                .entries
+                .values()
+                .filter_map(Weak::upgrade)
+                .filter(|entry| entry.resident())
+                .min_by_key(|entry| {
+                    (
+                        entry.active.load(Ordering::Relaxed) != 0,
+                        entry.last_used.load(Ordering::Relaxed),
+                    )
+                })
+            else {
+                return false;
+            };
+            victim.image.lock().expect("preview pixels").take();
+        }
+        self.entries
+            .retain(|_, entry| entry.upgrade().is_some_and(|entry| entry.resident()));
+        true
+    }
+    fn insert(&mut self, key: ImageKey, image: Arc<Image>) -> Arc<PreviewPixels> {
+        self.charged
+            .push((Arc::downgrade(&image), image.rgba.len()));
+        let entry = Arc::new(PreviewPixels::new(image));
+        self.entries.insert(key, Arc::downgrade(&entry));
+        entry
+    }
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::*;
+
+    fn image(id: u64) -> Arc<Image> {
+        Arc::new(Image {
+            logical_size: [2000., 2000.],
+            width: 2000,
+            height: 2000,
+            id,
+            rgba: vec![0; 2000 * 2000 * 4].into(),
+        })
+    }
+
+    fn key(i: u64) -> ImageKey {
+        ImageKey {
+            path: format!("preview-{i}.png").into(),
+            disk: None,
+        }
+    }
+
+    #[test]
+    fn fifty_reopens_release_the_only_live_decode() {
+        let mut cache = PreviewCache::default();
+        for id in 0..50 {
+            assert!(cache.make_room(crate::image_decode::MAX_DECODED_BYTES, PREVIEW_BYTES));
+            let entry = cache.insert(key(0), image(id));
+            assert!(Arc::ptr_eq(&entry, &cache.lookup(&key(0)).unwrap()));
+            assert_eq!(cache.bytes(), 16_000_000);
+            drop(entry);
+            assert_eq!(cache.bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn process_preview_limit_evicts_inactive_pixels_first() {
+        let mut cache = PreviewCache::default();
+        let active = cache.insert(key(0), image(0));
+        active.active.store(1, Ordering::Relaxed);
+        let mut others = Vec::new();
+        for id in 1..12 {
+            assert!(cache.make_room(crate::image_decode::MAX_DECODED_BYTES, PREVIEW_BYTES));
+            others.push(cache.insert(key(id), image(id)));
+            assert!(cache.bytes() <= PREVIEW_BYTES);
+        }
+        assert!(active.resident());
+        assert!(!others[0].resident());
+        assert!(others.last().unwrap().resident());
+        drop((active, others));
+        assert_eq!(cache.bytes(), 0);
+    }
+}
+
+#[derive(Debug)]
+enum ImageResult {
+    Ready(Arc<PreviewPixels>),
+    Failed,
+    Evicted,
+}
 #[derive(Debug)]
 struct PendingImage {
     cancelled: Arc<AtomicBool>,
@@ -32,7 +174,7 @@ impl Drop for PendingImage {
     }
 }
 struct ImageJob {
-    path: PathBuf,
+    key: ImageKey,
     cancelled: Arc<AtomicBool>,
     result: mpsc::SyncSender<ImageResult>,
 }
@@ -49,7 +191,7 @@ struct ImageQueue {
     ready: Condvar,
 }
 impl ImageQueue {
-    fn submit(path: &Path) -> PendingImage {
+    fn submit(path: &Path, disk: Option<(u64, std::time::SystemTime)>) -> PendingImage {
         static QUEUE: OnceLock<Arc<ImageQueue>> = OnceLock::new();
         let queue = QUEUE.get_or_init(|| {
             let queue = Arc::new(Self::default());
@@ -65,7 +207,10 @@ impl ImageQueue {
             jobs.pop_front();
         }
         jobs.push_back(ImageJob {
-            path: path.to_owned(),
+            key: ImageKey {
+                path: path.to_owned(),
+                disk,
+            },
             cancelled: cancelled.clone(),
             result: tx,
         });
@@ -74,6 +219,7 @@ impl ImageQueue {
     }
 
     fn run(&self) {
+        let mut cache = PreviewCache::default();
         loop {
             let job = {
                 let jobs = self.jobs.lock().expect("image queue");
@@ -84,8 +230,19 @@ impl ImageQueue {
                 jobs.pop_front().expect("ready image")
             };
             if !job.cancelled.load(Ordering::Acquire) {
-                let image = decode_image(&job.path, &job.cancelled);
-                let _ = job.result.send(image);
+                let result = if let Some(entry) = cache.lookup(&job.key) {
+                    ImageResult::Ready(entry)
+                } else if !cache.make_room(crate::image_decode::MAX_DECODED_BYTES, PREVIEW_BYTES) {
+                    ImageResult::Evicted
+                } else if let Some(image) = decode_image(&job.key.path, &job.cancelled) {
+                    if job.cancelled.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    ImageResult::Ready(cache.insert(job.key, image))
+                } else {
+                    ImageResult::Failed
+                };
+                let _ = job.result.send(result);
             }
         }
     }
@@ -145,15 +302,53 @@ pub(crate) struct ImagePreview {
     snapshot: usize,
     wants_image: bool,
     pending: Option<PendingImage>,
-    pub image: Option<Arc<vel_render::scene::Image>>,
+    pixels: Option<Arc<PreviewPixels>>,
+    visible: bool,
+    evicted: bool,
     /// The file matched the image patterns but could not be decoded; its bytes are shown.
     pub failed: bool,
 }
 impl ImagePreview {
+    pub fn image(&self) -> Option<Arc<Image>> {
+        self.pixels
+            .as_ref()?
+            .image
+            .lock()
+            .expect("preview pixels")
+            .clone()
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            if let Some(pixels) = &self.pixels {
+                if visible {
+                    pixels.active.fetch_add(1, Ordering::Relaxed);
+                    pixels.touch();
+                } else {
+                    pixels.active.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn replace_pixels(&mut self, pixels: Option<Arc<PreviewPixels>>) {
+        let visible = self.visible;
+        self.set_visible(false);
+        self.pixels = pixels;
+        self.set_visible(visible);
+    }
+
+    #[cfg(test)]
+    pub fn set_test_image(&mut self, image: Arc<Image>) {
+        self.replace_pixels(Some(Arc::new(PreviewPixels::new(image))));
+    }
+
     pub fn busy(&self) -> bool {
         self.pending.is_some()
     }
     pub fn suspend(&mut self) {
+        self.set_visible(false);
         if self.pending.take().is_some() {
             // Returning to this tab should request a new decode.
             self.path = None;
@@ -169,6 +364,8 @@ impl ImagePreview {
         tab: &crate::workspace::Tab,
         folders: &[vel_search::project::Folder],
     ) -> bool {
+        let reentering = !self.visible;
+        self.set_visible(true);
         let path = tab.path.as_deref().filter(|_| tab.editor.binary.is_some());
         if path.is_none() && self.path.is_none() {
             return false;
@@ -186,14 +383,17 @@ impl ImagePreview {
             .as_ref()
             .map_or(0, |b| Arc::as_ptr(b) as usize);
         let mut changed = false;
-        if (path, revision, epoch, snapshot, wants_image)
-            != (
-                self.path.as_deref(),
-                self.revision,
-                self.epoch,
-                self.snapshot,
-                self.wants_image,
-            )
+        let retry =
+            reentering && (self.evicted || self.pixels.as_ref().is_some_and(|p| !p.resident()));
+        if retry
+            || (path, revision, epoch, snapshot, wants_image)
+                != (
+                    self.path.as_deref(),
+                    self.revision,
+                    self.epoch,
+                    self.snapshot,
+                    self.wants_image,
+                )
         {
             // The same file decoded again (settings, zoom, a reload from disk) keeps showing
             // its last result until the new one arrives: no frame without the picture or
@@ -206,18 +406,24 @@ impl ImagePreview {
             self.wants_image = wants_image;
             self.pending = None;
             if !same_file || !wants_image {
-                changed = self.image.take().is_some() || self.failed;
+                changed = self.pixels.is_some() || self.failed;
+                self.replace_pixels(None);
                 self.failed = false;
             }
             if let Some(path) = path.filter(|_| wants_image) {
-                self.pending = Some(ImageQueue::submit(path));
+                self.pending = Some(ImageQueue::submit(path, tab.disk_stamp));
             }
+            self.evicted = false;
         }
         if let Some(pending) = &self.pending {
             match pending.result.try_recv() {
-                Ok(image) => {
-                    self.image = image;
-                    self.failed = self.image.is_none();
+                Ok(result) => {
+                    self.failed = matches!(result, ImageResult::Failed);
+                    self.evicted = matches!(result, ImageResult::Evicted);
+                    self.replace_pixels(match result {
+                        ImageResult::Ready(pixels) => Some(pixels),
+                        _ => None,
+                    });
                     changed = true;
                     self.pending = None;
                 }
@@ -232,7 +438,13 @@ impl ImagePreview {
         changed
     }
 }
-fn decode_image(path: &Path, cancelled: &AtomicBool) -> ImageResult {
+impl Drop for ImagePreview {
+    fn drop(&mut self) {
+        self.set_visible(false);
+    }
+}
+
+fn decode_image(path: &Path, cancelled: &AtomicBool) -> Option<Arc<Image>> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let image = crate::image_decode::preview(path, cancelled)?;
     Some(Arc::new(image.into_scene(

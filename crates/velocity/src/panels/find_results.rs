@@ -21,6 +21,16 @@ struct Marker {
     target: Option<Target>,
     matches: Vec<Region>,
 }
+impl Marker {
+    fn bytes(&self) -> usize {
+        2 * size_of::<Self>()
+            + self.matches.capacity() * size_of::<Region>()
+            + self
+                .target
+                .as_ref()
+                .map_or(0, |target| target.path.as_os_str().len())
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct ResultsTab {
@@ -31,12 +41,16 @@ pub(super) struct ResultsTab {
     // their targets even though F4 now walks the new search's model.
     start: usize,
     heading: Option<(Region, String)>,
+    marker_bytes: usize,
+    marker_matches: usize,
 }
 
 #[derive(Default)]
 pub(super) struct Batch {
     rows: Vec<(usize, String, Marker)>,
     bytes: usize,
+    marker_bytes: usize,
+    matches: usize,
 }
 
 impl Batch {
@@ -78,15 +92,14 @@ impl Batch {
             };
             let len = text.len();
             self.bytes += len;
-            self.rows.push((
-                rank,
-                text,
-                Marker {
-                    row: Region::new(0, len),
-                    target,
-                    matches,
-                },
-            ));
+            let marker = Marker {
+                row: Region::new(0, len),
+                target,
+                matches,
+            };
+            self.marker_bytes += marker.bytes();
+            self.matches += marker.matches.len();
+            self.rows.push((rank, text, marker));
         }
     }
 }
@@ -108,6 +121,8 @@ impl ResultsTab {
             rows: Vec::new(),
             start: 0,
             heading: None,
+            marker_bytes: 0,
+            marker_matches: 0,
         }
     }
 
@@ -189,6 +204,23 @@ impl ResultsTab {
             return;
         }
         self.sync(editor);
+        let bytes = batch.marker_bytes;
+        let matches = batch.matches;
+        self.marker_bytes += bytes;
+        self.marker_matches += matches;
+        if self.start != 0
+            && (self.marker_bytes > 16 * 1024 * 1024 || self.marker_matches > 100_000)
+        {
+            // Old reports remain editable text. Only their cold jump/paint
+            // metadata is evicted; the current search's ranks are unchanged.
+            self.rows.drain(..self.start);
+            self.rows
+                .shrink_to(self.rows.len().saturating_mul(2) + fresh.len());
+            self.start = 0;
+            self.marker_bytes = bytes + self.rows.iter().map(Marker::bytes).sum::<usize>();
+            self.marker_matches =
+                matches + self.rows.iter().map(|r| r.matches.len()).sum::<usize>();
+        }
         fresh.sort_unstable_by_key(|(rank, ..)| *rank);
         let end = editor.text.len_bytes();
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();

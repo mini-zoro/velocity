@@ -1,10 +1,10 @@
 //! GPU memory must stay flat in a steady state. These run against the real device
 //! (Metal on macOS) with wgpu's internal counters, so a frame path that leaks buffers or
 //! textures fails here instead of in a user's process hours later.
-use super::Renderer;
+use super::{INSTANCE_SHRINK_FRAMES, MIN_INSTANCE_BYTES, RASTER_BYTES, Renderer};
 use crate::{
     font::Fonts,
-    scene::{Layer, Scene, TextRun},
+    scene::{Layer, Scene, SolidRect, TextRun},
 };
 use vel_platform::Rect;
 
@@ -117,4 +117,111 @@ fn steady_rendering_keeps_gpu_objects_and_memory_flat() {
     }
     let after = gpu(&renderer);
     assert_eq!(after, base, "300 frames of the same content grow nothing");
+}
+
+#[test]
+fn huge_scene_instance_bytes_retire_after_sustained_small_frames() {
+    let Some((mut renderer, mut fonts)) = renderer() else {
+        return;
+    };
+    let area = Rect {
+        x: 0.,
+        y: 0.,
+        width: 8.,
+        height: 8.,
+    };
+    let rect = SolidRect {
+        rect: area,
+        clip: area,
+        radius: 0.,
+        color: [1.; 4],
+    };
+    let small = Scene {
+        layers: vec![Layer {
+            rects: vec![rect.clone()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    renderer.prepare(&small, &mut fonts, 1.).unwrap();
+    renderer.discard_staged_writes();
+    let baseline = gpu(&renderer);
+    let huge = Scene {
+        layers: vec![Layer {
+            rects: vec![rect; 60_000],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    renderer.prepare(&huge, &mut fonts, 1.).unwrap();
+    renderer.discard_staged_writes();
+    let peak = gpu(&renderer);
+    assert!(peak.buffer_bytes > baseline.buffer_bytes);
+    let capacity = renderer.capacity;
+    for _ in 0..INSTANCE_SHRINK_FRAMES - 1 {
+        renderer.prepare(&small, &mut fonts, 1.).unwrap();
+        renderer.discard_staged_writes();
+        assert_eq!(renderer.capacity, capacity);
+    }
+    renderer.prepare(&small, &mut fonts, 1.).unwrap();
+    renderer.discard_staged_writes();
+    assert_eq!(renderer.capacity, MIN_INSTANCE_BYTES);
+    assert_eq!(gpu(&renderer), baseline);
+    for _ in 0..INSTANCE_SHRINK_FRAMES {
+        renderer.prepare(&small, &mut fonts, 1.).unwrap();
+        renderer.discard_staged_writes();
+    }
+    assert_eq!(gpu(&renderer), baseline);
+}
+
+#[test]
+fn cjk_scroll_and_document_close_release_cpu_glyph_caches() {
+    let Some((mut renderer, mut fonts)) = renderer() else {
+        return;
+    };
+    let files = fonts.file_storage_bytes();
+    let clip = Rect {
+        x: 0.,
+        y: 0.,
+        width: 800.,
+        height: 600.,
+    };
+    let mut cjk = (0x3400..=0x9fff)
+        .chain(0x20000..)
+        .filter_map(char::from_u32)
+        .take(30_000);
+    for _ in 0..300 {
+        let text: String = cjk.by_ref().take(100).collect();
+        let scene = Scene {
+            layers: vec![Layer {
+                text: vec![TextRun {
+                    text,
+                    clip,
+                    x: 0.,
+                    baseline: 30.,
+                    size: 9.,
+                    color: [1.; 4],
+                    style: Default::default(),
+                    family: None,
+                    highlight: None,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        renderer.prepare(&scene, &mut fonts, 1.).unwrap();
+        renderer.discard_staged_writes();
+        assert!(
+            renderer.rasters.capacity() * 2 * (size_of::<(super::GlyphKey, super::Raster)>() + 1)
+                <= RASTER_BYTES
+        );
+    }
+    assert!(!renderer.rasters.is_empty());
+    renderer.reset_fonts();
+    fonts.clear_document_caches();
+    assert_eq!(renderer.rasters.capacity(), 0);
+    assert!(renderer.atlas.is_empty());
+    assert_eq!(renderer.layouts.storage_bytes(), 0);
+    assert_eq!(fonts.document_cache_bytes(), (0, 0));
+    assert_eq!(fonts.file_storage_bytes(), files);
 }

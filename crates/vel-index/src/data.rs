@@ -454,7 +454,8 @@ pub struct Index {
     names: Names,
     slots: crate::slab::Slab<Slot>,
     free: Vec<u32>,
-    files: Vec<File>,
+    files: Vec<Option<File>>,
+    free_files: Vec<u32>,
     paths: HashMap<PathBuf, u32>,
     sequences: crate::sequences::Sequences,
     trailing: HashMap<u32, Vec<(String, u32)>>,
@@ -468,15 +469,20 @@ impl Index {
     /// Replaces one file's complete contributions, removing old definitions, references and stats.
     pub fn replace_file(&mut self, path: impl Into<PathBuf>, analysis: FileAnalysis) {
         let path = path.into();
-        self.remove_file(&path);
         let file = if let Some(&id) = self.paths.get(&path) {
+            self.remove_contributions(id);
             id
         } else {
-            let id = self.files.len() as u32;
-            self.files.push(File {
+            let id = self.free_files.pop().unwrap_or(self.files.len() as u32);
+            let file = Some(File {
                 path: path.clone(),
                 data: Contributions::default(),
             });
+            if id as usize == self.files.len() {
+                self.files.push(file);
+            } else {
+                self.files[id as usize] = file;
+            }
             self.paths.insert(path, id);
             id
         };
@@ -510,6 +516,9 @@ impl Index {
             self.symbols += 1;
         }
         for (word, count) in analysis.words.words {
+            if count == 0 {
+                continue;
+            }
             let id = self.names.intern(&word);
             self.names.records[id as usize].frequency = self.names.records[id as usize]
                 .frequency
@@ -517,7 +526,7 @@ impl Index {
             data.words.push((id, count));
         }
         for (sequence, count) in analysis.words.sequences {
-            if !(2..=3).contains(&sequence.len()) {
+            if count == 0 || !(2..=3).contains(&sequence.len()) {
                 continue;
             }
             let mut ids = [NONE; 3];
@@ -528,6 +537,9 @@ impl Index {
             data.sequences.push((ids, count));
         }
         for ((word, punct), count) in analysis.words.trailing {
+            if count == 0 {
+                continue;
+            }
             let key = (self.names.intern(&word), punct);
             let variants = self.trailing.entry(key.0).or_default();
             if let Some((_, total)) = variants.iter_mut().find(|(punct, _)| punct == &key.1) {
@@ -537,14 +549,25 @@ impl Index {
             }
             data.trailing.push((key, count));
         }
-        self.files[file as usize].data = data;
+        self.files[file as usize].as_mut().unwrap().data = data;
+        self.compact_if_needed();
     }
     /// Removes file contributions; other files containing the same name remain indexed.
     pub fn remove_file(&mut self, path: &Path) {
-        let Some(&file) = self.paths.get(path) else {
+        let Some(file) = self.paths.remove(path) else {
             return;
         };
-        let data = std::mem::take(&mut self.files[file as usize].data);
+        if self.paths.is_empty() {
+            *self = Self::default();
+            return;
+        }
+        self.remove_contributions(file);
+        self.files[file as usize] = None;
+        self.free_files.push(file);
+        self.compact_if_needed();
+    }
+    fn remove_contributions(&mut self, file: u32) {
+        let data = std::mem::take(&mut self.files[file as usize].as_mut().unwrap().data);
         let names: std::collections::HashSet<_> = data
             .symbols
             .iter()
@@ -572,11 +595,19 @@ impl Index {
                 cursor = old.next;
             }
         }
+        for id in data.symbols {
+            self.names.release(self.slots[id as usize].name);
+        }
         for (id, count) in data.words {
-            self.names.records[id as usize].frequency -= count;
+            let frequency = &mut self.names.records[id as usize].frequency;
+            *frequency = frequency.saturating_sub(count);
+            self.names.release(id);
         }
         for (key, count) in data.sequences {
             self.sequences.subtract(key, count);
+            for id in key.into_iter().filter(|&id| id != NONE) {
+                self.names.release(id);
+            }
         }
         for ((word, punct), count) in data.trailing {
             if let Some(variants) = self.trailing.get_mut(&word) {
@@ -590,6 +621,91 @@ impl Index {
                     self.trailing.remove(&word);
                 }
             }
+            self.names.release(word);
+        }
+    }
+    fn compact_if_needed(&mut self) {
+        let dead = self.names.dead + self.sequences.dead + self.free.len() + self.free_files.len();
+        let total =
+            self.names.records.len() + self.sequences.len() + self.slots.len() + self.files.len();
+        let bytes = self.names.dead_bytes
+            + self.sequences.dead_bytes()
+            + self.free.len() * (size_of::<Slot>() + size_of::<u32>())
+            + self.free_files.len() * (size_of::<Option<File>>() + size_of::<u32>());
+        if dead * 4 <= total && bytes < 32 * 1024 * 1024 {
+            return;
+        }
+
+        // Runs on the index writer. Remap in original order (including posting links
+        // and name-ID tie breaks); nothing partially remapped is visible to readers.
+        let names = self.names.compact();
+        self.sequences.compact(&names);
+        self.trailing = std::mem::take(&mut self.trailing)
+            .into_iter()
+            .map(|(id, variants)| (names[id as usize], variants))
+            .collect();
+
+        let mut files = Vec::with_capacity(self.paths.len());
+        let mut file_ids = Vec::with_capacity(self.files.len());
+        for file in std::mem::take(&mut self.files) {
+            if let Some(file) = file {
+                file_ids.push(files.len() as u32);
+                files.push(Some(file));
+            } else {
+                file_ids.push(NONE);
+            }
+        }
+        self.files = files;
+        self.free_files = Vec::new();
+        for id in self.paths.values_mut() {
+            *id = file_ids[*id as usize];
+        }
+        self.paths.shrink_to_fit();
+
+        let mut slots = crate::slab::Slab::default();
+        let slot_ids: Vec<_> = self
+            .slots
+            .iter()
+            .map(|old| {
+                if old.flags == 0 {
+                    return NONE;
+                }
+                let id = slots.len() as u32;
+                slots.push(Slot {
+                    file: file_ids[old.file as usize],
+                    name: names[old.name as usize],
+                    ..*old
+                });
+                id
+            })
+            .collect();
+        self.slots = slots;
+        self.free = Vec::new();
+        for id in 0..self.slots.len() {
+            let next = &mut self.slots[id].next;
+            if *next != NONE {
+                *next = slot_ids[*next as usize];
+            }
+        }
+        for id in 0..self.names.records.len() {
+            let head = &mut self.names.records[id].head;
+            if *head != NONE {
+                *head = slot_ids[*head as usize];
+            }
+        }
+        for file in self.files.iter_mut().flatten() {
+            for id in &mut file.data.symbols {
+                *id = slot_ids[*id as usize];
+            }
+            for (id, _) in &mut file.data.words {
+                *id = names[*id as usize];
+            }
+            for (key, _) in &mut file.data.sequences {
+                *key = crate::sequences::remap(*key, &names);
+            }
+            for ((id, _), _) in &mut file.data.trailing {
+                *id = names[*id as usize];
+            }
         }
     }
     /// Number of active definition/reference locations.
@@ -601,9 +717,14 @@ impl Index {
         self.names.storage_bytes()
             + self.slots.capacity() * std::mem::size_of::<Slot>()
             + self.free.capacity() * 4
+            + self.free_files.capacity() * 4
+            + self.files.capacity() * size_of::<Option<File>>()
+            + self.paths.capacity() * (size_of::<(PathBuf, u32)>() + 1)
+            + self.paths.keys().map(|p| p.capacity()).sum::<usize>()
             + self
                 .files
                 .iter()
+                .flatten()
                 .map(|file| {
                     file.data.symbols.capacity() * 4
                         + file.data.words.capacity() * 8
@@ -616,7 +737,7 @@ impl Index {
                             .iter()
                             .map(|((_, punct), _)| punct.capacity())
                             .sum::<usize>()
-                        + file.path.as_os_str().len()
+                        + file.path.capacity()
                 })
                 .sum::<usize>()
             + self.sequences.storage_bytes()
@@ -624,7 +745,11 @@ impl Index {
     }
     fn location(&self, slot: Slot) -> SymbolLocation {
         SymbolLocation {
-            file: self.files[slot.file as usize].path.clone(),
+            file: self.files[slot.file as usize]
+                .as_ref()
+                .unwrap()
+                .path
+                .clone(),
             name: self.names.text(slot.name).into(),
             row: slot.row as usize,
             column: slot.column as usize,
@@ -767,7 +892,11 @@ impl Index {
                 let record = self.slots[slot as usize];
                 if record.flags & 1 != 0 {
                     let key = (
-                        self.files[record.file as usize].path.as_path(),
+                        self.files[record.file as usize]
+                            .as_ref()
+                            .unwrap()
+                            .path
+                            .as_path(),
                         record.start,
                         slot,
                     );
@@ -920,5 +1049,39 @@ impl Index {
                 })
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod reclamation_tests {
+    use super::*;
+
+    fn analysis(text: &str) -> FileAnalysis {
+        FileAnalysis {
+            words: WordStatistics::from_text(text),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn removed_files_and_names_do_not_accumulate_across_index_churn() {
+        let mut index = Index::new();
+        index.replace_file("live", analysis("common word word"));
+        let baseline = index.storage_bytes();
+        for i in 0..2048 {
+            let word = format!("zombie{i}");
+            let path = PathBuf::from(format!("old-{i}.txt"));
+            index.replace_file(&path, analysis(&format!("common {word}")));
+            assert_eq!(index.sequence_count(&["common", &word]), 1);
+            index.remove_file(&path);
+            assert_eq!(index.sequence_count(&["common", &word]), 0);
+            assert!(index.names.find(&word).is_none());
+            assert!(!index.paths.contains_key(&path));
+        }
+        assert!(index.storage_bytes() <= baseline + 4096);
+        assert_eq!(index.word_count("word"), 2);
+        assert_eq!(index.sequence_count(&["common", "word"]), 1);
+        index.remove_file(Path::new("live"));
+        assert_eq!(index.storage_bytes(), 0);
     }
 }

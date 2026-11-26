@@ -129,21 +129,33 @@ pub(crate) fn find(
     ranges: &[Range<usize>],
     cancelled: &impl Fn() -> bool,
 ) -> Result<Option<Vec<Range<usize>>>, String> {
-    check_size(text.len() as u64)?;
     let mut hits = Vec::new();
+    Ok(visit(regex, text, ranges, cancelled, |hit| hits.push(hit))?.then_some(hits))
+}
+
+pub(super) fn visit(
+    regex: &PerlRegex,
+    text: &str,
+    ranges: &[Range<usize>],
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(Range<usize>),
+) -> Result<bool, String> {
+    check_size(text.len() as u64)?;
+    let mut count = 0;
     for range in ranges {
         let mut scan = Scan::new(regex, text, range);
         while let Some(hit) = scan.next(cancelled)? {
-            if hits.len() == MAX_MATCHES {
+            if count == MAX_MATCHES {
                 return Err("Advanced regex search exceeded 262,144 matches".into());
             }
-            hits.push(hit);
+            count += 1;
+            visit(hit);
         }
         if cancelled() {
-            return Ok(None);
+            return Ok(false);
         }
     }
-    Ok(Some(hits))
+    Ok(true)
 }
 
 pub(super) fn replacements(

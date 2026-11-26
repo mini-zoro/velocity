@@ -272,32 +272,88 @@ impl fmt::Debug for Inner {
 /// Compiled lazily once, shared by clones, `Send + Sync`.
 #[derive(Clone, Debug)]
 pub struct Regex(Arc<Inner>);
-static POOL: LazyLock<Mutex<HashMap<String, Weak<Inner>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static DYNAMIC: LazyLock<Mutex<HashMap<String, Regex>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+const POOL_KEYS: usize = 8192;
+const DYNAMIC_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Default)]
+struct Pool {
+    entries: HashMap<u64, Weak<Inner>>,
+    inserts: usize,
+}
+impl Pool {
+    fn intern(&mut self, source: String) -> Regex {
+        let mut hash = std::hash::DefaultHasher::new();
+        source.hash(&mut hash);
+        let key = hash.finish();
+        if let Some(inner) = self.entries.get(&key).and_then(Weak::upgrade)
+            && inner.source == source
+        {
+            return Regex(inner);
+        }
+        self.inserts += 1;
+        if self.inserts.is_multiple_of(1024) {
+            self.entries.retain(|_, inner| inner.strong_count() != 0);
+        }
+        if self.entries.len() == POOL_KEYS {
+            self.entries.clear();
+        }
+        let regex = Regex::make(source, Arc::new(OnigBackend::default()), true);
+        self.entries.insert(key, Arc::downgrade(&regex.0));
+        regex
+    }
+}
+#[derive(Default)]
+struct DynamicPool {
+    entries: HashMap<String, Regex>,
+    bytes: usize,
+}
+static POOL: LazyLock<Mutex<Pool>> = LazyLock::new(Mutex::default);
+static DYNAMIC: LazyLock<Mutex<DynamicPool>> = LazyLock::new(Mutex::default);
+
+#[cfg(test)]
+mod pool_budget_tests {
+    use super::*;
+
+    #[test]
+    fn the_weak_pool_reclaims_dead_patterns_and_caps_live_keys() {
+        let mut pool = Pool::default();
+        let keep = pool.intern("[a-z]+".into());
+        for i in 0..POOL_KEYS * 2 {
+            drop(pool.intern(format!("dead-{i}")));
+        }
+        assert!(pool.entries.len() <= 1024);
+        assert!(Arc::ptr_eq(&keep.0, &pool.intern("[a-z]+".into()).0));
+
+        let live: Vec<_> = (0..POOL_KEYS * 2)
+            .map(|i| pool.intern(format!("live-{i}")))
+            .collect();
+        assert!(pool.entries.len() <= POOL_KEYS);
+        assert_eq!(live[0].regex_str(), "live-0");
+    }
+}
 impl Regex {
     /// Constructs a lazy pattern; duplicate sources share compiled objects.
     pub fn new(source: String) -> Self {
-        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(inner) = pool.get(&source).and_then(Weak::upgrade) {
-            return Self(inner);
-        }
-        let regex = Self::make(source.clone(), Arc::new(OnigBackend::default()), true);
-        pool.insert(source, Arc::downgrade(&regex.0));
-        regex
+        POOL.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .intern(source)
     }
     /// Caches a runtime capture substitution. The bounded cache holds 4096 instantiations.
     pub fn new_unfiltered(source: String) -> Self {
         let mut pool = DYNAMIC.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = pool.get(&source) {
+        if let Some(r) = pool.entries.get(&source) {
             return r.clone();
         }
-        if pool.len() >= 4096 {
-            pool.clear();
+        let charge = source.capacity().saturating_mul(2).saturating_add(256);
+        if charge > DYNAMIC_BYTES {
+            return Self::new(source);
+        }
+        if pool.entries.len() >= 4096 || pool.bytes + charge > DYNAMIC_BYTES {
+            *pool = DynamicPool::default();
         }
         let regex = Self::new(source.clone());
-        pool.insert(source, regex.clone());
+        pool.entries.insert(source, regex.clone());
+        pool.bytes += charge;
         regex
     }
     /// Uses an application-supplied regex backend.

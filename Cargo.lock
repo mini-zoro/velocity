@@ -3197,6 +3197,7 @@ version = "0.1.3"
 name = "vel-minihtml"
 version = "0.1.3"
 dependencies = [
+ "blake3",
  "html-escape",
  "serde_json",
  "thiserror",

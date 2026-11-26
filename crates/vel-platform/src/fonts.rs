@@ -276,7 +276,8 @@ pub enum FallbackKey {
 #[derive(Debug)]
 pub struct FallbackCache<R> {
     resolver: R,
-    choices: HashMap<(u16, FallbackKey), Option<FontDescriptor>>,
+    choices: HashMap<(u16, char), Option<FontDescriptor>>,
+    bytes: usize,
 }
 impl<R: FontFallback> FallbackCache<R> {
     /// Empty cache; performs no system work.
@@ -284,26 +285,30 @@ impl<R: FontFallback> FallbackCache<R> {
         Self {
             resolver,
             choices: HashMap::new(),
+            bytes: 0,
         }
     }
     /// Resolves once, including missing private-use glyphs with no installed coverage.
     pub fn resolve(&mut self, face: u16, primary: &str, scalar: char) -> Option<&FontDescriptor> {
-        self.resolve_key(face, primary, FallbackKey::Scalar(scalar))
-    }
-    fn resolve_key(
-        &mut self,
-        face: u16,
-        primary: &str,
-        key: FallbackKey,
-    ) -> Option<&FontDescriptor> {
-        self.choices
-            .entry((face, key.clone()))
-            .or_insert_with(|| match key {
-                FallbackKey::Scalar(c) => self.resolver.resolve(primary, c),
-                FallbackKey::Emoji(cluster) => self.resolver.resolve_cluster(primary, &cluster),
-                FallbackKey::Text(cluster) => self.resolver.resolve_text_cluster(primary, &cluster),
-            })
-            .as_ref()
+        let key = (face, scalar);
+        if !self.choices.contains_key(&key) {
+            const BYTES: usize = 2 * 1024 * 1024;
+            let choice = self.resolver.resolve(primary, scalar);
+            let charge = 128
+                + choice
+                    .as_ref()
+                    .map_or(0, |d| d.path.capacity() + d.postscript_name.capacity());
+            if charge > BYTES {
+                return None;
+            }
+            if self.choices.len() == 8192 || self.bytes + charge > BYTES {
+                self.choices.clear();
+                self.bytes = 0;
+            }
+            self.choices.insert(key, choice);
+            self.bytes += charge;
+        }
+        self.choices[&key].as_ref()
     }
 }
 #[cfg(test)]
@@ -417,7 +422,6 @@ pub struct AsyncFontFallback {
     worker: Option<std::sync::mpsc::Sender<(u16, String, FallbackKey)>>,
     ready: Option<std::sync::mpsc::Receiver<(u16, FallbackKey, Option<FontDescriptor>)>>,
     pending: std::collections::HashSet<(u16, FallbackKey)>,
-    failed: std::collections::HashSet<(u16, FallbackKey)>,
 }
 impl AsyncFontFallback {
     /// Supplies an alternate cascade service without starting it before the first miss.
@@ -431,7 +435,7 @@ impl AsyncFontFallback {
     pub fn request(&mut self, face: u16, name: &str, scalar: char) {
         self.request_key(face, name, FallbackKey::Scalar(scalar));
     }
-    /// Enqueues one complete emoji presentation sequence, including cached failures.
+    /// Enqueues one complete emoji presentation sequence.
     pub fn request_cluster(&mut self, face: u16, name: &str, cluster: &str) {
         self.request_key(face, name, FallbackKey::Emoji(cluster.into()));
     }
@@ -440,29 +444,32 @@ impl AsyncFontFallback {
         self.request_key(face, name, FallbackKey::Text(cluster.into()));
     }
     fn request_key(&mut self, face: u16, name: &str, key: FallbackKey) {
-        if self.failed.contains(&(face, key.clone())) || !self.pending.insert((face, key.clone())) {
+        const IN_FLIGHT: usize = 128;
+        const CLUSTER_BYTES: usize = 8 * 1024;
+        if self.pending.len() == IN_FLIGHT
+            || matches!(&key, FallbackKey::Emoji(s) | FallbackKey::Text(s) if s.len() > CLUSTER_BYTES)
+            || !self.pending.insert((face, key.clone()))
+        {
             return;
         }
         if self.worker.is_none() {
             let (tx, rx) = std::sync::mpsc::channel::<(u16, String, FallbackKey)>();
             let (results, ready) = std::sync::mpsc::channel();
-            let resolver = self
+            let mut resolver = self
                 .resolver
                 .take()
                 .unwrap_or_else(|| Box::new(SystemFontFallback));
             match std::thread::Builder::new()
                 .name("font-cascade".into())
                 .spawn(move || {
-                    let mut cache = FallbackCache::new(resolver);
                     while let Ok((face, name, key)) = rx.recv() {
-                        if results
-                            .send((
-                                face,
-                                key.clone(),
-                                cache.resolve_key(face, &name, key.clone()).cloned(),
-                            ))
-                            .is_err()
-                        {
+                        // The renderer owns both positive and negative choices.
+                        let result = match &key {
+                            FallbackKey::Scalar(c) => resolver.resolve(&name, *c),
+                            FallbackKey::Emoji(s) => resolver.resolve_cluster(&name, s),
+                            FallbackKey::Text(s) => resolver.resolve_text_cluster(&name, s),
+                        };
+                        if results.send((face, key, result)).is_err() {
                             break;
                         }
                     }
@@ -473,7 +480,6 @@ impl AsyncFontFallback {
                 }
                 Err(_) => {
                     self.pending.remove(&(face, key.clone()));
-                    self.failed.insert((face, key.clone()));
                     return;
                 }
             }
@@ -484,10 +490,9 @@ impl AsyncFontFallback {
             .is_none_or(|tx| tx.send((face, name.into(), key.clone())).is_err())
         {
             self.pending.remove(&(face, key.clone()));
-            self.failed.insert((face, key.clone()));
         }
     }
-    /// Takes completed selections without waiting. Unavailable results are cached too.
+    /// Takes completed selections, including misses, without waiting.
     pub fn poll(&mut self) -> Vec<(u16, FallbackKey, Option<FontDescriptor>)> {
         let mut results = Vec::new();
         let mut disconnected = false;
@@ -496,9 +501,6 @@ impl AsyncFontFallback {
                 match rx.try_recv() {
                     Ok(result) => {
                         self.pending.remove(&(result.0, result.1.clone()));
-                        if result.2.is_none() {
-                            self.failed.insert((result.0, result.1.clone()));
-                        }
                         results.push(result);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -511,7 +513,6 @@ impl AsyncFontFallback {
         }
         if disconnected {
             for (face, scalar) in self.pending.drain() {
-                self.failed.insert((face, scalar.clone()));
                 results.push((face, scalar, None));
             }
             self.worker = None;
@@ -546,7 +547,6 @@ impl std::fmt::Debug for AsyncFontFallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AsyncFontFallback")
             .field("pending", &self.pending)
-            .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
 }

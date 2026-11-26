@@ -84,18 +84,30 @@ impl<'a> MatchPath<'a> {
 }
 
 fn note_pattern(pattern: &str) {
-    static NOTED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-    if (pattern.contains(['{', '[']) || pattern.contains("**"))
-        && NOTED
-            .get_or_init(Mutex::default)
-            .lock()
-            .expect("pattern notes")
-            .insert(pattern.to_owned())
-    {
+    if (pattern.contains(['{', '[']) || pattern.contains("**")) && first_pattern_note(pattern) {
         eprintln!(
             "File pattern {pattern:?}: brackets and braces are literal; consecutive stars act as one '*'."
         );
     }
+}
+
+fn first_pattern_note(pattern: &str) -> bool {
+    use std::hash::{Hash as _, Hasher as _};
+    static NOTED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    let mut hash = std::hash::DefaultHasher::new();
+    pattern.hash(&mut hash);
+    let mut noted = NOTED
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("pattern notes");
+    let key = hash.finish();
+    if noted.contains(&key) {
+        return false;
+    }
+    if noted.len() == 1024 {
+        noted.clear();
+    }
+    noted.insert(key)
 }
 
 impl Patterns {

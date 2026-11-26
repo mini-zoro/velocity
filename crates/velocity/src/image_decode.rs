@@ -6,6 +6,7 @@ const MAX_SIDE: u32 = 8192;
 const MAX_PIXELS: u32 = 16 * 1024 * 1024;
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_TEXTURE: u32 = 2048;
+pub(crate) const MAX_DECODED_BYTES: usize = (MAX_TEXTURE * MAX_TEXTURE * 4) as usize;
 
 pub(crate) const HELPER: &str = "--internal-decode-image";
 pub(crate) const WEBP_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/images/preview.webp");
@@ -267,11 +268,11 @@ pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
         .arg(HELPER)
         .arg(path)
         .stdin(std::process::Stdio::null());
-    let bytes = crate::codec_process::bounded_reply(
+    let mut bytes = crate::codec_process::bounded_reply(
         &mut command,
         cancelled,
         std::time::Duration::from_secs(2),
-        16 + (MAX_TEXTURE * MAX_TEXTURE * 4) as usize,
+        16 + MAX_DECODED_BYTES,
     )?;
     let header = bytes.first_chunk::<16>()?;
     let n = |i: usize| u32::from_le_bytes(header[i..i + 4].try_into().expect("dimension"));
@@ -283,9 +284,12 @@ pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
     {
         return None;
     }
+    // Reuse the reply allocation instead of copying a full second bitmap.
+    bytes.copy_within(16.., 0);
+    bytes.truncate(bytes.len() - 16);
     Some(Pixels {
         source: (w, h),
-        image: image::RgbaImage::from_raw(tw, th, bytes[16..].to_vec())?,
+        image: image::RgbaImage::from_raw(tw, th, bytes)?,
     })
 }
 
