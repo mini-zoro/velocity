@@ -18,6 +18,7 @@ highlight-profile = ["vel-highlight/profile", "vel-syntax/matcher-profile"]
 vel-mailbox = { path = "../vel-mailbox" }
 vel-crash = { path = "../vel-crash" }
 vel-packages = { path = "../vel-packages" }
+vel-update = { path = "../vel-update" }
 vel-vintage = { path = "../vel-vintage" }
 vel-diff = { path = "../vel-diff" }
 vel-git = { path = "../vel-git" }

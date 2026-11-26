@@ -79,6 +79,8 @@ mod tab_drag;
 mod tab_rename;
 #[path = "app_terminal.rs"]
 mod terminal;
+#[path = "app_updates.rs"]
+mod update_ui;
 #[cfg(test)]
 #[path = "app_window_close_tests.rs"]
 mod window_close_tests;
@@ -290,6 +292,7 @@ pub struct App {
     sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     session_id: u64,
     session_due: Option<Instant>,
+    update_revision: u64,
     restored_windows: Vec<(vel_session::Window, u64)>,
     waiters: Vec<crate::instance::Waiter>,
     cli_commands: std::collections::VecDeque<PendingCliCommand>,
@@ -435,6 +438,7 @@ impl App {
         let startup_services_pending =
             workspace.startup_services_pending() || sessions.borrow().startup_writer_pending();
         Self {
+            update_revision: 0,
             macro_origin: None,
             opened_settings: Vec::new(),
             opened_preferences: Vec::new(),
@@ -838,7 +842,7 @@ impl App {
         self.checkpoint_reason(quitting, false)
     }
     fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
-        if self.settings_window {
+        if self.settings_window || self.update_starting() {
             return Ok(());
         }
         self.receive_file_renames();
@@ -959,13 +963,14 @@ impl App {
                 tab.editor.cancel_composition();
             }
         }
-        if self.hot_exit().retain(true) {
+        if self.hot_exit().retain(true) || self.updating_on_quit() {
             if let Err(error) = self.save_workspace_checkpoint() {
-                if self
-                    .workspace
-                    .tabs
-                    .iter()
-                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
+                if self.updating_on_quit()
+                    || self
+                        .workspace
+                        .tabs
+                        .iter()
+                        .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
                 {
                     self.data_loss_error(window, UiText::tr_fmt(
                         "Could not save Hot Exit session: {detail}. Save documents or repair the data directory before quitting.",
@@ -1115,9 +1120,19 @@ impl App {
             // or focus change takes effect before selecting the next destination.
             w.request_frame();
         }
+        let mut restored_ok = true;
         for (window, id) in std::mem::take(&mut self.restored_windows) {
             if let Err(e) = self.open_native_window(w, Some(window), Some(id), false) {
                 self.workspace.messages.push(e);
+                restored_ok = false;
+            }
+        }
+        if let Some(updates) = self.sessions.borrow_mut().updates.as_mut() {
+            if !restored_ok {
+                updates.fail_startup();
+            }
+            if self.startup_done {
+                updates.confirm_startup();
             }
         }
         let routed = self
@@ -1593,6 +1608,9 @@ impl App {
         self.workspace.sync_shared();
     }
     fn command_enabled_args(&self, name: &str, args: &Value) -> bool {
+        if let Some(enabled) = self.update_command_enabled(name, args) {
+            return enabled;
+        }
         let context_tab = args["_context_sheet"]
             .as_u64()
             .map(|sheet| self.workspace.sheet_index(sheet));
@@ -5060,6 +5078,7 @@ impl App {
         {
             scene.layers.push(lifted_tab);
         }
+        self.panels.update_notice = self.update_label();
         self.panels.paint(&self.workspace, &mut scene);
         self.paint_accessibility_focus(&mut scene);
         self.capture_format_hits(&scene);
@@ -5784,6 +5803,9 @@ impl AppHandler for App {
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {
+            if self.update_ui_command(w, name, args) {
+                return;
+            }
             if w.is_closed() {
                 // ST4 4131, https://www.sublimetext.com/download: File menu
                 // recents remain available when the last macOS window closes.
@@ -5888,6 +5910,9 @@ impl AppHandler for App {
                 if let Err(error) = self.poll_workbench(w) {
                     self.named_error(Some(w), &error);
                 }
+                if self.poll_updates(w) {
+                    w.request_frame();
+                }
             }
             self.builds.poll(&mut self.panels);
             #[cfg(windows)]
@@ -5907,6 +5932,7 @@ impl AppHandler for App {
                 self.named_error(Some(w), &error);
             }
         }
+        self.poll_updates(w);
     }
     fn memory_guard_document_bytes(&self) -> Option<u64> {
         (self.options.mode == Mode::Interactive).then(|| self.loaded_document_bytes())
@@ -6116,6 +6142,17 @@ impl AppHandler for App {
         self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
+        if event.kind == MouseKind::Down
+            && event.button == 0
+            && self.panels.overlay.is_none()
+            && self
+                .panels
+                .update_hit
+                .is_some_and(|rect| vel_ui::contains(rect, event.position))
+            && self.open_update_actions(w)
+        {
+            return;
+        }
         self.handle_mouse_event(Some(w), event);
     }
     fn on_pointer_cancel(&mut self, w: &WindowHandle) {
@@ -6275,6 +6312,9 @@ impl AppHandler for App {
                 } else {
                     changed |= self.receive_preference_updates();
                     self.poll_workbench(w)?;
+                    if ctx.reason == FrameReason::Timer {
+                        changed |= self.poll_updates(w);
+                    }
                 }
             }
             if focus_changed {
@@ -6680,14 +6720,34 @@ impl AppHandler for App {
             .borrow_mut()
             .cancel_window_tab_drag(self.session_id);
         if !self.finish_tab_rename(Some(w)) {
+            self.cancel_update_restart();
             return false;
         }
         self.finish_settings_input();
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
-        self.prepare_quit(Some(w))
+        let approved = self.prepare_quit(Some(w));
+        if !approved {
+            self.cancel_update_restart();
+        }
+        approved
+    }
+    fn on_quit_approved(&mut self, w: &WindowHandle) -> bool {
+        let proceed = self
+            .sessions
+            .borrow_mut()
+            .updates
+            .as_mut()
+            .is_none_or(crate::updates::Updates::quit_approved);
+        if !proceed {
+            w.request_frame();
+        }
+        proceed
     }
     fn on_session_ending(&mut self, _window: &WindowHandle) {
+        if let Some(updates) = self.sessions.borrow_mut().updates.as_mut() {
+            updates.ending_session();
+        }
         if self.settings_window {
             return;
         }
@@ -6781,6 +6841,13 @@ impl AppHandler for App {
         })
     }
     fn cursor_at(&self, point: Point) -> CursorShape {
+        if self
+            .panels
+            .update_hit
+            .is_some_and(|rect| vel_ui::contains(rect, point))
+        {
+            return CursorShape::Arrow;
+        }
         self.pointer_cursor(point)
     }
 }
@@ -6928,6 +6995,8 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
     let mut rows = Vec::new();
     for (caption, command, shortcut) in [
         ("About Velocity", "native_about", None),
+        ("Check for Updates…", crate::updates::CHECK, None),
+        ("Update Actions…", "", None),
         ("-", "", None),
         ("Settings…", "", None),
         ("-", "", None),
@@ -6941,6 +7010,12 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
     ] {
         match caption {
             "Settings…" => rows.extend(settings.iter().cloned()),
+            "Update Actions…" => rows.push(MenuEntry {
+                id: crate::updates::ACTIONS.into(),
+                caption: tr.tr(caption).into_owned(),
+                children: crate::updates::menu(tr, None),
+                ..Default::default()
+            }),
             _ => rows.push(MenuEntry {
                 caption: tr.tr(caption).into_owned(),
                 command: (!command.is_empty()).then(|| command.into()),

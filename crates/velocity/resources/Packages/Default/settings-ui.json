@@ -120,6 +120,7 @@
   "close_windows_when_empty": {"group": "files", "control": "bool", "name": "Close Empty Windows", "description": "Close a window when you close its last document, unless it has folders or a saved project."},
   "hot_exit": {"group": "files", "control": "enum", "choices": ["always","only_on_quit","disabled",true,false], "labels": ["Always","Only When Quitting","Never",null,null], "name": "Hot Exit", "description": "Choose when to keep unsaved edits for the next session."},
   "remember_open_files": {"group": "files", "control": "bool", "name": "Remember Open Files", "description": "Restore open files from the previous session."},
+  "update_check": {"group": "general", "control": "bool", "name": "Automatically Check for Updates", "description": "Check GitHub for new stable Velocity releases once a day. Manual checks are always available."},
   "set_unsaved_view_name": {"group": "files", "control": "bool", "name": "Name Untitled Tabs from Text", "description": "Use the first line of text to name untitled tabs."},
   "open_files_in_new_window": {"group": "files", "control": "enum", "choices": ["never","finder_only","always",true,false], "labels": ["Never","Only from {file_manager}","Always",null,null], "name": "Open Files in New Window", "description": "Choose when opening a file creates a new window."},
   "new_window_settings": {"group": "files", "control": "json_only", "name": "New Window Settings", "description": "Override preferences for windows created with New Window."},

@@ -160,6 +160,7 @@
   "binary_file_patterns": ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.ttf", "*.tga", "*.dds", "*.ico", "*.eot", "*.pdf", "*.swf", "*.jar", "*.zip"],
   "hot_exit": "always",
   "remember_open_files": true,
+  "update_check": true,
   "close_windows_when_empty": true,
   "close_deleted_files": false,
   "set_unsaved_view_name": true,

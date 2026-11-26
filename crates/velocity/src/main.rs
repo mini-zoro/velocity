@@ -85,6 +85,7 @@ mod theme_tests;
 mod theme_ui;
 mod ui_language;
 mod ui_text;
+mod updates;
 #[cfg(test)]
 mod user_grammar_tests;
 mod view;
@@ -117,6 +118,13 @@ use vel_text::Text;
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let argument = args.next();
+    if argument.as_deref() == Some(std::ffi::OsStr::new(vel_update::HELPER)) {
+        if let Err(error) = vel_update::apply_update(args) {
+            eprintln!("velocity: update failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if argument.as_deref() == Some(std::ffi::OsStr::new(remote_image::REMOTE_HELPER)) {
         if args.next().is_some()
             || remote_image::helper(std::io::stdin().lock(), std::io::stdout().lock()).is_none()
@@ -247,6 +255,14 @@ impl vel_platform::AppHandler for NativeForwarder {
     }
 }
 fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(), String> {
+    let update_ticket = std::env::var_os(vel_update::STARTUP).map(std::path::PathBuf::from);
+    #[cfg(any(unix, all(windows, not(test))))]
+    let update_recovered = std::env::var_os(vel_update::RECOVERY).is_some();
+    // SAFETY: this is still startup, before any application threads or children.
+    unsafe {
+        std::env::remove_var(vel_update::STARTUP);
+        std::env::remove_var(vel_update::RECOVERY);
+    }
     // Developer tool: offscreen PNGs of real UI states; never creates a window.
     #[cfg(target_os = "macos")]
     {
@@ -305,7 +321,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         None
     };
     #[cfg(unix)]
-    let gui_process = inherited.is_some();
+    let gui_process = inherited.is_some() || update_ticket.is_some() || update_recovered;
     #[cfg(windows)]
     let gui_process = true;
     #[cfg(unix)]
@@ -465,6 +481,9 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     let restore_safety = if options.mode == Mode::Interactive
         && !options.safe_mode
         && !options.forward_native_opens
+        // A failed trial must not leave a restore guard that quarantines the
+        // checkpoint when the previous version restarts.
+        && update_ticket.is_none()
         && let Some(data) = &data_dir
     {
         safe_mode::protect(
@@ -616,6 +635,17 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             } else {
                 session::Sessions::new(session_data)
             }));
+            if options.mode == Mode::Interactive
+                && instance.is_some()
+                && let Some(data) = session_data
+            {
+                sessions.borrow_mut().updates = Some(updates::Updates::new(
+                    data.to_owned(),
+                    entered,
+                    update_ticket,
+                    update_recovered,
+                ));
+            }
             let mut restored_ui = None;
             let restored = sessions.borrow().restored.clone();
             let reserved = sessions.borrow_mut().reserve_recovered();
@@ -674,6 +704,9 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             if let Some(window) = &first {
                 if let Err(e) = workspace.restore_window(window, &restored.documents) {
                     workspace.messages.push(format!("Session restore: {e}"));
+                    if let Some(updates) = sessions.borrow_mut().updates.as_mut() {
+                        updates.fail_startup();
+                    }
                 } else {
                     restored_ui = Some(window.clone());
                 }

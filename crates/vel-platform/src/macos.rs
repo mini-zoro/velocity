@@ -1938,16 +1938,27 @@ define_class!(
             if lifecycle::hosts_busy() {
                 return termination_reply(false);
             }
-            let approved = lifecycle::live_hosts().iter().all(|host| {
+            let hosts = lifecycle::live_hosts();
+            let approved = hosts.iter().all(|host| {
                 host.app.try_borrow_mut().is_ok_and(|mut slot| {
                     slot.as_mut().is_none_or(|app| app.on_quit_requested(&host.handle()))
                 })
             });
+            let mut proceed = approved;
+            if approved {
+                if let Some(host) = hosts.first() {
+                    if let Some(app) = host.app.borrow_mut().as_mut() {
+                        proceed = app.on_quit_approved(&host.handle());
+                    }
+                } else if let Some(template) = lifecycle::template() {
+                    lifecycle::with_template(&template, |app, w| proceed = app.on_quit_approved(w));
+                }
+            }
             lifecycle::schedule();
             // AppKit completes Quit and system logout only if the delegate
             // approves. Do not stop the run loop and then tell loginwindow no.
             // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/AppArchitecture/Tasks/GracefulAppTermination.html
-            termination_reply(approved)
+            termination_reply(proceed)
         }
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
@@ -1964,7 +1975,11 @@ define_class!(
         }
         #[unsafe(method(velocitySessionEnding:))]
         fn session_ending(&self, _notification: &NSNotification) {
-            for host in lifecycle::live_hosts() {
+            let hosts = lifecycle::live_hosts();
+            if hosts.is_empty() && let Some(template) = lifecycle::template() {
+                lifecycle::with_template(&template, |app, w| app.on_session_ending(w));
+            }
+            for host in hosts {
                 if let Ok(mut slot) = host.app.try_borrow_mut()
                     && let Some(app) = slot.as_mut()
                 {
@@ -2024,7 +2039,7 @@ define_class!(
                 return false.into();
             };
             self.menu_host().is_some_and(|host| {
-                if host.stopped.get() {
+                if host.stopped.get() && !matches!(command.name.as_str(), "check_for_updates" | "update_action") {
                     windowless_command(&command.name)
                 } else {
                     host.app.try_borrow().ok().is_some_and(|slot| {
@@ -2598,6 +2613,8 @@ fn windowless_command(name: &str) -> bool {
             | "edit_settings"
             | "open_url"
             | "open_crash_reports"
+            | "check_for_updates"
+            | "update_action"
             | "prompt_open_file"
             | "prompt_open_folder_in_new_window"
             | "open_recent_file"
