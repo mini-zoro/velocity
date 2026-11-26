@@ -754,9 +754,9 @@ impl Runtime {
         let mut retain = self.windows.borrow().is_empty();
         for host in closing.into_iter().rev() {
             if retain {
-                // Keep the last handler for its profile pipe and reopen callback.
-                // Its renderer may still reference this HWND; leave it hidden and
-                // destroy it only after releasing the handler.
+                // Keep the last handler for its profile pipe and reopen callback,
+                // but release its rendering resources while the HWND is live.
+                host.with_app(|app, _| app.on_retire_window());
                 retain = false;
                 host.visible.set(false);
                 host.ready.set(false);

@@ -2,15 +2,15 @@
 use crate::{
     atlas::*,
     cache::*,
-    font::{Fonts, rgba},
+    font::{FontStore, Fonts},
     scene::*,
     timing::{MAX_MEASURED_FRAMES, Queries},
 };
 use bytemuck::{Pod, Zeroable};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,6 +18,13 @@ use vel_platform::Rect;
 #[cfg(target_os = "macos")]
 use vel_platform::WindowHandle;
 use wgpu::util::DeviceExt;
+
+#[path = "gpu_context.rs"]
+mod context;
+#[path = "gpu_atlas.rs"]
+mod shared_atlas;
+use context::{CreationTimes, GpuContext};
+use shared_atlas::GpuAtlas;
 
 #[cfg(target_os = "macos")]
 type NativeWindow = WindowHandle;
@@ -52,9 +59,6 @@ const ATLAS_SIDE: u32 = 1024;
 const MAX_PAGES: usize = 8;
 const MIN_INSTANCE_BYTES: u64 = 1024 * 1024;
 const INSTANCE_SHRINK_FRAMES: u32 = 120;
-// CPU rasters are placement metadata, not a second copy of atlas pixels.
-const RASTER_BYTES: usize = 1024 * 1024;
-const RASTER_KEYS: usize = RASTER_BYTES / (4 * (size_of::<(GlyphKey, Raster)>() + 1));
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Instance {
@@ -64,18 +68,6 @@ struct Instance {
     clip: [f32; 4],
     params: [f32; 4],
     meta: [f32; 4],
-}
-#[derive(Clone, Copy, Debug)]
-struct Raster {
-    left: i32,
-    top: i32,
-    color: bool,
-}
-#[derive(Debug)]
-struct AtlasTexture {
-    bind: wgpu::BindGroup,
-    texture: wgpu::Texture,
-    pages: u32,
 }
 /// CPU presentation boundaries for one successful frame.
 #[derive(Clone, Debug)]
@@ -95,38 +87,30 @@ pub struct FrameTimes {
     /// Present-call duration.
     pub present_call_ms: f64,
 }
-/// Native renderer, reusable scene buffers, lazy array atlas and layout cache.
+/// Native renderer with its own surface, viewport and scene buffers.
 #[derive(Debug)]
 pub struct Renderer {
-    /// None for an offscreen renderer, which never presents.
+    // Drop the surface before releasing its native window, and the per-window
+    // resources before releasing the last strong reference to the device.
     surface: Option<wgpu::Surface<'static>>,
-    instance: wgpu::Instance,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
     window: Option<NativeWindow>,
+    config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    bind_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
     screen: wgpu::Buffer,
-    atlas: PagedAtlas,
-    atlas_texture: Option<AtlasTexture>,
-    rasters: HashMap<GlyphKey, Raster>,
-    blanks: HashSet<GlyphKey>,
+    screen_bind: wgpu::BindGroup,
+    prepared_generation: Option<u64>,
     instances: wgpu::Buffer,
     capacity: u64,
     small_frames: u32,
     small_peak: u64,
     data: Vec<Instance>,
     batches: BatchPlan,
-    layouts: LineLayoutCache,
     queries: Option<Queries>,
     minimap_queries: Option<Queries>,
     minimap_batches: std::ops::Range<usize>,
     offscreen: Option<wgpu::Texture>,
     background: Color,
-    cache: Option<wgpu::PipelineCache>,
-    cache_path: Option<PathBuf>,
+    gpu: Rc<GpuContext>,
     /// Adapter, feature support, pipeline timings and cache status.
     pub info: Value,
 }
@@ -140,72 +124,66 @@ impl Renderer {
         cache_dir: &Path,
         mut phase: impl FnMut(&'static str),
     ) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        phase("wgpu_instance");
-        // SAFETY: this is our live CAMetalLayer. `window` is retained in Renderer
-        // until after surface drops; all use and destruction occur on the main thread.
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
-                window.metal_layer_ptr(),
-            ))
-        }
-        .map_err(|e| e.to_string())?;
-        phase("surface_created");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .map_err(|e| e.to_string())?;
-        phase("adapter");
-        let device = DeviceParts::request(&adapter, timestamps)?;
-        phase("device_queue");
-        let capabilities = surface.get_capabilities(&adapter);
-        if !capabilities
-            .present_modes
-            .contains(&wgpu::PresentMode::Fifo)
-            || !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
-        {
-            return Err(
-                "Metal surface must support Fifo and COPY_DST for first-frame presentation".into(),
-            );
-        }
-        let size = window.content_size();
-        let scale = window.scale_factor();
-        let mut config = surface
-            .get_default_config(
-                &adapter,
-                (size.width * scale).round().max(1.) as u32,
-                (size.height * scale).round().max(1.) as u32,
-            )
-            .ok_or("no surface configuration")?;
-        config.present_mode = wgpu::PresentMode::Fifo;
-        // wgpu's Metal backend uses latency + 1 drawables. With only two,
-        // scanout plus one queued present can stall a display-link frame in acquire.
-        config.desired_maximum_frame_latency = 2;
-        config.usage |= wgpu::TextureUsages::COPY_DST;
-        if capabilities
-            .formats
-            .contains(&wgpu::TextureFormat::Bgra8Unorm)
-        {
-            config.format = wgpu::TextureFormat::Bgra8Unorm;
-        }
-        surface.configure(&device.device, &config);
-        window.drawable_surface_configured();
-        phase("surface_configured");
-        Self::assemble(
-            instance,
-            Some(surface),
-            Some(window),
-            &adapter,
-            device,
+        let (gpu, surface, config, times) = GpuContext::for_surface(
+            |instance| {
+                // SAFETY: this is our live CAMetalLayer. Renderer retains the window
+                // until after the surface drops; all use is on the main thread.
+                unsafe {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                        window.metal_layer_ptr(),
+                    ))
+                }
+                .map_err(|e| e.to_string())
+            },
+            |surface, adapter, device| {
+                let capabilities = surface.get_capabilities(adapter);
+                if !capabilities
+                    .present_modes
+                    .contains(&wgpu::PresentMode::Fifo)
+                    || !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
+                {
+                    return Err(
+                        "Metal surface must support Fifo and COPY_DST for first-frame presentation"
+                            .into(),
+                    );
+                }
+                let size = window.content_size();
+                let scale = window.scale_factor();
+                let mut config = surface
+                    .get_default_config(
+                        adapter,
+                        (size.width * scale).round().max(1.) as u32,
+                        (size.height * scale).round().max(1.) as u32,
+                    )
+                    .ok_or("no surface configuration")?;
+                config.present_mode = wgpu::PresentMode::Fifo;
+                // Metal uses latency + 1 drawables. With only two, scanout plus
+                // one queued present can stall a display-link frame in acquire.
+                config.desired_maximum_frame_latency = 2;
+                config.usage |= wgpu::TextureUsages::COPY_DST;
+                if capabilities
+                    .formats
+                    .contains(&wgpu::TextureFormat::Bgra8Unorm)
+                {
+                    config.format = wgpu::TextureFormat::Bgra8Unorm;
+                }
+                surface.configure(device, &config);
+                window.drawable_surface_configured();
+                Ok(config)
+            },
+            timestamps,
+            cache_dir,
+            |_| Ok(()),
+            &mut phase,
+        )?;
+        Ok(Self::assemble(
+            gpu,
+            Some((surface, window)),
             config,
-            Some(cache_dir),
+            timestamps,
+            times,
             phase,
-        )
+        ))
     }
     /// Creates a DX12 renderer from an existing native window and physical pixel size.
     ///
@@ -223,66 +201,45 @@ impl Renderer {
         adapter_selected: impl FnOnce(&wgpu::AdapterInfo) -> Result<(), String>,
     ) -> Result<Self, String> {
         let window = NativeWindow::new(hwnd as isize).ok_or("null window handle")?;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: BACKEND,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        phase("wgpu_instance");
-        // SAFETY: from_hwnd requires the caller to keep the window live.
-        let surface = unsafe { win32_surface(&instance, window) }?;
-        phase("surface_created");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            // wgpu ranks CPU adapters behind hardware, but leaves WARP eligible.
-            ..Default::default()
-        }))
-        .map_err(|e| format!("DX12 adapter (hardware or software): {e}"))?;
-        adapter_selected(&adapter.get_info())?;
-        phase("adapter");
-        let device = DeviceParts::request(&adapter, timestamps)?;
-        phase("device_queue");
-        let capabilities = surface.get_capabilities(&adapter);
-        let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or("no DX12 surface configuration")?;
-        if !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
-            || !capabilities
-                .formats
-                .contains(&wgpu::TextureFormat::Bgra8Unorm)
-        {
-            return Err("DX12 surface must support BGRA8 and COPY_DST".into());
-        }
-        config.present_mode = wgpu::PresentMode::Fifo;
-        config.usage |= wgpu::TextureUsages::COPY_DST;
-        config.format = wgpu::TextureFormat::Bgra8Unorm;
-        surface.configure(&device.device, &config);
-        phase("surface_configured");
-        Self::assemble(
-            instance,
-            Some(surface),
-            Some(window),
-            &adapter,
-            device,
+        let (gpu, surface, config, times) = GpuContext::for_surface(
+            // SAFETY: from_hwnd requires the caller to keep the window live.
+            |instance| unsafe { win32_surface(instance, window) },
+            |surface, adapter, device| {
+                let capabilities = surface.get_capabilities(adapter);
+                let mut config = surface
+                    .get_default_config(adapter, width.max(1), height.max(1))
+                    .ok_or("no DX12 surface configuration")?;
+                if !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
+                    || !capabilities
+                        .formats
+                        .contains(&wgpu::TextureFormat::Bgra8Unorm)
+                {
+                    return Err("DX12 surface must support BGRA8 and COPY_DST".into());
+                }
+                config.present_mode = wgpu::PresentMode::Fifo;
+                config.usage |= wgpu::TextureUsages::COPY_DST;
+                config.format = wgpu::TextureFormat::Bgra8Unorm;
+                surface.configure(device, &config);
+                Ok(config)
+            },
+            timestamps,
+            cache_dir,
+            adapter_selected,
+            &mut phase,
+        )?;
+        Ok(Self::assemble(
+            gpu,
+            Some((surface, window)),
             config,
-            Some(cache_dir),
+            timestamps,
+            times,
             phase,
-        )
+        ))
     }
     /// Creates a windowless renderer for developer tools. It never creates a surface,
     /// window or application object; frames are read back with [`Renderer::render_rgba`].
     pub fn offscreen(width: u32, height: u32) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: BACKEND,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .map_err(|e| e.to_string())?;
-        let device = DeviceParts::request(&adapter, false)?;
+        let (gpu, times) = GpuContext::offscreen()?;
         // Same format as the presented surface, so pixels match a window.
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
@@ -295,253 +252,161 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: Vec::new(),
         };
-        Self::assemble(instance, None, None, &adapter, device, config, None, |_| {})
+        Ok(Self::assemble(gpu, None, config, false, times, |_| {}))
     }
-    #[allow(clippy::too_many_arguments)]
     fn assemble(
-        instance: wgpu::Instance,
-        surface: Option<wgpu::Surface<'static>>,
-        window: Option<NativeWindow>,
-        adapter: &wgpu::Adapter,
-        parts: DeviceParts,
+        gpu: Rc<GpuContext>,
+        target: Option<(wgpu::Surface<'static>, NativeWindow)>,
         config: wgpu::SurfaceConfiguration,
-        cache_dir: Option<&Path>,
+        timestamps: bool,
+        mut times: CreationTimes,
         mut phase: impl FnMut(&'static str),
-    ) -> Result<Self, String> {
-        let DeviceParts {
-            device,
-            queue,
-            has_queries,
-            has_cache,
-            device_ms,
-        } = parts;
-        let info = adapter.get_info();
-        let cache_path = cache_dir.filter(|_| has_cache).map(|cache_dir| {
-            cache_dir.join(format!(
-                "{}.bin",
-                wgpu::util::pipeline_cache_key(&info).unwrap_or_else(|| if cfg!(windows) {
-                    "dx12"
-                } else {
-                    "metal"
-                }
-                .into())
-            ))
+    ) -> Self {
+        let screen = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("physical viewport"),
+                contents: bytemuck::cast_slice(&[
+                    config.width as f32,
+                    config.height as f32,
+                    0.,
+                    0.,
+                ]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let screen_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("window viewport"),
+            layout: &gpu.screen_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen.as_entire_binding(),
+            }],
         });
-        let cache_bytes = cache_path.as_ref().and_then(|p| {
-            std::fs::metadata(p)
-                .ok()
-                .filter(|m| m.is_file() && m.len() <= 64 * 1024 * 1024)
-                .and_then(|_| std::fs::read(p).ok())
-        });
-        let cache = if has_cache {
-            // SAFETY: the cache directory is app-owned; only get_data output is
-            // written here. wgpu validates adapter/version and fallback rejects stale data.
-            Some(unsafe {
-                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-                    label: Some("Velocity persisted PSO"),
-                    data: cache_bytes.as_deref(),
-                    fallback: true,
-                })
-            })
-        } else {
-            None
-        };
-        let screen = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("physical viewport"),
-            contents: bytemuck::cast_slice(&[config.width as f32, config.height as f32, 0., 0.]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let texture = make_texture(&device, 1);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("atlas linear clamp"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("atlas array + viewport"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let bind = make_bind(&device, &bind_layout, &texture, &sampler, &screen);
-        let start = Instant::now();
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Velocity instanced primitives"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("quads.wgsl").into()),
-        });
-        let shader_ms = ms(start.elapsed());
-        phase("shader_module");
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let attrs = wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4];
-        let start = Instant::now();
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Velocity editor primitives"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Instance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attrs,
-                })],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: cache.as_ref(),
-        });
-        let pipeline_ms = ms(start.elapsed());
+        let pipeline = gpu.pipeline(config.format, &mut times);
         phase("pipeline_ready");
         let capacity = MIN_INSTANCE_BYTES;
-        let instances = make_instances(&device, capacity);
-        let queries = has_queries.then(|| Queries::new(&device, &queue));
-        let minimap_queries = has_queries.then(|| Queries::new(&device, &queue));
-        let info = json!({"adapter":info.name,"backend":format!("{:?}",info.backend),"driver":info.driver,"present_mode":"fifo","desired_maximum_frame_latency":config.desired_maximum_frame_latency,"timestamp_query_enabled":has_queries,"pipeline_cache_supported":has_cache,"pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},"pipeline_cache_loaded_bytes":cache_bytes.as_ref().map_or(0,Vec::len),"device_creation_ms":device_ms,"shader_module_ms":shader_ms,"pipeline_creation_ms":pipeline_ms,"surface_format":format!("{:?}",config.format)});
-        Ok(Self {
+        let instances = make_instances(&gpu.device, capacity);
+        let has_queries = timestamps && gpu.has_queries;
+        let queries = has_queries.then(|| Queries::new(&gpu.device, &gpu.queue));
+        let minimap_queries = has_queries.then(|| Queries::new(&gpu.device, &gpu.queue));
+        let adapter = gpu.adapter_info();
+        let has_cache = gpu.has_cache();
+        let info = json!({
+            "adapter":adapter.name,
+            "backend":format!("{:?}",adapter.backend),
+            "driver":adapter.driver,
+            "present_mode":"fifo",
+            "desired_maximum_frame_latency":config.desired_maximum_frame_latency,
+            "timestamp_query_enabled":has_queries,
+            "pipeline_cache_supported":has_cache,
+            "pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},
+            "pipeline_cache_loaded_bytes":gpu.cache_loaded_bytes,
+            "device_creation_ms":times.device_ms,
+            "shader_module_ms":times.shader_ms,
+            "pipeline_creation_ms":times.pipeline_ms,
+            "surface_format":format!("{:?}",config.format)
+        });
+        let (surface, window) = target.unzip();
+        Self {
             surface,
-            instance,
-            device,
-            queue,
-            config,
             window,
+            config,
             pipeline,
-            bind_layout,
-            sampler,
             screen,
-            atlas: PagedAtlas::new(ATLAS_SIDE, MAX_PAGES),
-            atlas_texture: Some(AtlasTexture {
-                bind,
-                texture,
-                pages: 1,
-            }),
-            rasters: HashMap::new(),
-            blanks: HashSet::new(),
+            screen_bind,
+            prepared_generation: None,
             instances,
             capacity,
             small_frames: 0,
             small_peak: 0,
             data: Vec::new(),
             batches: BatchPlan::default(),
-            layouts: LineLayoutCache::new(2048),
             queries,
             minimap_queries,
             minimap_batches: 0..0,
             offscreen: None,
             background: Scene::default().background,
-            cache,
-            cache_path,
+            gpu,
             info,
-        })
+        }
     }
     /// Resizes without stretching; the next frame uses fresh physical geometry.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height)
+        if width == 0
+            || height == 0
+            || (width == self.config.width && height == self.config.height)
+            || self.gpu.check_device().is_err()
         {
             return;
         }
         self.config.width = width;
         self.config.height = height;
         if let Some(surface) = &self.surface {
-            surface.configure(&self.device, &self.config);
+            surface.configure(&self.gpu.device, &self.config);
             #[cfg(target_os = "macos")]
             if let Some(window) = &self.window {
                 window.drawable_surface_configured();
             }
         }
-        self.queue.write_buffer(
+        self.gpu.queue.write_buffer(
             &self.screen,
             0,
             bytemuck::cast_slice(&[width as f32, height as f32, 0., 0.]),
         );
         self.offscreen = None;
     }
-    /// Invalidates glyph/layout identities when the primary font family changes.
+    /// Resets shared atlas placements and drops this renderer's shaped layouts.
     pub fn reset_fonts(&mut self) {
-        self.atlas = PagedAtlas::new(ATLAS_SIDE, MAX_PAGES);
-        self.layouts = LineLayoutCache::new(2048);
-        self.rasters = HashMap::new();
-        self.blanks = HashSet::new();
-        self.offscreen = None;
+        self.gpu.atlas.borrow_mut().reset(false);
+        self.gpu.trim_layouts();
+        self.invalidate_prepared();
     }
-    /// Drops pending-glyph layout results after asynchronous fallback completion.
-    pub fn invalidate_layouts(&mut self) {
-        self.layouts = LineLayoutCache::new(2048);
+    /// A prepared first frame no longer represents this window's font settings.
+    /// Layout entries are keyed by font identity and fallback generation.
+    pub fn invalidate_prepared(&mut self) {
         self.offscreen = None;
     }
     /// Retains only enough instance storage for the latest scene. Under pressure,
     /// also drops the atlas texture; the next actual draw recreates and fills it.
-    pub fn trim_memory(&mut self, pressure: bool) {
+    /// Returns the released shared atlas bytes and this window's prior instance bytes.
+    pub fn trim_memory(&mut self, pressure: bool) -> (u64, u64) {
+        let instance_bytes = self.instance_bytes();
         let required = std::mem::size_of_val(self.data.as_slice()) as u64;
         let capacity = required.next_power_of_two().max(MIN_INSTANCE_BYTES);
-        if capacity < self.capacity {
-            self.instances = make_instances(&self.device, capacity);
+        if capacity < self.capacity && self.gpu.check_device().is_ok() {
+            self.instances = make_instances(&self.gpu.device, capacity);
             self.capacity = capacity;
         }
         self.data
             .shrink_to((self.capacity as usize) / size_of::<Instance>());
         self.batches.shrink();
+        self.gpu.trim_layouts();
         self.small_frames = 0;
         self.small_peak = 0;
-        if pressure {
-            self.reset_fonts();
-            self.atlas_texture = None;
+        let atlas_bytes = if pressure {
+            self.invalidate_prepared();
+            let mut atlas = self.gpu.atlas.borrow_mut();
+            let bytes = atlas.bytes();
+            // The memory guard visits every window; only the first one drops
+            // (and accounts for) the shared texture.
+            if bytes > 0 {
+                atlas.reset(true);
+            }
+            bytes
         } else {
-            self.layouts = LineLayoutCache::new(2048);
-        }
+            0
+        };
         // In-flight commands keep their resources until completion. Reap what
         // has already finished, never wait for a drawable or for the device.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        (atlas_bytes, instance_bytes)
     }
-    /// Allocated atlas texture and GPU/CPU instance bytes, excluding driver overhead.
+    /// Shared atlas texture bytes and this renderer's GPU/CPU instance bytes.
     pub fn memory_cache_bytes(&self) -> (u64, u64) {
-        let pages = self.atlas_texture.as_ref().map_or(0, |atlas| atlas.pages);
-        (
-            u64::from(ATLAS_SIDE).pow(2) * 4 * u64::from(pages),
-            self.capacity + (self.data.capacity() * size_of::<Instance>()) as u64,
-        )
+        (self.gpu.atlas.borrow().bytes(), self.instance_bytes())
+    }
+    fn instance_bytes(&self) -> u64 {
+        self.capacity + (self.data.capacity() * size_of::<Instance>()) as u64
     }
     /// Physical framebuffer dimensions.
     pub fn physical_size(&self) -> [u32; 2] {
@@ -549,188 +414,53 @@ impl Renderer {
     }
     /// Allocation diagnostics (texture storage excludes driver overhead).
     pub fn atlas_info(&self) -> Value {
-        let pages = self.atlas_texture.as_ref().map_or(0, |atlas| atlas.pages);
-        json!({"side":ATLAS_SIDE,"pages":self.atlas.pages(),"allocated_array_layers":pages,"allocated_texture_bytes":self.memory_cache_bytes().0,"glyph_keys":self.atlas.len(),"page_evictions":self.atlas.evictions(),"layout_cache_entries":self.layouts.len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
+        let atlas = self.gpu.atlas.borrow();
+        json!({"side":ATLAS_SIDE,"pages":atlas.atlas.pages(),"allocated_array_layers":atlas.allocated_layers(),"allocated_texture_bytes":atlas.bytes(),"glyph_keys":atlas.atlas.len(),"page_evictions":atlas.atlas.evictions(),"generation":atlas.atlas.generation(),"layout_cache_entries":self.gpu.layouts.borrow().len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
     }
-    fn grow_texture(&mut self, pages: u32) {
-        if self
-            .atlas_texture
-            .as_ref()
-            .is_some_and(|old| pages <= old.pages)
-        {
-            return;
-        }
-        let texture = make_texture(&self.device, pages);
-        if let Some(old) = &self.atlas_texture {
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-            encoder.copy_texture_to_texture(
-                old.texture.as_image_copy(),
-                texture.as_image_copy(),
-                wgpu::Extent3d {
-                    width: ATLAS_SIDE,
-                    height: ATLAS_SIDE,
-                    depth_or_array_layers: old.pages,
-                },
-            );
-            self.queue.submit([encoder.finish()]);
-        }
-        let bind = make_bind(
-            &self.device,
-            &self.bind_layout,
-            &texture,
-            &self.sampler,
-            &self.screen,
-        );
-        self.atlas_texture = Some(AtlasTexture {
-            bind,
-            texture,
-            pages,
-        });
-    }
-    fn glyph(
-        &mut self,
-        fonts: &mut Fonts,
-        key: GlyphKey,
-    ) -> Result<Option<(AtlasEntry, Raster)>, String> {
-        if self.blanks.contains(&key) {
-            return Ok(None);
-        }
-        if let Some(entry) = self.atlas.get(key)
-            && let Some(raster) = self.rasters.get(&key)
-        {
-            return Ok(Some((entry, *raster)));
-        }
-        let Some(image) = fonts.rasterize(key.face, key.id, key.px64 as f32 / 64., key.bucket)
-        else {
-            if self.blanks.len() >= 4096 {
-                self.blanks.clear();
-            }
-            self.blanks.insert(key);
-            return Ok(None);
-        };
-        let raster = Raster {
-            left: image.placement.left,
-            top: image.placement.top,
-            color: image.content == swash::scale::image::Content::Color,
-        };
-        let entry = self.atlas.allocate(
-            key,
-            image.placement.width,
-            image.placement.height,
-            if raster.color {
-                PageKind::Color
-            } else {
-                PageKind::Mask
-            },
-        )?;
-        self.grow_texture(self.atlas.pages().max(1) as u32);
-        // Upload a transparent border even when recycling a page with old pixels.
-        let slot = entry.slot;
-        let width = slot.width + 2;
-        let height = slot.height + 2;
-        let source = rgba(&image);
-        let mut pixels = vec![0; (width * height * 4) as usize];
-        for y in 0..slot.height as usize {
-            let src = y * slot.width as usize * 4;
-            let dst = ((y + 1) * width as usize + 1) * 4;
-            pixels[dst..dst + slot.width as usize * 4]
-                .copy_from_slice(&source[src..src + slot.width as usize * 4]);
-        }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self
-                    .atlas_texture
-                    .as_ref()
-                    .expect("atlas allocated")
-                    .texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: slot.x - 1,
-                    y: slot.y - 1,
-                    z: entry.page,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        if self.rasters.len() >= RASTER_KEYS {
-            self.rasters.clear();
-        }
-        self.rasters.insert(key, raster);
-        Ok(Some((entry, raster)))
-    }
-    fn image_tile(
-        &mut self,
-        image: &Image,
-        tile_x: u32,
-        tile_y: u32,
-    ) -> Result<AtlasEntry, String> {
-        if let Some(entry) = self.atlas.get_image_tile(image.id, tile_x, tile_y) {
-            return Ok(entry);
-        }
-        if image.rgba.len() != image.width as usize * image.height as usize * 4 {
-            return Err("invalid image buffer".into());
-        }
-        let tile_width = (image.width - tile_x).min(ATLAS_SIDE - 2);
-        let tile_height = (image.height - tile_y).min(ATLAS_SIDE - 2);
-        let entry =
-            self.atlas
-                .allocate_image_tile(image.id, tile_x, tile_y, tile_width, tile_height)?;
-        self.grow_texture(self.atlas.pages().max(1) as u32);
-        let width = tile_width + 2;
-        let height = tile_height + 2;
-        let mut pixels = vec![0; (width * height * 4) as usize];
-        for y in 0..tile_height as usize {
-            let src = ((y + tile_y as usize) * image.width as usize + tile_x as usize) * 4;
-            let dst = ((y + 1) * width as usize + 1) * 4;
-            pixels[dst..dst + tile_width as usize * 4]
-                .copy_from_slice(&image.rgba[src..src + tile_width as usize * 4]);
-        }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self
-                    .atlas_texture
-                    .as_ref()
-                    .expect("atlas allocated")
-                    .texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: entry.slot.x - 1,
-                    y: entry.slot.y - 1,
-                    z: entry.page,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        Ok(entry)
-    }
+
     fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
-        self.grow_texture(1);
-        if fonts.poll_fallbacks() {
-            self.layouts = LineLayoutCache::new(2048);
+        self.gpu.check_device()?;
+        fonts.poll_fallbacks();
+        let mut fonts = fonts.for_frame();
+        let gpu = Rc::clone(&self.gpu);
+        let mut atlas = gpu.atlas.borrow_mut();
+        atlas.grow_texture(&gpu, 1);
+        self.prepared_generation = None;
+        let warm = !atlas.atlas.is_empty();
+        let mut result = self.build_instances(scene, &mut fonts, scale, &gpu, &mut atlas);
+        if warm && matches!(&result, Err(error) if error == ALL_PAGES_PINNED) {
+            // A hot atlas can pin fragments across every page even if this
+            // frame fits by itself. Repack once on the existing allocation.
+            self.gpu.check_device()?;
+            atlas.reset(false);
+            result = self.build_instances(scene, &mut fonts, scale, &gpu, &mut atlas);
         }
-        self.atlas.begin_frame();
+        if result.is_err() {
+            self.discard_staged_writes();
+        }
+        result?;
+        self.prepared_generation = Some(atlas.atlas.generation());
+        #[cfg(target_os = "macos")]
+        if fonts.fallback_pending()
+            && let Some(window) = &self.window
+        {
+            window.request_frame_at(Instant::now() + Duration::from_millis(8));
+        }
+        Ok(())
+    }
+
+    fn build_instances(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut FontStore,
+        scale: f32,
+        gpu: &GpuContext,
+        atlas: &mut GpuAtlas,
+    ) -> Result<(), String> {
+        atlas.atlas.begin_frame();
+        let scale_bits = scale.to_bits();
+        let font_set = fonts.layout_identity();
+        let mut layouts = gpu.layouts.borrow_mut();
         self.data.clear();
         self.batches.clear();
         self.minimap_batches = 0..0;
@@ -826,7 +556,8 @@ impl Renderer {
                                 {
                                     continue;
                                 }
-                                let entry = self.image_tile(
+                                let entry = atlas.image_tile(
+                                    gpu,
                                     &r.image,
                                     tx * (ATLAS_SIDE - 2),
                                     ty * (ATLAS_SIDE - 2),
@@ -959,6 +690,7 @@ impl Renderer {
                 let style = LayoutStyle {
                     font_style: run.style,
                     px64,
+                    font_set,
                     font_epoch: layer.font_options.identity()
                         ^ advances.identity()
                         ^ run.family.as_ref().map_or(0, |family| {
@@ -968,7 +700,7 @@ impl Renderer {
                             h.finish()
                         }),
                 };
-                let glyphs = if let Some(g) = self.layouts.get(&run.text, style) {
+                let glyphs = if let Some(g) = layouts.get(&run.text, style) {
                     g
                 } else {
                     let g: Arc<[_]> = if let Some(family) = &run.family {
@@ -981,15 +713,16 @@ impl Renderer {
                             .shape_editor(&run.text, px64 as f32 / 64., run.style, advances)
                             .into()
                     };
-                    self.layouts.insert(&run.text, style, Arc::clone(&g));
+                    layouts.insert(&run.text, style, Arc::clone(&g));
                     g
                 };
                 for g in glyphs.iter() {
                     let (x, bucket) = subpixel_x(run.x * scale + g.x);
                     let key = GlyphKey {
-                        face: g.face,
+                        face: fonts.raster_identity(g.face),
                         id: g.id,
                         px64,
+                        scale_bits,
                         bucket: bucket
                             | if layer.font_options.no_antialias {
                                 4
@@ -997,7 +730,7 @@ impl Renderer {
                                 0
                             },
                     };
-                    if let Some((entry, raster)) = self.glyph(fonts, key)? {
+                    if let Some((entry, raster)) = atlas.glyph(gpu, fonts, g.face, key)? {
                         let s = entry.slot;
                         let side = ATLAS_SIDE as f32;
                         let color = run
@@ -1083,14 +816,9 @@ impl Renderer {
         let required = std::mem::size_of_val(self.data.as_slice()) as u64;
         self.resize_instances(required);
         if required > 0 {
-            self.queue
+            self.gpu
+                .queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
-        }
-        #[cfg(target_os = "macos")]
-        if fonts.fallback_pending()
-            && let Some(window) = &self.window
-        {
-            window.request_frame_at(Instant::now() + Duration::from_millis(8));
         }
         Ok(())
     }
@@ -1098,7 +826,7 @@ impl Renderer {
     fn resize_instances(&mut self, required: u64) {
         if required > self.capacity {
             self.capacity = required.next_power_of_two();
-            self.instances = make_instances(&self.device, self.capacity);
+            self.instances = make_instances(&self.gpu.device, self.capacity);
         } else if self.capacity > MIN_INSTANCE_BYTES && required < self.capacity / 4 {
             self.small_peak = self.small_peak.max(required);
             self.small_frames += 1;
@@ -1109,7 +837,7 @@ impl Renderer {
             self.capacity = (self.small_peak * 2)
                 .next_power_of_two()
                 .max(MIN_INSTANCE_BYTES);
-            self.instances = make_instances(&self.device, self.capacity);
+            self.instances = make_instances(&self.gpu.device, self.capacity);
             self.data
                 .shrink_to(self.capacity as usize / size_of::<Instance>());
             self.batches.shrink();
@@ -1132,7 +860,12 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         query: Option<u32>,
-    ) {
+    ) -> Result<(), String> {
+        let atlas = self.gpu.atlas.borrow();
+        if self.prepared_generation != Some(atlas.atlas.generation()) {
+            return Err("atlas placements changed since frame preparation".into());
+        }
+        let atlas_bind = &atlas.atlas_texture.as_ref().expect("prepared atlas").bind;
         let batches = self.batches.as_slice();
         let separate = query.is_some() && !self.minimap_batches.is_empty();
         let ranges = if separate {
@@ -1192,16 +925,14 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(
-                0,
-                &self.atlas_texture.as_ref().expect("prepared atlas").bind,
-                &[],
-            );
+            pass.set_bind_group(0, atlas_bind, &[]);
+            pass.set_bind_group(1, &self.screen_bind, &[]);
             pass.set_vertex_buffer(0, self.instances.slice(..));
             for batch in &batches[range.clone()] {
                 pass.draw(0..6, batch.instances.clone());
             }
         }
+        Ok(())
     }
     /// Builds and submits the complete first text frame while the window is
     /// hidden. No drawable acquisition occurs on this path.
@@ -1212,7 +943,7 @@ impl Renderer {
         scale: f32,
     ) -> Result<(), String> {
         self.prepare(scene, fonts, scale)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("first frame before orderFront"),
             size: wgpu::Extent3d {
                 width: self.config.width,
@@ -1227,9 +958,10 @@ impl Renderer {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.encode(&mut encoder, &view, None);
-        self.queue.submit([encoder.finish()]);
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        self.encode(&mut encoder, &view, None)?;
+        self.gpu.queue.submit([encoder.finish()]);
+        self.gpu.check_device()?;
         self.offscreen = Some(texture);
         Ok(())
     }
@@ -1244,7 +976,7 @@ impl Renderer {
         }
         // Reap completed submission references without waiting for the
         // device or for another frame.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
     }
     /// Presents the prebuilt first frame, retaining it for skipped-drawable retries.
     pub fn present_prepared(&mut self) -> Result<Option<FrameTimes>, String> {
@@ -1267,9 +999,12 @@ impl Renderer {
     /// carries it: a hidden window polling every 200 ms grew by megabytes per second
     /// until it was shown again (2.5 GB peak, bug report 2026-11-25).
     fn discard_staged_writes(&self) {
-        self.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+        self.gpu
+            .queue
+            .submit(std::iter::empty::<wgpu::CommandBuffer>());
     }
     fn draw(&mut self, first: bool, query: Option<u32>) -> Result<Option<FrameTimes>, String> {
+        self.gpu.check_device()?;
         if query.is_some_and(|i| i >= MAX_MEASURED_FRAMES) {
             return Err("GPU query index exceeds benchmark capacity".into());
         }
@@ -1289,17 +1024,19 @@ impl Renderer {
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(&self.device, &self.config);
+                self.gpu.check_device()?;
+                surface.configure(&self.gpu.device, &self.config);
                 #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
                 self.discard_staged_writes();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                self.gpu.check_device()?;
                 // SAFETY: the retained window still owns this CAMetalLayer on this thread.
                 #[cfg(target_os = "macos")]
                 let surface = unsafe {
-                    self.instance.create_surface_unsafe(
+                    self.gpu.instance.create_surface_unsafe(
                         wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(window.metal_layer_ptr()),
                     )
                 }
@@ -1310,9 +1047,9 @@ impl Renderer {
                     // DXGI only permits one flip-model swap chain per HWND.
                     drop(self.surface.take());
                     // SAFETY: the caller of from_hwnd keeps hwnd live.
-                    unsafe { win32_surface(&self.instance, hwnd) }?
+                    unsafe { win32_surface(&self.gpu.instance, hwnd) }?
                 };
-                surface.configure(&self.device, &self.config);
+                surface.configure(&self.gpu.device, &self.config);
                 #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
                 self.surface = Some(surface);
@@ -1328,7 +1065,7 @@ impl Renderer {
         let drawable = window.last_acquired_drawable();
         #[cfg(windows)]
         let drawable = None;
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         if first {
             let offscreen = self
                 .offscreen
@@ -1348,7 +1085,7 @@ impl Renderer {
                 &mut encoder,
                 &texture.texture.create_view(&Default::default()),
                 query,
-            );
+            )?;
         }
         if let Some((q, i)) = self.queries.as_mut().zip(query) {
             encoder.resolve_query_set(&q.set, i * 2..i * 2 + 2, &q.resolve, u64::from(i) * 256);
@@ -1375,10 +1112,11 @@ impl Renderer {
             );
             q.recorded = q.recorded.max(i + 1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.gpu.queue.submit([encoder.finish()]);
+        self.gpu.check_device()?;
         let submitted = Instant::now();
         let present_start = Instant::now();
-        self.queue.present(texture);
+        self.gpu.queue.present(texture);
         let presented = Instant::now();
         Ok(Some(FrameTimes {
             drawable,
@@ -1409,16 +1147,18 @@ impl Renderer {
         scale: f32,
         size: [u32; 2],
     ) -> Result<Vec<u8>, String> {
-        let limit = self.device.limits().max_texture_dimension_2d;
+        self.gpu.check_device()?;
+        let limit = self.gpu.device.limits().max_texture_dimension_2d;
         if size.into_iter().any(|extent| extent == 0 || extent > limit) {
             return Err("Invalid offscreen image size".into());
         }
         let window_size = self.physical_size();
         let set_extent = |extent: [u32; 2]| [extent[0] as f32, extent[1] as f32, 0., 0.];
-        self.queue
+        self.gpu
+            .queue
             .write_buffer(&self.screen, 0, bytemuck::cast_slice(&set_extent(size)));
         let result = self.read_scene_rgba(scene, fonts, scale, size);
-        self.queue.write_buffer(
+        self.gpu.queue.write_buffer(
             &self.screen,
             0,
             bytemuck::cast_slice(&set_extent(window_size)),
@@ -1433,7 +1173,7 @@ impl Renderer {
         [width, height]: [u32; 2],
     ) -> Result<Vec<u8>, String> {
         self.prepare(scene, fonts, scale)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen readback"),
             size: wgpu::Extent3d {
                 width,
@@ -1449,18 +1189,18 @@ impl Renderer {
         });
         let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("offscreen readback rows"),
             size: u64::from(row) * u64::from(height),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.encode(
             &mut encoder,
             &texture.create_view(&Default::default()),
             None,
-        );
+        )?;
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -1477,7 +1217,8 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit([encoder.finish()]);
+        self.gpu.queue.submit([encoder.finish()]);
+        self.gpu.check_device()?;
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer
             .slice(..)
@@ -1511,22 +1252,26 @@ impl Renderer {
     }
     /// Reads all recorded timestamp pairs once after the measured run.
     pub fn gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
+        self.gpu.check_device()?;
         self.queries
             .as_ref()
-            .map(|q| q.read(&self.device))
+            .map(|q| q.read(&self.gpu.device))
             .transpose()
     }
     /// Isolated minimap render-pass timestamps, excluding the main editor and tabs.
     pub fn minimap_gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
+        self.gpu.check_device()?;
         self.minimap_queries
             .as_ref()
             .filter(|q| q.recorded > 0)
-            .map(|q| q.read(&self.device))
+            .map(|q| q.read(&self.gpu.device))
             .transpose()
     }
     /// Waits for GPU completion outside any measured frame.
     pub fn wait_idle(&self) -> Result<(), String> {
-        self.device
+        self.gpu.check_device()?;
+        self.gpu
+            .device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: Some(Duration::from_secs(15)),
@@ -1534,60 +1279,9 @@ impl Renderer {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    /// Atomically saves actual wgpu cache data if the adapter supports it.
-    /// On wgpu 30 Metal this is a no-op and `info` reports the unsupported feature.
+    /// Saves actual shared wgpu cache data if the adapter supports it.
     pub fn persist_pipeline_cache(&self) -> Result<(), String> {
-        if let Some((bytes, path)) = self
-            .cache
-            .as_ref()
-            .and_then(|c| c.get_data())
-            .zip(self.cache_path.as_ref())
-        {
-            let parent = path.parent().ok_or("invalid cache path")?;
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-            std::fs::write(&temp, bytes)
-                .and_then(|()| std::fs::rename(&temp, path))
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-}
-/// Device, queue and the optional features negotiated for one adapter.
-struct DeviceParts {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    has_queries: bool,
-    has_cache: bool,
-    device_ms: f64,
-}
-impl DeviceParts {
-    fn request(adapter: &wgpu::Adapter, timestamps: bool) -> Result<Self, String> {
-        let has_queries =
-            timestamps && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let has_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
-        let mut features = wgpu::Features::empty();
-        if has_queries {
-            features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        if has_cache {
-            features |= wgpu::Features::PIPELINE_CACHE;
-        }
-        let start = Instant::now();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Velocity Metal"),
-            required_features: features,
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .map_err(|e| e.to_string())?;
-        Ok(Self {
-            device,
-            queue,
-            has_queries,
-            has_cache,
-            device_ms: ms(start.elapsed()),
-        })
+        self.gpu.persist_pipeline_cache()
     }
 }
 fn ms(d: Duration) -> f64 {
@@ -1601,54 +1295,7 @@ fn make_instances(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         mapped_at_creation: false,
     })
 }
-fn make_texture(device: &wgpu::Device, pages: u32) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("growing RGBA glyph array"),
-        size: wgpu::Extent3d {
-            width: ATLAS_SIDE,
-            height: ATLAS_SIDE,
-            depth_or_array_layers: pages,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    })
-}
-fn make_bind(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    texture: &wgpu::Texture,
-    sampler: &wgpu::Sampler,
-    screen: &wgpu::Buffer,
-) -> wgpu::BindGroup {
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        ..Default::default()
-    });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("glyph pages and viewport"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: screen.as_entire_binding(),
-            },
-        ],
-    })
-}
+
 fn clip(r: Rect, s: f32) -> [f32; 4] {
     [
         r.x as f32 * s,

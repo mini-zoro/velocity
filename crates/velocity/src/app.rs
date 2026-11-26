@@ -5492,6 +5492,13 @@ impl AppHandler for App {
             .then(|| Box::new(windowless::Controller::new(&self)) as Box<dyn AppHandler>)
     }
 
+    #[cfg(windows)]
+    fn on_retire_window(&mut self) {
+        self.renderer = None;
+        self.fonts = None;
+        self.workspace.themes.ui.borrow().metrics.disable_native();
+    }
+
     fn activate_on_open(&self) -> bool {
         !self.options.background
     }
@@ -5528,7 +5535,7 @@ impl AppHandler for App {
         w.set_title(&self.workspace.window_title());
         self.install_native_menu(w, true);
         self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":(!self.workspace.palette_pending()).then_some(self.workspace.palette.len())}))?;
-        let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
+        let fonts = Fonts::load_shared_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.view
@@ -6125,7 +6132,7 @@ impl AppHandler for App {
         if let Some(fonts) = self.fonts.as_mut() {
             if fonts.poll_fallbacks() {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.invalidate_layouts();
+                    renderer.invalidate_prepared();
                 }
                 w.request_frame();
             }
@@ -6333,13 +6340,13 @@ impl AppHandler for App {
         }
         if self.font_face != self.workspace.editor().preferences.font_face {
             let name = self.workspace.editor().preferences.font_face.clone();
-            match Fonts::load_named(&name) {
+            match Fonts::load_shared_named(&name) {
                 Ok(fonts) => {
                     self.reload_font_views(fonts, w.scale_factor());
                     self.renderer
                         .as_mut()
                         .ok_or("renderer missing")?
-                        .reset_fonts();
+                        .invalidate_prepared();
                 }
                 Err(error) => self.named_error(Some(w), &error),
             }

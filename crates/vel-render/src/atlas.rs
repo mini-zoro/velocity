@@ -1,6 +1,8 @@
 //! Device-free paged shelf packing, page LRU and frame pinning.
 use std::collections::HashMap;
 
+pub(crate) const ALL_PAGES_PINNED: &str = "frame exceeds atlas capacity; all pages pinned";
+
 /// An inner rectangle, surrounded by one transparent pixel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
@@ -66,13 +68,15 @@ impl Shelf {
 /// Stable font/raster cache identity.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct GlyphKey {
-    /// Font face index.
-    pub face: u16,
+    /// Raster identity of the resolved face (including its variation instance).
+    pub face: u64,
     /// Face-local glyph id.
     pub id: u16,
     /// Physical raster size in 1/64 pixels.
     pub px64: u32,
-    /// Quarter-pixel phase (0..4).
+    /// Exact window scale factor, independent of the rounded raster size.
+    pub scale_bits: u32,
+    /// Quarter-pixel phase in the low two bits, with the antialias flag above it.
     pub bucket: u8,
 }
 /// Atlas page bitmap class. Color pages always contain RGBA pixels.
@@ -116,6 +120,7 @@ pub struct PagedAtlas {
     pages: Vec<Page>,
     entries: HashMap<AssetKey, AtlasEntry>,
     evictions: u64,
+    generation: u64,
 }
 impl PagedAtlas {
     /// Creates an empty atlas (GPU pages are allocated only on first use).
@@ -127,7 +132,18 @@ impl PagedAtlas {
             pages: Vec::new(),
             entries: HashMap::new(),
             evictions: 0,
+            generation: 0,
         }
+    }
+    /// Forgets all placements without reusing a generation.
+    pub fn reset(&mut self) {
+        let generation = self.generation + 1;
+        *self = Self::new(self.side, self.maximum);
+        self.generation = generation;
+    }
+    /// Changes whenever a previously issued placement can no longer be used.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
     /// Starts frame pinning. Existing entries remain cached.
     pub fn begin_frame(&mut self) {
@@ -230,7 +246,7 @@ impl PagedAtlas {
                     .filter(|(_, p)| !p.pinned)
                     .min_by_key(|(_, p)| p.used)
                     .map(|(i, _)| i)
-                    .ok_or("frame exceeds atlas capacity; all pages pinned")?;
+                    .ok_or(ALL_PAGES_PINNED)?;
                 self.entries.retain(|_, e| e.page != i as u32);
                 let generation = self.pages[i].generation + 1;
                 self.pages[i] = Page {
@@ -241,6 +257,7 @@ impl PagedAtlas {
                     pinned: false,
                 };
                 self.evictions += 1;
+                self.generation += 1;
                 i
             };
             (
@@ -293,8 +310,34 @@ mod tests {
             face: 0,
             id,
             px64: 832,
+            scale_bits: 1.0f32.to_bits(),
             bucket: 0,
         }
+    }
+    #[test]
+    fn scale_keys_coexist_and_recycling_invalidates_previous_generations() {
+        let mut atlas = PagedAtlas::new(16, 1);
+        let regular = key(1);
+        let retina = GlyphKey {
+            scale_bits: 2.0f32.to_bits(),
+            ..regular
+        };
+        atlas.begin_frame();
+        let generation = atlas.generation();
+        let a = atlas.allocate(regular, 6, 6, PageKind::Mask).unwrap();
+        let b = atlas.allocate(retina, 6, 6, PageKind::Mask).unwrap();
+        assert_ne!(a.slot, b.slot);
+        assert_eq!(atlas.generation(), generation);
+
+        atlas.begin_frame();
+        atlas.allocate(key(2), 14, 14, PageKind::Mask).unwrap();
+        assert!(atlas.generation() > generation);
+        assert!(atlas.get(regular).is_none());
+        assert!(atlas.get(retina).is_none());
+        let generation = atlas.generation();
+        atlas.reset();
+        assert!(atlas.generation() > generation);
+        assert!(atlas.is_empty());
     }
     #[test]
     fn growth_lru_and_frame_pinning_prevent_stale_uvs() {

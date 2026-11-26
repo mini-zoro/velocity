@@ -29,13 +29,12 @@ impl App {
         let pressure = level != Trim::Idle;
         let mut sizes = MemoryCacheBytes::default();
         if let Some(renderer) = &mut self.renderer {
-            (sizes.atlas, sizes.instances) = renderer.memory_cache_bytes();
-            renderer.trim_memory(pressure);
+            (sizes.atlas, sizes.instances) = renderer.trim_memory(pressure);
         }
         if let Some(fonts) = &mut self.fonts {
-            let (shaping, cascade) = fonts.document_cache_bytes();
-            sizes.fonts = (shaping + cascade) as u64;
-            fonts.trim_shaping();
+            // Shared: subsequent windows see zero, and the resolved cascade
+            // stays warm so the first frame after a trim is still complete.
+            sizes.fonts = fonts.trim_shaping() as u64;
         }
 
         self.prune_closed_sheet_views();

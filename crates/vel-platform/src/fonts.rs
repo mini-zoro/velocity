@@ -419,11 +419,13 @@ mod tests {
 #[derive(Default)]
 pub struct AsyncFontFallback {
     resolver: Option<Box<dyn FontFallback + Send>>,
-    worker: Option<std::sync::mpsc::Sender<(u16, String, FallbackKey)>>,
-    ready: Option<std::sync::mpsc::Receiver<(u16, FallbackKey, Option<FontDescriptor>)>>,
-    pending: std::collections::HashSet<(u16, FallbackKey)>,
+    worker: Option<std::sync::mpsc::Sender<(u32, String, FallbackKey)>>,
+    ready: Option<std::sync::mpsc::Receiver<(u32, FallbackKey, Option<FontDescriptor>)>>,
+    pending: std::collections::HashSet<(u32, FallbackKey)>,
 }
 impl AsyncFontFallback {
+    const IN_FLIGHT: usize = 128;
+
     /// Supplies an alternate cascade service without starting it before the first miss.
     pub fn with_resolver(resolver: impl FontFallback + Send + 'static) -> Self {
         Self {
@@ -431,29 +433,17 @@ impl AsyncFontFallback {
             ..Self::default()
         }
     }
-    /// Enqueues a missing scalar once; the system service starts only on first use.
-    pub fn request(&mut self, face: u16, name: &str, scalar: char) {
-        self.request_key(face, name, FallbackKey::Scalar(scalar));
-    }
-    /// Enqueues one complete emoji presentation sequence.
-    pub fn request_cluster(&mut self, face: u16, name: &str, cluster: &str) {
-        self.request_key(face, name, FallbackKey::Emoji(cluster.into()));
-    }
-    /// Enqueues a VS15 cluster once, separately from scalar and emoji presentation.
-    pub fn request_text_cluster(&mut self, face: u16, name: &str, cluster: &str) {
-        self.request_key(face, name, FallbackKey::Text(cluster.into()));
-    }
-    fn request_key(&mut self, face: u16, name: &str, key: FallbackKey) {
-        const IN_FLIGHT: usize = 128;
+    /// Enqueues one request per (cascade id, key); returns true only on enqueue.
+    pub fn request(&mut self, face: u32, name: &str, key: FallbackKey) -> bool {
         const CLUSTER_BYTES: usize = 8 * 1024;
-        if self.pending.len() == IN_FLIGHT
+        if self.is_full()
             || matches!(&key, FallbackKey::Emoji(s) | FallbackKey::Text(s) if s.len() > CLUSTER_BYTES)
             || !self.pending.insert((face, key.clone()))
         {
-            return;
+            return false;
         }
         if self.worker.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<(u16, String, FallbackKey)>();
+            let (tx, rx) = std::sync::mpsc::channel::<(u32, String, FallbackKey)>();
             let (results, ready) = std::sync::mpsc::channel();
             let mut resolver = self
                 .resolver
@@ -480,7 +470,7 @@ impl AsyncFontFallback {
                 }
                 Err(_) => {
                     self.pending.remove(&(face, key.clone()));
-                    return;
+                    return false;
                 }
             }
         }
@@ -489,11 +479,13 @@ impl AsyncFontFallback {
             .as_ref()
             .is_none_or(|tx| tx.send((face, name.into(), key.clone())).is_err())
         {
-            self.pending.remove(&(face, key.clone()));
+            self.pending.remove(&(face, key));
+            return false;
         }
+        true
     }
     /// Takes completed selections, including misses, without waiting.
-    pub fn poll(&mut self) -> Vec<(u16, FallbackKey, Option<FontDescriptor>)> {
+    pub fn poll(&mut self) -> Vec<(u32, FallbackKey, Option<FontDescriptor>)> {
         let mut results = Vec::new();
         let mut disconnected = false;
         if let Some(rx) = &self.ready {
@@ -523,6 +515,10 @@ impl AsyncFontFallback {
     /// Whether another frame should check for completion.
     pub fn pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+    /// Whether loading a different cascade needs to wait for a free worker slot.
+    pub fn is_full(&self) -> bool {
+        self.pending.len() == Self::IN_FLIGHT
     }
 }
 

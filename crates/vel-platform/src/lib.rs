@@ -535,6 +535,10 @@ pub trait AppHandler: 'static {
     fn into_windowless(self: Box<Self>) -> Option<Box<dyn AppHandler>> {
         None
     }
+    /// Windows keeps its final handler for reopen and profile requests.
+    /// Release window-only resources before keeping it as a hidden template.
+    #[cfg(windows)]
+    fn on_retire_window(&mut self) {}
     /// Supplies an on-demand accessibility hierarchy; never called by the scene hot path.
     fn accessibility_tree(&self) -> accessibility::Tree {
         accessibility::Tree::default()

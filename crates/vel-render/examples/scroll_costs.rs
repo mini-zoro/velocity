@@ -47,6 +47,7 @@ fn cache(before: bool, lines: &[String], capacity: usize) -> f64 {
     let style = LayoutStyle {
         font_style: Default::default(),
         px64: 832,
+        font_set: (0, 0),
         font_epoch: 0,
     };
     let glyphs: Arc<[ShapedGlyph]> = Arc::from([]);
