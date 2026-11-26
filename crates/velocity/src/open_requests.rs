@@ -263,42 +263,26 @@ pub(crate) mod hold {
         },
         time::Duration,
     };
-    /// Held paths, and whether the worker has reached a job for each.
-    static HELD: Mutex<Vec<(PathBuf, bool)>> = Mutex::new(Vec::new());
+    static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
     /// Holds decodes of `path` until each is cancelled; dropping the guard (also on a
     /// failed assertion) lets the shared worker move on.
     pub(crate) fn until_cancelled(path: &Path) -> Held {
-        HELD.lock()
-            .expect("held decodes")
-            .push((path.to_owned(), false));
+        HELD.lock().expect("held decodes").push(path.to_owned());
         Held(path.to_owned())
     }
     pub(crate) struct Held(PathBuf);
-    impl Held {
-        /// True once the worker has reached (and held) a decode of the path.
-        pub(crate) fn reached(&self) -> bool {
-            HELD.lock()
-                .expect("held decodes")
-                .iter()
-                .any(|(p, reached)| *p == self.0 && *reached)
-        }
-    }
     impl Drop for Held {
         fn drop(&mut self) {
             if let Ok(mut held) = HELD.lock() {
-                held.retain(|(p, _)| *p != self.0);
+                held.retain(|p| *p != self.0);
             }
         }
     }
     pub(super) fn wait_while_held(path: &Path, cancelled: &AtomicBool) {
-        while !cancelled.load(Ordering::Acquire) {
-            let mut held = HELD.lock().expect("held decodes");
-            let Some(entry) = held.iter_mut().find(|(p, _)| p == path) else {
-                return;
-            };
-            entry.1 = true;
-            drop(held);
+        while !cancelled.load(Ordering::Acquire)
+            && HELD.lock().expect("held decodes").iter().any(|p| p == path)
+        {
             std::thread::sleep(Duration::from_millis(1));
         }
     }

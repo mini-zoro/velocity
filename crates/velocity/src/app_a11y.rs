@@ -1098,6 +1098,22 @@ mod tests {
         assert!(tree.next_focus(tree.focused(), false).is_some());
     }
     #[test]
+    fn status_accessibility_reports_the_painted_column_for_cjk() {
+        // Four CJK characters are twelve bytes: the spoken status used to read
+        // "column 13" while the painted bar said "第 5 列".
+        let mut a = app("你好世界");
+        a.workspace.editor_mut().set_caret("你好世界".len(), false);
+        a.scene();
+        let tree = a.accessible_tree();
+        let status = tree
+            .nodes
+            .iter()
+            .find(|n| n.role == Role::Status)
+            .expect("status node");
+        assert!(status.label.contains("column 5"), "{}", status.label);
+    }
+
+    #[test]
     fn modal_panel_rows_fields_buttons_status_and_syntax_have_roles_and_labels() {
         let mut a = app("hello");
         a.scene();

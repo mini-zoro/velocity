@@ -372,10 +372,27 @@ fn memory_soak_pressure_releases_cjk_and_image_caches_without_changing_output() 
     }
     assert_eq!(a.workspace.editor().buffer.text().len_bytes(), cjk.len());
     let after_scene = scene(&mut a);
-    assert!(
-        format!("{before_scene:?}") == format!("{after_scene:?}"),
-        "trim changed the scene"
-    );
+    let (before_text, after_text) = (format!("{before_scene:?}"), format!("{after_scene:?}"));
+    if before_text != after_text {
+        // Name the first difference: CI runners differ from dev Macs in installed fonts.
+        let at = before_text
+            .bytes()
+            .zip(after_text.bytes())
+            .position(|(b, a)| b != a)
+            .unwrap_or(before_text.len().min(after_text.len()));
+        let window = |text: &str| {
+            let start = text.floor_char_boundary(at.saturating_sub(300));
+            let end = text.ceil_char_boundary((at + 300).min(text.len()));
+            text[start..end].to_owned()
+        };
+        panic!(
+            "trim changed the scene at byte {at} of {}/{}:\nbefore: {}\nafter:  {}",
+            before_text.len(),
+            after_text.len(),
+            window(&before_text),
+            window(&after_text)
+        );
+    }
     assert!(
         render(&mut a, &after_scene) == before_pixels,
         "trim changed rendered pixels"
