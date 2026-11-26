@@ -1,5 +1,6 @@
 //! AppKit ownership and Objective-C interop are confined to this module.
 use crate::drawable_pool::DrawablePool;
+use crate::ime_discard::NativeDiscard;
 use crate::*;
 #[path = "macos_a11y.rs"]
 mod a11y;
@@ -827,9 +828,11 @@ impl WindowHandle {
         self.0.ime_geometry_dirty.set(true);
         self.0.flush_ime_coordinates();
     }
-    /// Ends the native conversion after the application has cleared preedit.
+    /// Ends the native conversion of a preedit the application has settled.
+    /// The input method is told before the cleared snapshot is published, so it
+    /// still finds the marked text it must end and closes its candidate window.
     pub fn discard_marked_text(&self) {
-        self.0.ime_discard_pending.set(true);
+        self.0.ime_discard.request();
         self.0.flush_ime_coordinates();
     }
     /// Stops run() without calling exit, allowing reports and native teardown.
@@ -883,8 +886,7 @@ struct Host {
     drawing: Cell<bool>,
     input_depth: Cell<u32>,
     ime_geometry_dirty: Cell<bool>,
-    ime_discard_pending: Cell<bool>,
-    ime_discarding: Cell<bool>,
+    ime_discard: NativeDiscard,
     ime_key: Cell<Option<CompositionKey>>,
     ready: Cell<bool>,
     starting: Cell<bool>,
@@ -935,11 +937,8 @@ impl Host {
     }
     fn release_native_window(&self) {
         self.stopped.set(true);
-        if self.input.borrow().marked.is_some() {
-            self.ime_discard_pending.set(true);
-        }
-        self.input.take();
-        self.flush_ime_discard();
+        self.ime_discard
+            .retire(&self.input, || self.discard_native());
         let native = self.native.take();
         if let Some(link) = native.link {
             link.invalidate();
@@ -1129,7 +1128,7 @@ impl Host {
                 Event::Appearance(e) => app.on_appearance(&w, e),
                 Event::TextInputFocusLost => {
                     app.on_text_input_focus_lost(&w);
-                    self.ime_discard_pending.set(true);
+                    self.ime_discard.request();
                 }
                 Event::Idle => app.on_idle(&w),
                 Event::CloseRequested => {
@@ -1139,19 +1138,15 @@ impl Host {
                 }
             }
             if self.stopped.get() {
-                if self.input.borrow().marked.is_some() {
-                    self.ime_discard_pending.set(true);
-                }
-                self.input.take();
                 drop(slot);
-                self.flush_ime_discard();
+                self.ime_discard
+                    .retire(&self.input, || self.discard_native());
                 break;
             }
             app.update_text_input_focus(&w);
             let current = app.text_input_state();
-            let previous = self.publish_input_state(current.clone());
             drop(slot);
-            self.flush_ime_discard();
+            let previous = self.settle_input_state(current.clone());
             a11y::notify(self, &previous, &current);
             if self.stopped.get() {
                 break;
@@ -1203,22 +1198,32 @@ impl Host {
         }
     }
     fn publish_input_state(&self, state: TextInputState) -> TextInputState {
-        let mut current = self.input.borrow_mut();
+        self.note_input_geometry(&state);
+        self.input.replace(state)
+    }
+    /// Publishes `state` after ending any requested native conversion against
+    /// the previous snapshot, which still holds the preedit being discarded.
+    /// Call without the app borrowed so the input method's queries can read it.
+    fn settle_input_state(&self, state: TextInputState) -> TextInputState {
+        self.note_input_geometry(&state);
+        self.ime_discard
+            .settle(&self.input, state, || self.discard_native())
+    }
+    fn note_input_geometry(&self, state: &TextInputState) {
+        let current = self.input.borrow();
         if state.caret != current.caret
             || state.marked != current.marked
             || state.selected != current.selected
         {
             self.ime_geometry_dirty.set(true);
         }
-        std::mem::replace(&mut *current, state)
     }
     fn flush_ime_discard(&self) {
-        if self.ime_discard_pending.replace(false) {
-            self.ime_discarding.set(true);
-            if let Some(context) = self.view().and_then(|v| v.inputContext()) {
-                context.discardMarkedText();
-            }
-            self.ime_discarding.set(false);
+        self.ime_discard.flush(|| self.discard_native());
+    }
+    fn discard_native(&self) {
+        if let Some(context) = self.view().and_then(|v| v.inputContext()) {
+            context.discardMarkedText();
         }
     }
     fn render(self: &Rc<Self>, reason: FrameReason, force: bool) {
@@ -1253,7 +1258,7 @@ impl Host {
         };
         self.dirty.set(false);
         let previous = self.input.borrow().clone();
-        let result = {
+        let (result, next) = {
             let mut app = self.app.borrow_mut();
             if let Some(app) = app.as_mut() {
                 let w = self.handle();
@@ -1263,12 +1268,15 @@ impl Host {
                     reason,
                 });
                 app.update_text_input_focus(&w);
-                self.publish_input_state(app.text_input_state());
-                result
+                (result, Some(app.text_input_state()))
             } else {
-                Ok(())
+                (Ok(()), None)
             }
         };
+        // Still drawing, so a frame or dispatch reentered by the discard waits.
+        if let Some(next) = next {
+            self.settle_input_state(next);
+        }
         self.drawing.set(false);
         self.dispatching.set(false);
         let current = self.input.borrow().clone();
@@ -1725,7 +1733,10 @@ impl EditorView {
             .map_or_else(TextInputState::default, |h| h.input.borrow().clone())
     }
     fn command(&self, c: Command) {
-        if let Some(h) = self.ivars().host.upgrade() {
+        // A selector sent while discardMarkedText runs belongs to the dead conversion.
+        if let Some(h) = self.ivars().host.upgrade()
+            && !h.ime_discard.running()
+        {
             let marked = h.input.borrow().marked.is_some();
             if let Some(c) = CompositionKey::selector(c, h.ime_key.get(), marked) {
                 h.dispatch(Event::Command(c));
@@ -1735,8 +1746,7 @@ impl EditorView {
     }
     fn text(&self, mut t: TextInput) {
         if let Some(h) = self.ivars().host.upgrade()
-            && !h.ime_discard_pending.get()
-            && !h.ime_discarding.get()
+            && !h.ime_discard.blocks_text()
             && self.window().is_some_and(|window| window.isKeyWindow())
         {
             if h.ime_key.get() == Some(CompositionKey::Escape) {
@@ -3066,8 +3076,7 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         drawing: Cell::new(false),
         input_depth: Cell::new(0),
         ime_geometry_dirty: Cell::new(false),
-        ime_discard_pending: Cell::new(false),
-        ime_discarding: Cell::new(false),
+        ime_discard: NativeDiscard::default(),
         ime_key: Cell::new(None),
         ready: Cell::new(false),
         starting: Cell::new(true),
