@@ -154,8 +154,16 @@ func tab(_ window: AXUIElement, named name: String) -> TabInfo? {
     tabs(window).first { $0.label.hasPrefix(name) }
 }
 
-func editorNode(_ window: AXUIElement) -> AXUIElement? {
-    axFindAll(window, role: "AXTextArea").first
+/// The editor element, waiting briefly: right after a tab switch Velocity can rebuild
+/// its accessibility snapshot and answer with no text area for a moment.
+func editorNode(_ window: AXUIElement, timeout: Double = 4) -> AXUIElement? {
+    if let node = axFindAll(window, role: "AXTextArea").first { return node }
+    var found: AXUIElement?
+    _ = waitUntil(timeout) {
+        found = axFindAll(window, role: "AXTextArea").first
+        return found != nil
+    }
+    return found
 }
 
 func editorText(_ window: AXUIElement) -> String {
@@ -310,10 +318,11 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     usleep(200_000)
     postKey("1", flags: .maskCommand)
     usleep(500_000)
-    let firstWindow = velocityWindow(pid)!
+    _ = waitUntil(5) { velocityWindow(pid).flatMap { axFindAll($0, role: "AXTextArea").first } != nil }
+    guard let firstWindow = velocityWindow(pid) else { fail("window disappeared after Cmd+1") }
     let firstText = editorText(firstWindow)
-    let secondWindowText = tabs(firstWindow).count > 0 ? axFindAll(firstWindow, role: "AXTextArea")
-        .map { axString($0, kAXValueAttribute) ?? "" }.joined(separator: "|") : ""
+    let secondWindowText = axFindAll(firstWindow, role: "AXTextArea")
+        .map { axString($0, kAXValueAttribute) ?? "" }.joined(separator: "|")
     report.check(!firstText.contains("zhongwen") && !secondWindowText.contains("zhongwen") && !secondWindowText.contains("中文"),
                  "switching tabs discards the composition", detail: "tab1=\(firstText.debugDescription) all=\(secondWindowText.debugDescription)")
 
@@ -549,6 +558,19 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
     }
     _ = waitUntil(8) { frontmostPid() == otherPid }
     report.check(frontmostPid() == otherPid, "another app is frontmost", detail: frontmostName())
+    // Control: a click on the editor area (no tab) of the inactive window. A person
+    // expects both kinds of click to activate; separating them says whether the tab
+    // path is the cause.
+    if let editor = editorNode(window), let frame = axRect(editor) {
+        let inside = CGPoint(x: frame.midX, y: frame.midY)
+        report.note("control click", detail: "\(Int(inside.x)),\(Int(inside.y)) topmost=\(windowUnder(inside))")
+        click(at: inside)
+        report.check(waitUntil(3) { frontmostPid() == pid }, "a click on the inactive editor activates Velocity",
+                     detail: frontmostName())
+        _ = activate(otherPid)
+        _ = waitUntil(3) { frontmostPid() == otherPid }
+        report.note("refronted", detail: frontmostName())
+    }
     guard let target = tab(window, named: "a.txt") else { report.check(false, "a.txt tab"); report.finish() }
     let point = CGPoint(x: target.frame.midX, y: target.frame.midY)
     report.note("click target", detail: "\(Int(point.x)),\(Int(point.y)) topmost=\(windowUnder(point)) front=\(frontmostName())")

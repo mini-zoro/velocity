@@ -585,9 +585,11 @@ let pinyinIds = [
     "com.apple.inputmethod.SCIM.SimplifiedPinyin",
     "com.apple.inputmethod.SCIM",
 ]
+// US is enabled on the runner image; ABC is not, and enabling then selecting a
+// disabled layout trapped the child once (exit 5 = SIGTRAP).
 let abcIds = [
-    "com.apple.keylayout.ABC",
     "com.apple.keylayout.US",
+    "com.apple.keylayout.ABC",
 ]
 
 /// Switches the system input source through a child process and returns the id that
