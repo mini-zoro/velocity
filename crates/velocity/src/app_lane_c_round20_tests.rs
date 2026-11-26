@@ -970,6 +970,8 @@ fn r20_hidden_image_decode_is_cancelled_and_folder_edits_are_independent() {
     std::fs::write(&project, "{}").unwrap();
     let mut a = app("", Some(project.clone()), sessions());
     a.panels.review.native_context = true;
+    // Kept in flight until cancelled: the decode worker is shared by the whole suite.
+    let held = crate::open_requests::hold::until_cancelled(&image);
     a.run_named(None, "open_file", &json!({"file":image}));
     until_within(&mut a, Duration::from_secs(180), |a| {
         a.view.image_preview.busy()
@@ -979,6 +981,8 @@ fn r20_hidden_image_decode_is_cancelled_and_folder_edits_are_independent() {
     a.run_named(None, "add_folder", &json!({"dir":folder}));
     a.run_named(None, "new_file", &json!({}));
     assert!(cancelled.load(Ordering::Acquire));
+    assert!(held.reached(), "the decode was held until cancelled");
+    drop(held);
     until(&mut a, |a| {
         a.workspace.folders.iter().any(|f| f.path == folder)
     });
