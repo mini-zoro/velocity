@@ -531,6 +531,12 @@ pub struct MenuEntry {
 pub struct Platform;
 #[cfg(target_os = "macos")]
 impl Platform {
+    /// The Finder Sync extension embedded in the running application, if installed.
+    pub fn finder_new_text_file_extension() -> Option<std::path::PathBuf> {
+        macos::finder::extension_bundle()
+    }
+}
+impl Platform {
     /// Current process footprint in bytes (physical footprint on macOS, private commit on Windows).
     pub fn memory_footprint() -> Option<u64> {
         #[cfg(target_os = "macos")]
@@ -549,12 +555,6 @@ impl Platform {
         memory_guard::windows::compact_heap();
     }
 
-    /// The Finder Sync extension embedded in the running application, if installed.
-    pub fn finder_new_text_file_extension() -> Option<std::path::PathBuf> {
-        macos::finder::extension_bundle()
-    }
-}
-impl Platform {
     /// True when Option is held at native launch, before window creation.
     #[cfg(target_os = "macos")]
     pub fn option_held_at_launch() -> bool {

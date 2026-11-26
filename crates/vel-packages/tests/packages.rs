@@ -351,6 +351,34 @@ fn store_lock_rejects_overlapping_mutations_and_is_not_deleted_by_the_failed_cal
 }
 
 #[test]
+fn a_briefly_held_store_lock_is_waited_for_instead_of_failing() {
+    let (_root, manager) = store();
+    fs::create_dir(manager.data_dir()).unwrap();
+    let lock = manager.data_dir().join(".velocity-packages.lock");
+    fs::write(&lock, "other process").unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .unwrap();
+    held.try_lock().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let data = manager.data_dir().to_owned();
+    let caller = std::thread::spawn(move || {
+        let _ = send.send(PackageManager::new(data).remove("Example").is_ok());
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(held);
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        "the wait should finish once the short lock holder is done"
+    );
+    caller.join().unwrap();
+}
+
+#[test]
 fn first_user_disable_override_keeps_inherited_ignored_defaults() {
     let (_root, manager) = store();
     let inherited = ["Vintage".to_owned()].into_iter().collect();

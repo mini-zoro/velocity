@@ -418,7 +418,18 @@ impl PackageManager {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        file.try_lock().map_err(invalid)?;
+        // A mutation in another process can hold this lock for a moment. Waiting a
+        // short while turns a spurious "would block" into success; a real owner
+        // still fails the caller, just after the bounded wait.
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(error) if !is_would_block(&error) => return Err(invalid(error)),
+                Err(error) if std::time::Instant::now() >= deadline => return Err(invalid(error)),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
         file.set_len(0)?;
         writeln!(file, "{}", std::process::id())?;
         Ok(StoreLock { _file: file })
@@ -430,6 +441,11 @@ struct StoreLock {
     // Closing releases the OS lock, including after a crash. Never unlink this path: doing
     // so could leave concurrent processes locking different inodes for the same store.
     _file: fs::File,
+}
+/// How long a caller waits for a busy store lock before reporting it.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+fn is_would_block(error: &std::fs::TryLockError) -> bool {
+    matches!(error, std::fs::TryLockError::WouldBlock)
 }
 fn read_dir(path: &Path) -> Result<Vec<fs::DirEntry>> {
     reject_symlink(path)?;
