@@ -313,9 +313,23 @@ fn memory_soak_pressure_releases_cjk_and_image_caches_without_changing_output() 
                 .unwrap()
         })
     };
-    // Prime window geometry and theme before retaining the comparison scene.
-    drop(scene(&mut a));
-    let before_scene = scene(&mut a);
+    // Prime window geometry and theme, and let time-driven state (the tab strip's slide
+    // after the selection change) finish, so only the trim can change the next frame.
+    // A slow CI runner otherwise captured the "before" scene mid-animation.
+    let before_scene = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = format!("{:?}", scene(&mut a));
+        loop {
+            std::thread::sleep(Duration::from_millis(40));
+            let next = scene(&mut a);
+            let text = format!("{next:?}");
+            if text == last {
+                break next;
+            }
+            assert!(Instant::now() < deadline, "the scene never settled");
+            last = text;
+        }
+    };
     let before_pixels = render(&mut a, &before_scene);
     let parked: Vec<_> = a
         .sheet_views
