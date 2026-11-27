@@ -2742,6 +2742,11 @@ impl Workspace {
         self.refresh_appearance(self.active);
         &mut self.tabs[self.active].editor
     }
+    /// A resource load is running on the worker and has not been published yet.
+    #[cfg(test)]
+    pub(crate) fn resource_load_in_flight(&self) -> bool {
+        self.config_rx.is_some()
+    }
     pub fn language_busy(&self) -> bool {
         self.config_rx.is_some()
             || self.reload_requested

@@ -715,6 +715,18 @@ fn r19_failed_appearance_write_revokes_reload_override_before_error_frame() {
             std::fs::metadata(&user).unwrap().permissions(),
         );
         std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The zoom or the scheme choice may have started a load that is still on the
+        // worker. Its completion bumps the revision on the next poll, but it is not a
+        // load started while the writer is blocked, which is what this checks.
+        let settled = Instant::now() + Duration::from_secs(30);
+        while a.workspace.resource_load_in_flight() {
+            assert!(
+                Instant::now() < settled,
+                "an earlier resource load never finished"
+            );
+            a.workspace.poll();
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
         let revision = a.workspace.resource_revision;
         a.workspace.request_resource_reload();
         a.workspace.poll();
