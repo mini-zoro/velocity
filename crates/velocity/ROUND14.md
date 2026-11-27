@@ -128,7 +128,7 @@ Alternatively, run `compare-scroll.py --pairs 20` into a new directory for a fre
 series. No compilation or other local benchmark ran concurrently with the measured pairs.
 
 Exact reviewer commands and the native checklist are in
-[MANUAL_TEST.md](MANUAL_TEST.md#round-14-native-opens-context-menus-and-round-12-regressions).
+MANUAL_TEST.md.
 Platform-specific contracts/checks are in
 [vel-platform/MANUAL_TEST.md](../vel-platform/MANUAL_TEST.md). Do not substitute headless
 passing results for those native checks.

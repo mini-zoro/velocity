@@ -2,7 +2,7 @@
 
 Velocity's wgpu 30.0.2 Metal renderer, MIT OR Apache-2.0. Font discovery, bitmap
 fallback, raster plumbing and deferred timestamps are adapted from the repository's
-[P0 prototype](../../prototypes/macos-shell/README.md), under the same license.
+P0 prototype, under the same license.
 Scene types, page cache and native integration are product implementations.
 
 Scene layers contain shadows, solid/rounded rectangles, text runs and straight/wavy
@@ -92,4 +92,4 @@ unchanged / indicator-only cases, and the native gate did not show a net gain.
 `cargo run --release -p vel-render --example scroll_costs` alternates the baseline and
 candidate caches. Native paired runs, exact reviewer
 commands and remaining app-level findings are in
-[tools/scroll-gate](../../tools/scroll-gate/README.md) and its RESULTS.md.
+tools/scroll-gate and its RESULTS.md.

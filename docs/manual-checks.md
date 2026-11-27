@@ -3,12 +3,12 @@
 These checks need a person at an awake, unlocked Mac with the built-in or an attached display
 showing the desktop (not a remote-control session: in a remote session macOS skips every
 drawable and the benchmarks time out). Use the installed app
-(`/Users/zoro/dev/velocity-stable/target/package-macos/Velocity.app`, or the latest package).
+(`<checkout>/target/package-macos/Velocity.app`, or the latest package).
 
 ## 1. GUI benchmarks (≈ 10 min, opens windows — don't touch the keyboard or mouse)
 ```sh
-cd /Users/zoro/dev/velocity
-scripts/bench-gui.sh /Users/zoro/dev/velocity-stable/target/package-macos/Velocity.app/Contents/MacOS/velocity
+cd <checkout>
+scripts/bench-gui.sh <checkout>/target/package-macos/Velocity.app/Contents/MacOS/velocity
 ```
 Report the summary table (startup first real scanout, skipped drawables, typing p50/p95 for 1 and
 1000 carets, scroll frame p95, footprint). Compare with `docs/performance.md`.

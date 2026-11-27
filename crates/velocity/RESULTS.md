@@ -16,7 +16,7 @@ The bootstrap resamples process pairs 20,000 times; individual key samples are n
 independent processes. The runner gates both p50 upper bounds at +5%. No lane-A compilation,
 tests or other benchmark ran during a series. All 40,000 typing samples (including the retained pre-capacity-guard validation series), definition samples,
 process quantiles, binary/source hashes and diagnostic phases are in
-[timings-round11.json](timings-round11.json). Raw files and frozen executables:
+timings-round11.json. Raw files and frozen executables:
 `/tmp/velocity-round11/{before,gate,final,final-capacity}`. The finished binary is `final-capacity`;
 the earlier `final` series is retained as additional evidence. The regression reproduction used the clean merge
 state (`3f4f4cb`, application code `7c84f61`). No samples or timing outliers were dropped.
@@ -52,7 +52,7 @@ inferred from CPU evidence. Outside the sandbox, run:
 zsh crates/velocity/scripts/review-round11-gui.zsh
 ```
 
-Follow [MANUAL_TEST.md](MANUAL_TEST.md)'s Round 11 checklist; engine compatibility limits are in
+Follow MANUAL_TEST.md's Round 11 checklist; engine compatibility limits are in
 ROUND11.md and vel-vintage/COVERAGE.md. Earlier reports follow.
 <!-- ROUND11-RESULTS-END -->
 
@@ -85,7 +85,7 @@ process. No compilation, tests or other lane-A benchmark ran alongside these pro
 Five further current-binary processes measure 100 popup opens, 100 annotation frames and
 50 theme switches each. All 10,000 typing samples, 6,000 scrolling samples, budget samples,
 process results, environment/source hashes and confidence intervals are retained in
-[timings-round10.json](timings-round10.json). Raw evidence: `/tmp/velocity-r10-final-20261115T121806Z`.
+timings-round10.json. Raw evidence: `/tmp/velocity-r10-final-20261115T121806Z`.
 
 | Probe | Budget | Measured p50 / p95 |
 | --- | --- | --- |
@@ -125,7 +125,7 @@ in the raw directory. No timing failure or outlier was discarded.
 - [x] Reviewer script syntax checks; frozen-binary CPU A/B and all three feature budgets.
 - [x] Lane-A-only file scope; no GUI/Metal execution; no commit.
 - [ ] Human native fonts/Retina/OS appearance/title bar/hover/press/fade/IME/link checks,
-  Metal validation and native CPU/GPU/scanout measurements from [MANUAL_TEST.md](MANUAL_TEST.md#round-10-theme-and-minihtml-acceptance).
+  Metal validation and native CPU/GPU/scanout measurements from MANUAL_TEST.md.
 
 The initial parallel workspace run hit the existing socket test's deadline; both its sequential
 rerun and the subsequent full default workspace rerun passed. Detailed gate logs accompany
@@ -176,7 +176,7 @@ process. A prepared popup, sidebar and status bar are present in both modes. Eac
 immediate scene suppresses stale annotation ranges; exact worker preparation is outside the
 input timer. Worker jobs flush after scene construction. No other lane-A benchmark or
 compilation ran during the series. All 10,000 typing samples, scheduling outliers, raw runs,
-source hashes and process medians are retained in [timings-round9.json](timings-round9.json).
+source hashes and process medians are retained in timings-round9.json.
 
 | Probe | Budget | Final measurement |
 | --- | --- | --- |
@@ -221,7 +221,7 @@ run `zsh crates/velocity/scripts/review-round9-gui.zsh`. It executes five native
 on/off pairs, 4K typing, full-history startup, Metal validation and the interactive fixture.
 The exact expanded commands and timing boundaries are at the top of [RUNBOOK.md](RUNBOOK.md).
 Native typing ≤2/4 ms, ≤5% regression, restore ≤300 ms and Metal/notification behavior remain
-reviewer checks. [MANUAL_TEST.md](MANUAL_TEST.md) records Chinese IME as human-confirmed, puts
+reviewer checks. MANUAL_TEST.md records Chinese IME as human-confirmed, puts
 complete Hot Exit history first, and adds pending Git/diff/spelling/encoding/clone checks.
 <!-- ROUND9-RESULTS-END -->
 
@@ -266,7 +266,7 @@ samples and scheduling outliers remain in the run directories.
 
 Verdict: the round-7 +8.2% regression did not reproduce in the isolated session. Final round-8
 scroll also has no >5% p50 regression with non-overlapping confidence. Binary and fixture hashes
-are in [timings-round8.json](timings-round8.json); the original round-6/7 records are unchanged.
+are in timings-round8.json; the original round-6/7 records are unchanged.
 
 ## Parser CPU and memory
 
@@ -314,7 +314,7 @@ Coverage includes stale completion commits/caret changes, delay/trigger/Tab poli
 popup layouts, field/mirror/IME/undo behavior, clone cancellation, package reloads, live status,
 unsaved indexing, navigation previews/history and fresh/read-only/corrupt profiles. Existing
 Hot Exit and Chinese IME regressions still pass. Native behavior/IME geometry/Hot Exit acceptance
-remain in [MANUAL_TEST.md](MANUAL_TEST.md); exact automatic and interactive commands are at the
+remain in MANUAL_TEST.md; exact automatic and interactive commands are at the
 top of [RUNBOOK.md](RUNBOOK.md). No GUI/Metal run is claimed from this sandbox.
 
 Reproduction helpers: `scripts/build-parser-reference.py`, `scripts/measure-intelligence.py`
@@ -355,7 +355,7 @@ No GUI/AppKit window, Metal device, display wake or unlock was started in this s
 build 6, session 7, fileio 7, search 8 and render 8. Scoped fmt, clippy `-D warnings`, rustdoc
 `-D warnings`, release build, measurement-parser self-test and bundle shell syntax pass.
 Exact runnable validation/native commands are at the top of [RUNBOOK.md](RUNBOOK.md);
-[MANUAL_TEST.md](MANUAL_TEST.md#round-7--workbenchsessionbuild-acceptance-native-review-pending)
+MANUAL_TEST.md
 contains the pending human checklist. No native acceptance result is inferred from unit tests.
 
 ## Five sequential CPU runs
@@ -363,7 +363,7 @@ contains the pending human checklist. No native acceptance result is inferred fr
 Same copied release binary for workbench and preceding-round regression suites:
 `5c6262d9eeacd88dc856bec9fb328ebea4c5b3cec881a40acfcd44eac5da1e91`.
 Host: `Darwin-25.1.0-arm64-arm-64bit-Mach-O`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
-[Machine-readable results](timings-round7.json) retain source hashes, all runs, quantiles,
+Machine-readable results retain source hashes, all runs, quantiles,
 boundaries, comparison data and references to preceding series. Raw workbench
 [summary](output/round7-cpu-20261114T073311.813812Z/summary.json), [first run](output/round7-cpu-20261114T073311.813812Z/run-1.jsonl)
 and all other runs retain every sample/outlier. Measurements omit the debug layer.
@@ -399,7 +399,7 @@ the p95 limits are retained in the table and raw data.
 
 ## Round-6 workload comparison
 
-The original [round-6 record](timings-round6.json) is unchanged. The final binary repeats its
+The original round-6 record is unchanged. The final binary repeats its
 single-view workload five times: 3,000 scroll, 2,500 typing, 500 rewrap and 100 fold/unfold
 samples. The script retains its historical `round6-cpu` output prefix; this directory contains
 the **round-7 binary**: [summary](output/round6-cpu-20261114T073612.389128Z/summary.json).
@@ -471,7 +471,7 @@ and diff whitespace checks pass. GPU/Metal validation and the native checklist r
 
 Five sequential release CPU runs began **2026-11-14 05:21:28 UTC**, Darwin 25.1.0 arm64,
 rustc 1.99.1. Every run used one copied binary (SHA-256 and source fingerprints are in
-[timings-round6.json](timings-round6.json)); lane B remained active. Quantiles below pool every
+timings-round6.json); lane B remained active. Quantiles below pool every
 sample using linear interpolation. No outlier was removed.
 
 | CPU workload | Samples | p50, ms | p95, ms | Max, ms | Spec target / comparison |
@@ -500,7 +500,7 @@ keymap dispatch, transaction and CPU scene, and excludes native event receipt, s
 uploads, GPU and presentation. Rewrap excludes the preceding buffer transaction. Fold/unfold
 includes commands, named regions and layout projection, with painting outside the timer.
 
-Durable aggregate: [timings-round6.json](timings-round6.json). Raw JSONL, environment, stdout
+Durable aggregate: timings-round6.json. Raw JSONL, environment, stdout
 and the measured binary are retained in
 [the run directory](output/round6-cpu-20261114T052128.851998Z/summary.json).
 [measure-views.py](scripts/measure-views.py) reproduces five runs without initializing GUI/GPU.
@@ -509,7 +509,7 @@ Earlier timing experiments remain in output; the table above describes the final
 Reviewer GUI commands and exact native boundaries are at the top of [RUNBOOK.md](RUNBOOK.md).
 Open now correlates the exact highlighted drawable with positive presentedTime; Scroll has an
 isolated minimap timestamp pass. These native paths have only been compiled. Record actual
-physical size/scale/refresh, repeat five times and fill [MANUAL_TEST.md](MANUAL_TEST.md).
+physical size/scale/refresh, repeat five times and fill MANUAL_TEST.md.
 No native typing, scanout, GPU budget or visual-quality result is inferred from CPU checks.
 
 Current limits: undo/redo and generic buffer operations whose transaction descriptors are not

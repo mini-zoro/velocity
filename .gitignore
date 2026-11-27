@@ -6,3 +6,19 @@
 /perf/local/
 __pycache__/
 *.pyc
+
+# Development working material stays out of the public repository: component specs,
+# spikes, prototypes, ad-hoc tools, raw benchmark/experiment logs and manual test logs.
+/specs/
+/spikes/
+/prototypes/
+/tools/
+crates/*/MANUAL_TEST.md
+crates/*/round[0-9]*.json
+crates/*/round[0-9]*.jsonl
+crates/*/round[0-9]*.log
+crates/*/round[0-9]*.txt
+crates/*/timings-*.json
+crates/*/*-checks.json
+# Design review screenshots: commit only an image a document references (git add -f).
+docs/design/**/*.png

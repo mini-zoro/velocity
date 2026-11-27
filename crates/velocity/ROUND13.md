@@ -148,7 +148,7 @@ zsh crates/velocity/scripts/review-round13-gui.zsh \
   /tmp/velocity-r13-bundle/Velocity.app /tmp/velocity-r13-review
 ```
 
-Follow [the round-13 VoiceOver/release checklist](MANUAL_TEST.md#round-13-release-wiring-and-voiceover-human-review-required),
+Follow the round-13 VoiceOver/release checklist,
 including the explicit synthetic crash-report setup before checking next-launch prompting.
 
 ## Final measured results
