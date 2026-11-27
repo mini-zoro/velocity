@@ -866,7 +866,12 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
     let files = [environment.fixture("startup.rs", contents: body),
                  environment.fixture("second.txt", contents: "The second restored window.\n")]
     let darkScheme = "{\n  \"color_scheme\": \"Velocity Dark.sublime-color-scheme\",\n  \"theme\": \"Velocity.sublime-theme\"\n}\n"
-    let only = ProcessInfo.processInfo.environment["E2E_STARTUP_CASES"].map { Set($0.split(separator: ",").map(String.init)) }
+    // E2E_STARTUP_CASES="light,dark" runs a subset; unset or empty runs every case.
+    let only = ProcessInfo.processInfo.environment["E2E_STARTUP_CASES"].flatMap { value -> Set<String>? in
+        let names = Set(value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty })
+        return names.isEmpty ? nil : names
+    }
     let cases = [
         StartupCase(name: "light", samples: 3),
         StartupCase(name: "light-noanim", samples: 2,
@@ -875,6 +880,7 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         StartupCase(name: "dark-scheme-light-system", samples: 2, preferences: darkScheme),
         StartupCase(name: "restore2", samples: 2, restore: true),
     ].filter { only?.contains($0.name) ?? true }
+    report.check(!cases.isEmpty, "startup cases selected", detail: cases.map(\.name).joined(separator: ","))
     // Baseline first-content medians (ms from GUI process start) measured before the
     // fix, "light=123,dark=130"; without them speed is only reported.
     var baseline: [String: Double] = [:]
@@ -888,8 +894,8 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
     do {
         let data = environment.work.appendingPathComponent("data-warmup")
         let home = harness.home("warmup")
-        _ = harness.launch(StartupCase(name: "warmup", samples: 1), sample: 0, files: [files[0]], data: data,
-                           home: home, keepFrames: false)
+        harness.describe(harness.launch(StartupCase(name: "warmup", samples: 1), sample: 0, files: [files[0]],
+                                        data: data, home: home, keepFrames: false))
     }
 
     var medians: [String: Double] = [:]
