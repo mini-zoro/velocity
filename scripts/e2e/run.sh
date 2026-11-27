@@ -33,7 +33,8 @@ usage() {
 build() {
     mkdir -p "$E2E_BIN"
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
-        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift"
+        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
+        "$VELOCITY_E2E/startup.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
@@ -130,6 +131,8 @@ scenarios() {
         scenario background
     fi
     scenario footprint
+    # Screen recording only; no keyboard or mouse.
+    scenario startup
     {
         printf '\n### Scenario selection\n\nkeyboard(IME)=%s pointer(mouse)=%s (from the probe)\n' "$keyboard" "$pointer"
     } >>"$SUMMARY"

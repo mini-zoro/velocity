@@ -14,10 +14,14 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "auto = probe then every supported scenario; probe only; scenarios only"
+        description: "auto = probe then every supported scenario; probe only; scenarios only; startup scenario only"
         type: choice
         default: auto
-        options: [auto, probe, scenarios]
+        options: [auto, probe, scenarios, startup]
+      startup_cases:
+        description: "startup scenario: comma-separated cases to run (empty = all)"
+        type: string
+        default: ""
 
 concurrency:
   group: gui-e2e-${{ github.workflow }}-${{ github.ref }}
@@ -61,14 +65,22 @@ jobs:
       # Step 1: capability table (csrutil, GUI session, TCC, HID keyboard/pointer,
       # Pinyin selection, screencapture). Also decides which scenarios run below.
       - name: Probe runner capabilities
-        if: inputs.suite != 'scenarios'
+        if: inputs.suite != 'scenarios' && inputs.suite != 'startup'
         continue-on-error: true
         run: scripts/e2e/run.sh probe
 
       - name: Scenarios (probe-gated)
-        if: github.event_name == 'pull_request' || inputs.suite != 'probe'
+        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'startup')
         continue-on-error: true
         run: scripts/e2e/run.sh scenarios
+
+      # Screen recording of cold launches only (no HID), for startup-flash work.
+      - name: Startup scenario only
+        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'startup'
+        continue-on-error: true
+        env:
+          E2E_STARTUP_CASES: ${{ inputs.startup_cases }}
+        run: scripts/e2e/run.sh scenario startup
 
       - name: Summarise
         if: always()
