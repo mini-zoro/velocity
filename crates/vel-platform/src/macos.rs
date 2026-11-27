@@ -1770,6 +1770,19 @@ impl EditorView {
             if kind == MouseKind::Down
                 && let Some(w) = self.window()
             {
+                // A click that takes the user away from a live conversion is what
+                // closes the input method's candidate window: AppKit's own text views
+                // hand the mouse event to their input context, and an input method
+                // that never sees the click keeps its panel on screen. The discard is
+                // requested first so anything the input method sends back for the
+                // abandoned conversion is dropped, and the published snapshot still
+                // shows the preedit so the request finds the conversion to end.
+                if h.input.borrow().marked.is_some() {
+                    h.ime_discard.request();
+                    if let Some(context) = h.view().and_then(|v| v.inputContext()) {
+                        let _ = context.handleEvent(e);
+                    }
+                }
                 // This only changes which responder in the window gets keys; it does not make
                 // the window key or activate the app:
                 // <https://developer.apple.com/documentation/appkit/nswindow/makefirstresponder(_:)>
