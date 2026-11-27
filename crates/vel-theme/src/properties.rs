@@ -182,6 +182,9 @@ pub enum LayerProperty {
     Repeat,
     /// Optional per-layer tint blend, accepted for renderer extensions.
     TintModifier,
+    /// Velocity extension: margins this layer is painted inside, measured from the
+    /// element's bounds, in place of the element's `surface_inset`.
+    SurfaceInset,
 }
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -224,6 +227,7 @@ macro_rules! properties {
                         "texture" => LayerProperty::Texture, "inner_margin" => LayerProperty::InnerMargin,
                         "draw_center" => LayerProperty::DrawCenter, "repeat" => LayerProperty::Repeat,
                         "tint_modifier" => LayerProperty::TintModifier,
+                        "surface_inset" => LayerProperty::SurfaceInset,
                         _ => return Self::Extension(name.into()),
                     };
                     return Self::Layer(index,key);
@@ -235,7 +239,7 @@ macro_rules! properties {
                     $(Self::$id => Kind::$kind,)*
                     Self::Layer(_, LayerProperty::Tint) => Kind::Color,
                     Self::Layer(_, LayerProperty::Opacity) => Kind::Number,
-                    Self::Layer(_, LayerProperty::InnerMargin) => Kind::Insets,
+                    Self::Layer(_, LayerProperty::InnerMargin | LayerProperty::SurfaceInset) => Kind::Insets,
                     Self::Layer(_, LayerProperty::DrawCenter | LayerProperty::Repeat) => Kind::Bool,
                     Self::Layer(_, LayerProperty::TintModifier) => Kind::Modifier,
                     _ => return None,

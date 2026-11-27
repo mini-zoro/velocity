@@ -1312,6 +1312,35 @@ fn r26_tabs(fixture: &Fixture, dark: bool, rounded: bool, left: bool) -> Result<
     Ok(app)
 }
 
+/// Five synthetic tabs for the divider study in `docs/design/tab-dividers-*`: the
+/// first and fourth are modified and the third is selected; the `-hover` variants
+/// rest the pointer on the second (see `after_layout`). The side bar is hidden so the
+/// strip starts at the window's left edge.
+fn tab_dividers(fixture: &Fixture, dark: bool, style: &str, focused: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    app.panels.side_visible = false;
+    let names = ["main.rs", "笔记.md", "README.md", "配置.toml", "todo.txt"];
+    for (index, name) in names.into_iter().enumerate() {
+        let path = fixture.scratch(name);
+        std::fs::write(&path, "示例\n").map_err(|e| e.to_string())?;
+        open(&mut app, &path)?;
+        if matches!(index, 0 | 3) {
+            named(&mut app, "insert", json!({"characters": "草稿\n"}));
+        }
+    }
+    open(&mut app, &fixture.scratch(names[2]))?;
+    let e = app.workspace.editor_mut();
+    e.settings.set(
+        vel_config::settings::Layer::View,
+        "file_tab_style",
+        json!(style),
+    );
+    e.sync();
+    app.set_window_focused(focused);
+    settle(&mut app);
+    Ok(app)
+}
+
 /// An untitled tab named after its first line, renamed in place.
 fn r46_tab_rename_untitled(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_editor(fixture, dark)?;
@@ -2068,6 +2097,66 @@ const SCENARIOS: &[Scenario] = &[
         size: (800., 240.),
         build: r46_tab_rename_untitled,
     },
+    Scenario {
+        name: "tab-dividers-rounded",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "rounded", true),
+    },
+    Scenario {
+        name: "tab-dividers-rounded-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "rounded", true),
+    },
+    Scenario {
+        name: "tab-dividers-rounded-unfocused",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "rounded", false),
+    },
+    Scenario {
+        name: "tab-dividers-rounded-unfocused-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "rounded", false),
+    },
+    Scenario {
+        name: "tab-dividers-angled",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "angled", true),
+    },
+    Scenario {
+        name: "tab-dividers-angled-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "angled", true),
+    },
+    Scenario {
+        name: "tab-dividers-angled-unfocused",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "angled", false),
+    },
+    Scenario {
+        name: "tab-dividers-angled-unfocused-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "angled", false),
+    },
+    Scenario {
+        name: "tab-dividers-square",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "square", true),
+    },
+    Scenario {
+        name: "tab-dividers-square-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "square", true),
+    },
+    Scenario {
+        name: "tab-dividers-square-unfocused",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "square", false),
+    },
+    Scenario {
+        name: "tab-dividers-square-unfocused-hover",
+        size: (1000., 120.),
+        build: |f, d| tab_dividers(f, d, "square", false),
+    },
 ];
 
 /// Pointer-driven states are applied after layout because hit testing needs real geometry.
@@ -2128,6 +2217,12 @@ fn after_layout(name: &str, app: &mut App) {
             let _ = app.scene();
             let size = app.window_size;
             pointer(app, MouseKind::Move, size.width - 24., size.height - 12.);
+        }
+        name if name.starts_with("tab-dividers-") && name.ends_with("-hover") => {
+            // Rest the pointer on the second tab, left of the selected third one.
+            if let Some((_, rect)) = app.tab_hits.get(1).copied() {
+                pointer(app, MouseKind::Move, rect.x + rect.width / 2., rect.y + 10.);
+            }
         }
         "tabs" | "large_1920x1200" => {
             // Hover an inactive tab, then rest the pointer on another tab's close button.

@@ -35,6 +35,7 @@ fn all_property_names_and_layer_fields_are_typed() {
             "draw_center",
             "repeat",
             "tint_modifier",
+            "surface_inset",
         ] {
             assert!(matches!(
                 Property::named(&format!("layer{layer}.{key}")),
@@ -42,6 +43,24 @@ fn all_property_names_and_layer_fields_are_typed() {
             ));
         }
     }
+}
+#[test]
+fn layer_surface_inset_parses_as_insets() {
+    let theme = Theme::parse(
+        r#"[{"class":"x","layer1.surface_inset":[0,8]}]"#,
+        &Palette::default(),
+    )
+    .unwrap();
+    let mut r = Resolver::new(Arc::new(theme));
+    let s = r.resolve(
+        &ElementPath(&[Element::new("x", &[])]),
+        &Settings::default(),
+        Platform::Mac,
+    );
+    let m = s
+        .insets(&Property::Layer(1, LayerProperty::SurfaceInset))
+        .expect("layer inset");
+    assert_eq!((m.left, m.top, m.right, m.bottom), (0., 8., 0., 8.));
 }
 #[test]
 fn predefined_scheme_overrides_and_appearance_thresholds() {

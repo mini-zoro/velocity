@@ -265,6 +265,16 @@ light["selected"] = hex_mix(light["surface"], light["accent"], .18)
 light["selected_focus"] = hex_mix(light["surface"], light["accent"], .3)
 light.update(focus="#007aff", on_focus="#ffffff", ring="color(var(focus) a(0.45))",
              card_line="#0000001f", card_shadow="#00000033", popup_shadow="#00000038", wash="#000000")
+# Rounded tabs' divider: text colour over the chrome, measured at about 1.7:1 against
+# `surface` in both themes (dark needs less of it), quieter than any label but clearly a
+# boundary. `line` is too faint for that (1.3:1 light, 1.1:1 dark).
+dark["divider"] = hex_mix(dark["surface"], dark["fg"], .19)
+light["divider"] = hex_mix(light["surface"], light["fg"], .30)
+# Angled and square tabs keep `line` in the light theme, where it is visible (1.3:1); in the
+# dark theme `line` is darker than the strip and all but disappears (1.1:1), so they use the
+# rounded tabs' divider there (2026-11-28 decision).
+dark["tab_rule"] = dark["divider"]
+light["tab_rule"] = light["line"]
 rules = []
 
 
@@ -319,11 +329,13 @@ rule("sidebar_tree", indent=16, indent_offset=4, indent_top_level=False, spacer_
 rule("sidebar_heading", **{"fg": "var(muted)", "font.size": 11, "font.bold": True, "case": "upper"})
 # Hairline indent guides under each expanded folder's disclosure triangle (our own element).
 rule("sidebar_indent_guide", **fill("fg", .1))
-rule("tabset_control", tab_height=32, tab_width=180, tab_min_width=72, tab_overlap=0)
+# 140 DIPs keeps a modified dot near its own name (180 left it closer to the next tab's icon)
+# while typical file names still fit (2026-11-28 decision).
+rule("tabset_control", tab_height=32, tab_width=140, tab_min_width=72, tab_overlap=0)
 # Tabs: inactive tabs sit on the chrome with a short divider; the selected tab takes the
 # editor background so it reads as part of the sheet below; the focused one gets an accent bar.
 rule("tab_control", content_margin=[12, 8], close_button_side="right", max_margin_trim=6,
-     **texture("tab-divider", "line", [0, 7, 1, 7]))
+     **texture("tab-divider", "tab_rule", [0, 7, 1, 7]))
 rule("tab_control", attributes=["hover"], **fill("fg", .05, animated=True))
 rule("tab_control", attributes=["selected"], **{"layer0.opacity": 1.0, "tint_index": 0, "layer1.opacity": 0.0})
 # One-DIP end slices keep the bar's ends crisp: a slice stretched to the texture's edge filters
@@ -475,16 +487,22 @@ for cls, setting in (("tab_close_button", "!show_tab_close_buttons"), ("scroll_t
 
 # Where inherits Close's button states; only the mask is different.
 rule("panel_where_button", **{"layer1.texture": "Theme - Velocity/palette-neutral.png"})
-# `rounded` (the default) is a floating card, as in Safari and Xcode: no dividers and no
-# accent bar; hover is a rounded wash; the selected tab is a card in the editor's colour
-# with a hairline, and the focused group's card also casts a soft shadow. `angled` and
-# `square` keep the strip above. The card is inset in the tab's hit area, so the gaps
-# between tabs come from the inset alone and nothing is drawn per gap.
+# `rounded` (the default) is a floating card, as in Safari and Xcode: no accent bar; hover is
+# a rounded wash; the selected tab is a card in the editor's colour with a hairline, and the
+# focused group's card also casts a soft shadow. `angled` and `square` keep the strip above.
+# The card is inset in the tab's hit area. Between plain tabs a short divider (16 of 32 DIPs,
+# centred) marks where each tab ends: it sits on the tab's right edge, outside the card inset
+# (`layer1.surface_inset`), midway between a modified dot and the next tab's icon. A card
+# needs no line beside it, so the selected and hovered tabs and their left neighbours
+# (`left_of_selected`, `left_of_hover`) drop theirs.
 ROUNDED = {"file_tab_style": "rounded"}
-rule("tab_control", settings=ROUNDED, radius=RADIUS["card"], surface_inset=[3, 4], **{"layer1.opacity": 0.0})
+rule("tab_control", settings=ROUNDED, radius=RADIUS["card"], surface_inset=[3, 4],
+     **texture("edge-right", "divider", [0, 0, 1, 0]), **{"layer1.surface_inset": [0, 8]})
+for state in ("hover", "left_of_selected", "left_of_hover"):
+    rule("tab_control", attributes=[state], settings=ROUNDED, **{"layer1.opacity": 0.0})
 # Another group's selected card is half-filled, so the focused group stands out without an accent.
 rule("tab_control", attributes=["selected"], settings=ROUNDED, border_color="var(card_line)", border_size=HAIRLINE,
-     **{"layer0.opacity": 0.55})
+     **{"layer0.opacity": 0.55, "layer1.opacity": 0.0})
 rule("tab_control", attributes=["selected", "focused"], settings=ROUNDED,
      shadow_color="var(card_shadow)", shadow_offset=[0, 1], shadow_blur=6, shadow_spread=0, **{"layer0.opacity": 1.0, "layer2.opacity": 0.0})
 rule("tab_close_button", settings=ROUNDED, pill=True)
