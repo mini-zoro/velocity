@@ -103,6 +103,9 @@ fn listener(
     // SAFETY: all libproc writes have the size of their live output buffer.
     unsafe {
         let bytes = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
+        if gone(bytes) {
+            return Some(false);
+        }
         if bytes <= 0 || bytes as usize / size > 32_768 {
             return None;
         }
@@ -115,6 +118,9 @@ fn listener(
             fds.as_mut_ptr().cast(),
             capacity as i32,
         );
+        if gone(bytes) {
+            return Some(false);
+        }
         if bytes <= 0 || bytes as usize >= capacity {
             return None;
         }
@@ -132,7 +138,11 @@ fn listener(
                 std::mem::size_of_val(&socket) as i32,
             );
             if bytes != std::mem::size_of_val(&socket) as i32 {
-                complete &= io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
+                let error = io::Error::last_os_error().raw_os_error();
+                if error == Some(libc::ESRCH) {
+                    return Some(false);
+                }
+                complete &= error == Some(libc::EBADF);
                 continue;
             }
             if socket.family != libc::AF_UNIX
@@ -152,5 +162,31 @@ fn listener(
             }
         }
         complete.then_some(false)
+    }
+}
+
+/// A process that exited while it was being inspected has no descriptor table
+/// left, so it cannot be the listener. Only an unreadable table of a live process
+/// (for example EPERM) stays inconclusive and is treated conservatively.
+fn gone(bytes: i32) -> bool {
+    bytes == 0 || (bytes < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exited_process_is_not_a_listener() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        let path = std::env::temp_dir().join("velocity-exited-process.sock");
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(
+            listener(pid, &mut Vec::new(), &path, uid, (0, 0)),
+            Some(false)
+        );
     }
 }
