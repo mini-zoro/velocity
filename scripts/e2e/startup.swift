@@ -386,7 +386,7 @@ struct Judgement {
     let time: Double
     let changed: Double   // differs from the screen before the launch
     let matching: Double  // equals the final frame (tight)
-    let alien: Double     // a colour the final frame does not use (the flash measure)
+    let alien: Double     // changed, and in a colour the final frame does not use (the flash measure)
     let foreign: Double   // outside the before/final envelope per pixel (missing content too)
     let white: Double     // near-pure white (every channel >= 250)
     let alienColor: String
@@ -469,12 +469,14 @@ func judge(_ frame: ScreenFrame, before: ScreenFrame, final: ScreenFrame, palett
         let outside = fr > max(br, sr) + envelopeTolerance || fr < min(br, sr) - envelopeTolerance
             || fg > max(bg, sg) + envelopeTolerance || fg < min(bg, sg) - envelopeTolerance
             || fb > max(bb, sb) + envelopeTolerance || fb < min(bb, sb) - envelopeTolerance
-        if outside {
-            foreign += 1
-            if fromBefore > envelopeTolerance && !palette.contains(fr, fg, fb) {
-                alien += 1
-                alienSum = (alienSum.0 + fr, alienSum.1 + fg, alienSum.2 + fb)
-            }
+        if outside { foreign += 1 }
+        // Changed, not yet final, and in a colour the stable frame does not use.
+        // Not limited to the before/final envelope: over a black desktop that
+        // would let any backdrop darker than the theme pass (no fades occur;
+        // no opening animation was ever recorded).
+        if fromFinal > matchTolerance && fromBefore > envelopeTolerance && !palette.contains(fr, fg, fb) {
+            alien += 1
+            alienSum = (alienSum.0 + fr, alienSum.1 + fg, alienSum.2 + fb)
         }
         if fr >= 250 && fg >= 250 && fb >= 250 { white += 1 }
         let bin = (fr >> 4) << 8 | (fg >> 4) << 4 | (fb >> 4)
