@@ -4,11 +4,13 @@ name: GUI end-to-end
 # first-click activation, background launch. Every run starts with the capability
 # probe and only runs the scenarios that probe shows the runner supports.
 #
-# Not a required check: it never gates a merge, and it is not on main's push path.
+# Not a required check: it never gates a merge. auto-release.yml calls it on the
+# commit it is about to publish, so a release needs it green.
 on:
   pull_request:
     paths-ignore:
       - "docs/**"
+  workflow_call:
   workflow_dispatch:
     inputs:
       suite:

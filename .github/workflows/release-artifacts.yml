@@ -4,6 +4,14 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+  # auto-release.yml calls this for a version merged to main; the release then
+  # creates the tag at the calling commit.
+  workflow_call:
+    inputs:
+      tag:
+        description: Version tag to create at the calling commit and publish
+        type: string
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,8 +72,9 @@ jobs:
 
   publish:
     name: GitHub Release
-    # Only a pushed version tag publishes; a manual run just builds the artifacts above.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Only a pushed version tag or auto-release publishes; a manual run just builds
+    # the artifacts above.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag
     needs: [macos, windows]
     runs-on: ubuntu-24.04
     permissions:
@@ -78,7 +87,7 @@ jobs:
           merge-multiple: true
       - name: Check that the tag names the packaged version
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           version=${TAG#v}
@@ -120,7 +129,7 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           cat > notes.md <<'NOTES'
           ## Install
@@ -145,5 +154,7 @@ jobs:
           `SHA256SUMS.sig` is Velocity's detached Ed25519 signature over `SHA256SUMS`.
           After verifying the signature, check downloads with `shasum -a 256 -c SHA256SUMS`.
           NOTES
+          # --target only matters when the tag does not exist yet (auto-release);
+          # a pushed tag keeps the commit it names.
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Velocity $TAG" \
-            --notes-file notes.md --generate-notes
+            --target "$GITHUB_SHA" --notes-file notes.md --generate-notes

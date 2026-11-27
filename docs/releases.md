@@ -36,9 +36,32 @@ manually; check the version of both folders, then move the unsuccessful trial
 aside and restore the previous folder to its original name. The updater does
 not overwrite an existing `.old` folder.
 
+## Publishing a release
+
+Releases are automatic once a version bump reaches main:
+
+```sh
+scripts/release.sh 0.1.4
+```
+
+The script bumps the workspace version on a `release-0.1.4` branch, opens the PR
+and enables auto-merge, so it merges when the required macOS and Windows checks
+pass. The push to main starts **Auto release**
+(`.github/workflows/auto-release.yml`). It does nothing unless the workspace
+version has no `v*` tag yet and is newer than the latest one. It then waits for
+the same commit's required checks, runs the GUI end-to-end suite on it, and only
+when all three pass builds, signs and publishes `v0.1.4` at that commit. A failure
+publishes nothing; fix or re-run the failed check, then re-run the Auto release
+run's failed jobs. Ordinary merges never publish, so users are not offered an
+update for every change.
+
+Pushing a `v*` tag by hand still publishes that tag the same way, without the
+end-to-end gate; prefer the script.
+
 ## Provision the signing key before the first updater release
 
-The public-key list is intentionally empty until a maintainer provisions it.
+The key was provisioned on 2026-11-26: one public key is embedded and the
+repository secret is set. These steps are for a fresh fork or a rotation.
 The publish job fails if the repository secret is absent or mismatches all
 embedded keys. Older releases without `SHA256SUMS.sig` cannot be installed by
 the updater. Users on builds without this updater must install the first
@@ -63,7 +86,7 @@ updater-enabled release manually.
    gh secret set VELOCITY_UPDATE_SIGNING_KEY --repo mini-zoro/velocity < "$HOME/velocity-update-signing.pem"
    ```
 
-4. Bump the workspace version and push its matching `v*` tag normally. The
+4. Release as described in [Publishing a release](#publishing-a-release). The
    publish job signs the combined checksums and attaches both checksum files.
    To reproduce the detached signature locally and verify it, with the same
    OpenSSL 3 binary:
