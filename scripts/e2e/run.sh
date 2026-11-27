@@ -99,7 +99,10 @@ scenario() {
     mkdir -p "$work" "$E2E_ARTIFACTS"
     local status=0
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
-        run_with_timeout 480 "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
+        # The startup scenario records dozens of cold launches (twice with an A/B pair).
+        local limit=480
+        [ "$name" = startup ] && limit=1800
+        run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
     cleanup_apps
     append_summary "Scenario $name" "$log"
     echo "$name exit=$status"

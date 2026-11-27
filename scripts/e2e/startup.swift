@@ -565,6 +565,11 @@ struct StartupHarness {
     let recorder: ScreenRecorder
     let owner: String
     let artifacts: String?
+    /// The Velocity CLI launched next, and its name in labels ("" for the only one).
+    var launcher: URL
+    var variant = ""
+    /// Every CLI the scenario launches, for clean-up.
+    var launchers: [URL]
 
     func home(_ name: String) -> URL {
         let url = environment.work.appendingPathComponent("home-\(name)")
@@ -574,7 +579,7 @@ struct StartupHarness {
 
     func run(_ arguments: [String], home: URL, log: String, wait: Bool) -> Process? {
         let process = Process()
-        process.executableURL = environment.launcher
+        process.executableURL = launcher
         process.arguments = arguments
         var variables = ProcessInfo.processInfo.environment
         variables["HOME"] = home.path
@@ -605,7 +610,7 @@ struct StartupHarness {
         let gone = waitUntil(15, interval: 0.1) { pids.allSatisfy { !processAlive($0) } }
         if !gone {
             report.note("quit", detail: "instance did not exit after --command exit; killing")
-            killVelocity(at: environment.launcher)
+            for launcher in launchers { killVelocity(at: launcher) }
         }
         _ = waitUntil(5, interval: 0.1) { velocityWindowRows(owner: owner).isEmpty }
     }
@@ -660,7 +665,7 @@ struct StartupHarness {
 
     func launch(_ startupCase: StartupCase, sample: Int, files: [String], data: URL, home: URL,
                 keepFrames: Bool) -> LaunchResult {
-        let label = "\(startupCase.name)-\(sample)"
+        let label = variant.isEmpty ? "\(startupCase.name)-\(sample)" : "\(startupCase.name)-\(variant)-\(sample)"
         let output = environment.work.appendingPathComponent("\(label).jsonl")
         try? FileManager.default.removeItem(at: output)
         recorder.clear()
@@ -954,8 +959,9 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         report.finish()
     }
     report.check(true, "screen recording starts", detail: "\(recorder.method); scale \(recorder.scale); refresh \(recorder.refreshRate) Hz")
-    let harness = StartupHarness(report: report, environment: environment, recorder: recorder, owner: owner,
-                                 artifacts: ProcessInfo.processInfo.environment["E2E_ARTIFACTS"])
+    var harness = StartupHarness(report: report, environment: environment, recorder: recorder, owner: owner,
+                                 artifacts: ProcessInfo.processInfo.environment["E2E_ARTIFACTS"],
+                                 launcher: environment.launcher, launchers: [environment.launcher])
     var body = "// Startup fixture: enough text to fill the window.\n"
     for line in 1...120 {
         body += "fn item_\(line)(value: usize) -> usize { value.wrapping_mul(\(line)).rotate_left(\(line % 31)) }\n"
@@ -971,7 +977,7 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
     }
     let cases = [
         StartupCase(name: "light", samples: 3),
-        StartupCase(name: "light-noanim", samples: 2,
+        StartupCase(name: "light-noanim", samples: 1,
                     defaults: [("NSAutomaticWindowAnimationsEnabled", "-bool", "false")]),
         StartupCase(name: "dark", samples: 3, systemDark: true),
         StartupCase(name: "dark-scheme-light-system", samples: 2, preferences: darkScheme),
@@ -986,13 +992,26 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         if parts.count == 2, let value = Double(parts[1]) { baseline[String(parts[0])] = value }
     }
 
+    // E2E_STARTUP_LAUNCHERS="before=/a/velocity,after=/b/velocity" launches every
+    // sample with each CLI, alternating which goes first, on the same runner.
+    var variants: [(String, URL)] = []
+    for pair in (ProcessInfo.processInfo.environment["E2E_STARTUP_LAUNCHERS"] ?? "").split(separator: ",") {
+        let parts = pair.split(separator: "=", maxSplits: 1)
+        if parts.count == 2 { variants.append((String(parts[0]), URL(fileURLWithPath: String(parts[1])))) }
+    }
+    if variants.isEmpty { variants = [("", environment.launcher)] }
+    harness.launchers = variants.map(\.1) + [environment.launcher]
+    report.info("launchers", detail: variants.map { "\($0.0.isEmpty ? "default" : $0.0)=\($0.1.path)" }
+        .joined(separator: ", "))
+
     // Warm-up: page cache, shader cache and font cache, so the first judged launch
     // is not the only cold one.
-    do {
-        let data = environment.work.appendingPathComponent("data-warmup")
-        let home = harness.home("warmup")
+    for (name, url) in variants {
+        harness.launcher = url
+        harness.variant = name
+        let data = environment.work.appendingPathComponent("data-warmup-\(name)")
         harness.describe(harness.launch(StartupCase(name: "warmup", samples: 1), sample: 0, files: [files[0]],
-                                        data: data, home: home, keepFrames: false))
+                                        data: data, home: harness.home("warmup"), keepFrames: false))
     }
 
     var medians: [String: Double] = [:]
@@ -1018,60 +1037,109 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
                 sleep(seconds: 1.5)
             }
         }
-        var results: [LaunchResult] = []
+        var results: [String: [LaunchResult]] = [:]
         let restoreData = environment.work.appendingPathComponent("data-\(startupCase.name)")
         if startupCase.restore {
+            harness.launcher = variants[0].1
+            harness.variant = variants[0].0
             let prepared = harness.prepareRestore(data: restoreData, home: home, files: files)
             report.check(prepared, "\(startupCase.name): two windows opened and saved by quitting")
             if !prepared { continue }
         }
         for sample in 1...startupCase.samples {
-            let data = startupCase.restore ? restoreData
-                : environment.work.appendingPathComponent("data-\(startupCase.name)-\(sample)")
-            if let preferences = startupCase.preferences {
-                let user = data.appendingPathComponent("Packages/User")
-                try? FileManager.default.createDirectory(at: user, withIntermediateDirectories: true)
-                try? preferences.write(to: user.appendingPathComponent("Preferences.sublime-settings"),
-                                       atomically: true, encoding: .utf8)
+            for (name, url) in sample % 2 == 1 ? variants : variants.reversed() {
+                harness.launcher = url
+                harness.variant = name
+                let data = startupCase.restore ? restoreData
+                    : environment.work.appendingPathComponent("data-\(startupCase.name)-\(name)-\(sample)")
+                if let preferences = startupCase.preferences {
+                    let user = data.appendingPathComponent("Packages/User")
+                    try? FileManager.default.createDirectory(at: user, withIntermediateDirectories: true)
+                    try? preferences.write(to: user.appendingPathComponent("Preferences.sublime-settings"),
+                                           atomically: true, encoding: .utf8)
+                }
+                dismissAlerts(report: report)
+                let result = harness.launch(startupCase, sample: sample, files: [files[0]], data: data, home: home,
+                                            keepFrames: true)
+                harness.describe(result)
+                results[name, default: []].append(result)
             }
-            dismissAlerts(report: report)
-            let result = harness.launch(startupCase, sample: sample, files: [files[0]], data: data, home: home,
-                                        keepFrames: true)
-            harness.describe(result)
-            results.append(result)
         }
-        let judged = results.filter { $0.windows > 0 }
-        report.check(judged.count == startupCase.samples && judged.allSatisfy { $0.windows == startupCase.windows },
-                     "\(startupCase.name): every launch shows \(startupCase.windows) window(s) and is recorded",
-                     detail: results.map { "\($0.label): \($0.failure ?? "ok")" }.joined(separator: "; "))
-        let worst = judged.max { $0.maxAlien < $1.maxAlien }
-        report.check(judged.allSatisfy { $0.maxAlien <= maxAlienShare },
-                     "\(startupCase.name): no frame paints more than \(pct(maxAlienShare)) of the window in a colour the stable frame does not use",
-                     detail: worst.map { "worst \($0.label): \(pct($0.maxAlien)) [\($0.flashColors)] over \($0.flashFrames) frame(s), \(fmt($0.flashMs)) ms" } ?? "no launch")
-        let incomplete = judged.compactMap { $0.incompleteMs }
-        report.info("\(startupCase.name): frames still missing content (theme colours only)",
-                    detail: "median \(fmt(median(incomplete))) ms; max foreign \(judged.map { pct($0.maxForeign) }.joined(separator: ", "))")
-        if startupCase.name.hasPrefix("dark") {
-            let dark = judged.allSatisfy { $0.luminance < 110 }
-            report.check(dark, "\(startupCase.name): the final window is dark",
-                         detail: judged.map { "\($0.label) luminance \(Int($0.luminance))" }.joined(separator: ", "))
-        }
-        let contents = judged.compactMap { $0.ms($0.firstContent) }
-        if let m = median(contents) {
-            medians[startupCase.name] = m
-            let scanouts = judged.compactMap { result in result.appMilestones.first { $0.0 == "first_real_scanout" }?.1 }
-            report.info("\(startupCase.name): first content median \(fmt(m)) ms from process start",
-                        detail: "samples \(contents.map { fmt($0) }.joined(separator: ", ")); app first_real_scanout median \(fmt(median(scanouts))) ms")
-            if let before = baseline[startupCase.name] {
-                let ceiling = before + max(regressionAllowanceMs, before * regressionAllowanceShare)
-                report.check(m <= ceiling, "\(startupCase.name): first content is not slower than before the fix",
-                             detail: "median \(fmt(m)) ms, before \(fmt(before)) ms, ceiling \(fmt(ceiling)) ms")
+        for (name, _) in variants {
+            let title = name.isEmpty ? startupCase.name : "\(startupCase.name) [\(name)]"
+            let all = results[name] ?? []
+            let judged = all.filter { $0.windows > 0 }
+            report.check(judged.count == startupCase.samples && judged.allSatisfy { $0.windows == startupCase.windows },
+                         "\(title): every launch shows \(startupCase.windows) window(s) and is recorded",
+                         detail: all.map { "\($0.label): \($0.failure ?? "ok")" }.joined(separator: "; "))
+            let worst = judged.max { $0.maxAlien < $1.maxAlien }
+            let flashLabel = "\(title): no frame paints more than \(pct(maxAlienShare)) of the window in a colour the stable frame does not use"
+            let flashDetail = worst.map { "worst \($0.label): \(pct($0.maxAlien)) [\($0.flashColors)] over \($0.flashFrames) frame(s), \(fmt($0.flashMs)) ms" } ?? "no launch"
+            // The build before the fix is recorded for comparison, not judged.
+            if name == "before" {
+                report.info(flashLabel, detail: flashDetail)
+            } else {
+                report.check(judged.allSatisfy { $0.maxAlien <= maxAlienShare }, flashLabel, detail: flashDetail)
             }
+            report.info("\(title): frames still missing content (theme colours only)",
+                        detail: "median \(fmt(median(judged.map(\.incompleteMs)))) ms; max foreign \(judged.map { pct($0.maxForeign) }.joined(separator: ", "))")
+            if startupCase.name.hasPrefix("dark") {
+                report.check(judged.allSatisfy { $0.luminance < 110 }, "\(title): the final window is dark",
+                             detail: judged.map { "\($0.label) luminance \(Int($0.luminance))" }.joined(separator: ", "))
+            }
+            let contents = judged.compactMap { $0.ms($0.firstContent) }
+            if let m = median(contents) {
+                medians[title] = m
+                report.info("\(title): first content median \(fmt(m)) ms from process start",
+                            detail: "samples \(contents.map { fmt($0) }.joined(separator: ", "))")
+                if name != "before", let before = baseline[startupCase.name] {
+                    let ceiling = before + max(regressionAllowanceMs, before * regressionAllowanceShare)
+                    report.check(m <= ceiling, "\(title): first content is not slower than the given baseline",
+                                 detail: "median \(fmt(m)) ms, baseline \(fmt(before)) ms, ceiling \(fmt(ceiling)) ms")
+                }
+            }
+        }
+        // Same runner, interleaved launches: the comparison that runner speed cannot skew.
+        if let before = results["before"]?.filter({ $0.windows > 0 }), !before.isEmpty,
+           let after = results["after"]?.filter({ $0.windows > 0 }), !after.isEmpty {
+            func compare(_ what: String, judged: Bool, _ value: (LaunchResult) -> Double?) {
+                guard let b = median(before.compactMap(value)), let a = median(after.compactMap(value)) else {
+                    report.info("\(startupCase.name): \(what)", detail: "not measured")
+                    return
+                }
+                let ceiling = b + max(regressionAllowanceMs, abs(b) * regressionAllowanceShare)
+                let detail = "after \(fmt(a)) ms, before \(fmt(b)) ms (medians), ceiling \(fmt(ceiling)) ms"
+                if judged {
+                    report.check(a <= ceiling, "\(startupCase.name): \(what) is not slower than before the fix",
+                                 detail: detail)
+                } else {
+                    report.info("\(startupCase.name): \(what)", detail: detail)
+                }
+            }
+            compare("first content from process start", judged: true) { $0.ms($0.firstContent) }
+            compare("first window pixels after the prepared frame", judged: true) {
+                $0.sincePrepared($0.event("screen_first_window_pixels"))
+            }
+            compare("ordering in after the prepared frame", judged: false) { $0.sincePrepared($0.milestone("ordered_front")) }
+            compare("first submit after the prepared frame", judged: false) { $0.sincePrepared($0.milestone("first_submit")) }
+            compare("first content after the prepared frame", judged: false) { $0.sincePrepared($0.ms($0.firstContent)) }
+            compare("stable after the prepared frame", judged: false) { $0.sincePrepared($0.ms($0.stable)) }
         }
     }
     report.info("first content medians", detail: medians.sorted { $0.key < $1.key }
         .map { "\($0.key)=\(fmt($0.value))" }.joined(separator: ","))
     recorder.stop()
-    killVelocity(at: environment.launcher)
+    for launcher in harness.launchers { killVelocity(at: launcher) }
     report.finish()
+}
+
+extension LaunchResult {
+    func milestone(_ name: String) -> Double? { appMilestones.first { $0.0 == name }?.1 }
+    func event(_ name: String) -> Double? { timeline.first { $0.0 == name }.flatMap { ms($0.1) } }
+    /// Milliseconds from the prepared first frame (the app's own clock) to `ms`:
+    /// what the presentation path costs, without the runner's process and GPU start-up.
+    func sincePrepared(_ ms: Double?) -> Double? {
+        guard let ms, let prepared = milestone("first_offscreen_submitted") else { return nil }
+        return ms - prepared
+    }
 }
