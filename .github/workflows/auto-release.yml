@@ -1,0 +1,116 @@
+name: Auto release
+
+# A push to main whose workspace version has no `v*` tag yet publishes that
+# version, but only after the same commit has passed both required checks and the
+# GUI end-to-end suite. Every other push stops after the first job. To release,
+# merge a PR that bumps the workspace version (scripts/release.sh opens one).
+#
+# The release is built by calling release-artifacts.yml directly: a tag created
+# with the workflow token does not start that workflow's `push: tags` trigger.
+on:
+  push:
+    branches: [main]
+
+# One release decision at a time; a queued run re-checks the tag after the
+# previous one has published.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Unreleased version?
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::workspace version '$version' is not x.y.z"
+            exit 1
+          fi
+          tag="v$version"
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || rc=$?
+          if [[ $rc == 0 ]]; then
+            echo "$tag is already released; nothing to do."
+            exit 0
+          elif [[ $rc != 2 ]]; then
+            echo "::error::could not list tags (git exit $rc)"
+            exit 1
+          fi
+          latest=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/v##' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [[ -n "$latest" && "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -1)" != "$version" ]]; then
+            echo "::error::workspace version $version is older than the latest release v$latest"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from $GITHUB_SHA once its checks pass." >> "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    name: Required checks on this commit
+    needs: version
+    if: needs.version.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      checks: read
+    steps:
+      - name: Wait for macOS and Windows CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The same names branch protection requires on every PR.
+          required=("fmt / clippy / test (macOS arm64)" "build / test (Windows x64)")
+          deadline=$(( $(date +%s) + 110 * 60 ))
+          while :; do
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")
+            pending=0
+            for name in "${required[@]}"; do
+              latest=$(jq -c --arg n "$name" '[.check_runs[] | select(.name == $n)] | max_by(.id) // empty' <<<"$runs")
+              if [[ -z "$latest" ]]; then
+                pending=1; echo "$name: not started"; continue
+              fi
+              status=$(jq -r .status <<<"$latest")
+              conclusion=$(jq -r .conclusion <<<"$latest")
+              if [[ "$status" != completed ]]; then
+                pending=1; echo "$name: $status"; continue
+              fi
+              if [[ "$conclusion" != success ]]; then
+                echo "::error::$name concluded '$conclusion' on $GITHUB_SHA; not releasing. Re-run this workflow's failed jobs after fixing or re-running it."
+                exit 1
+              fi
+              echo "$name: success"
+            done
+            if (( pending == 0 )); then break; fi
+            if (( $(date +%s) >= deadline )); then
+              echo "::error::the required checks did not finish within 110 minutes"
+              exit 1
+            fi
+            sleep 60
+          done
+
+  e2e:
+    name: GUI end-to-end
+    needs: version
+    if: needs.version.outputs.tag != ''
+    uses: ./.github/workflows/gui-e2e.yml
+
+  release:
+    name: Build, sign and publish
+    needs: [version, checks, e2e]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-artifacts.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+    secrets: inherit
