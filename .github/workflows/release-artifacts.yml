@@ -83,6 +83,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
+          # Only the packages built above: when auto-release calls this workflow the
+          # run also holds the GUI end-to-end artifacts.
+          pattern: velocity-*
           path: dist
           merge-multiple: true
       - name: Check that the tag names the packaged version
