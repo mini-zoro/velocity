@@ -246,6 +246,7 @@ pub(crate) enum StyleId {
     SettingsInput,
     SideGuide,
     BuildInput,
+    UpdateBanner,
 }
 impl StyleId {
     pub(crate) const fn at(self, index: u64) -> u64 {
@@ -683,6 +684,8 @@ pub struct Panels {
     /// Status-bar items placed by the last paint, right to left; clicks use these rects.
     /// None until the first paint.
     status_items: Option<Vec<(details::StatusItem, Rect)>>,
+    pub(crate) update_notice: Option<(String, bool)>,
+    pub(crate) update_hit: Option<Rect>,
     /// Find-panel controls laid out for panel, bounds, and both scales.
     find_layout: Option<(Panel, Rect, f64, f64, details::FindControls)>,
     /// State the shown tool tip was last derived from (control, options, panel).
@@ -884,6 +887,8 @@ impl Default for Panels {
             find_layout: None,
             quick_tight: false,
             status_items: None,
+            update_notice: None,
+            update_hit: None,
             tooltip_key: 0,
             output_mirrored: 0,
             input_caption: UiText::default(),
@@ -7524,6 +7529,7 @@ impl Panels {
                 }
             }
         }
+        self.update_hit = None;
         if self.status_visible() {
             let status = self.tree.nodes[&4].rect;
             let status_style = style(4, None, &mut theme);
@@ -7735,37 +7741,91 @@ impl Panels {
                 ));
             }
             self.status_items = Some(status_items);
-            let message =
-                if self.status_message(workspace).is_empty() || self.message_in_find_panel() {
-                    // The find panels show their own message; do not repeat it here.
-                    format!(
-                        "{}{}{}",
-                        document_hint,
-                        if editor.vintage.is_some() {
-                            format!("{} · ", editor.localized_vintage_status(&workspace.ui))
-                        } else {
-                            String::new()
-                        },
-                        status_position(workspace)
-                    )
-                } else {
-                    self.status_message(workspace).to_owned()
-                };
+            let room = (right - 8. * s - left).max(0.);
+            let message = if let Some((notice, actionable)) = &self.update_notice
+                && (self.status_message(workspace).is_empty() || self.message_in_find_panel())
+            {
+                if *actionable && room > 1. {
+                    self.update_hit = Some(Rect {
+                        x: left,
+                        width: room.min(theme.advance(&text, notice) + 6. * s),
+                        ..status
+                    });
+                }
+                notice.clone()
+            } else if self.status_message(workspace).is_empty() || self.message_in_find_panel() {
+                // The find panels show their own message; do not repeat it here.
+                format!(
+                    "{}{}{}",
+                    document_hint,
+                    if editor.vintage.is_some() {
+                        format!("{} · ", editor.localized_vintage_status(&workspace.ui))
+                    } else {
+                        String::new()
+                    },
+                    status_position(workspace)
+                )
+            } else {
+                self.status_message(workspace).to_owned()
+            };
             theme.text_fit(
                 &mut layer,
                 &text,
                 &message,
                 left,
                 status.y + (17. * s),
-                right - 8. * s - left,
+                room,
                 Rect {
                     x: left,
-                    width: (right - 8. * s - left).max(0.),
+                    width: room,
                     ..status
                 },
             );
         } else {
             self.status_items = None;
+            if let Some((notice, actionable)) = &self.update_notice {
+                let path = [
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("status_bar", &[]),
+                ];
+                let bar = theme.style(
+                    StyleId::UpdateBanner.at(0),
+                    &vel_theme::ElementPath(&path),
+                    settings,
+                );
+                let text_path = [
+                    path[0],
+                    path[1],
+                    vel_theme::Element::new("status_container", &[]),
+                ];
+                let text = theme.style(
+                    StyleId::UpdateBanner.at(1),
+                    &vel_theme::ElementPath(&text_path),
+                    settings,
+                );
+                let s = self.ui_scale;
+                let height = 25. * s;
+                let width = (theme.advance(&text, notice) + 20. * s).min(self.size.width - 16. * s);
+                if self.size.height >= height && width > 20. * s {
+                    let rect = Rect {
+                        x: 8. * s,
+                        y: (self.size.height - height - 6. * s).max(0.),
+                        width,
+                        height,
+                    };
+                    theme.surface(&mut layer, &bar, rect, rect);
+                    theme.text_fit(
+                        &mut layer,
+                        &text,
+                        notice,
+                        rect.x + 10. * s,
+                        rect.y + 17. * s,
+                        width - 20. * s,
+                        rect,
+                    );
+                    self.update_hit = actionable.then_some(rect);
+                }
+            }
         }
         scene.layers.push(layer);
         let theme_animating = theme.animating();
@@ -9803,7 +9863,10 @@ mod intelligence_tests {
         panels: &mut Panels,
         condition: impl Fn(&Workspace, &Panels) -> bool,
     ) {
-        let until = Instant::now() + Duration::from_secs(15);
+        // A hang guard, not a latency assertion: the index worker shares the
+        // machine with every other test in this binary, and a saturated CI
+        // runner starves it past 15 s. The outcome is still asserted below.
+        let until = Instant::now() + Duration::from_secs(120);
         loop {
             workspace.poll();
             panels.poll(workspace, 0..100);

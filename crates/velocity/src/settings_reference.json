@@ -209,6 +209,7 @@
   "ui_font_size": {"effect": "immediate"},
   "ui_language": {"effect": "immediate"},
   "ui_scale": {"effect": "immediate"},
+  "update_check": {"effect": "immediate"},
   "update_system_recent_files": {"effect": "next_open"},
   "use_find_clipboard": {"effect": "immediate"},
   "use_simple_full_screen": {"effect": "next_full_screen"},

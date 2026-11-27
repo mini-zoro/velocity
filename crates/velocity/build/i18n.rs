@@ -78,6 +78,14 @@ impl Keys {
                     self.record(Some(otherwise));
                 }
             }
+            Some(Expr::Match(matched)) => {
+                // `tr(match reason { .. => "…", })` picks one literal; every arm is a key.
+                for arm in &matched.arms {
+                    if arm.guard.is_none() {
+                        self.record(Some(&arm.body));
+                    }
+                }
+            }
             Some(Expr::Block(block)) => {
                 if let Some(syn::Stmt::Expr(value, None)) = block.block.stmts.last() {
                     self.record(Some(value));

@@ -819,7 +819,15 @@ impl Runtime {
             w.with_app(|app, window| app.on_quit_requested(window))
                 .unwrap_or(false)
         }) {
-            self.stop.set(true);
+            let approved = if let Some(window) = windows.iter().find(|w| !w.closing.get()) {
+                window.with_app(|app, w| app.on_quit_approved(w))
+            } else {
+                self.template
+                    .borrow()
+                    .as_ref()
+                    .and_then(|window| window.with_app(|app, w| app.on_quit_approved(w)))
+            };
+            self.stop.set(approved.unwrap_or(true));
         }
     }
 

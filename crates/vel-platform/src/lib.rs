@@ -541,6 +541,10 @@ pub trait AppHandler: 'static {
     fn on_quit_requested(&mut self, _window: &WindowHandle) -> bool {
         true
     }
+    /// Finalize an approved app quit before native teardown. Can abort on failure.
+    fn on_quit_approved(&mut self, _window: &WindowHandle) -> bool {
+        true
+    }
     /// Checkpoint on a system logout or power-off notification, before the quit request.
     fn on_session_ending(&mut self, _window: &WindowHandle) {}
     /// Approve closing this window, distinct from quitting the application.

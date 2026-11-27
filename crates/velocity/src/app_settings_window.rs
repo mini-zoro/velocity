@@ -62,6 +62,8 @@ fn forwarded_command(name: &str) -> bool {
             | "show_indexing_status"
             | "open_url"
             | "open_crash_reports"
+            | crate::updates::CHECK
+            | crate::updates::ACTION
     )
 }
 

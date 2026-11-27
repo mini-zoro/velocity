@@ -97,6 +97,8 @@ fn menu_roles_and_exact_shortcuts_survive_renaming_and_reload() {
             .collect::<Vec<_>>(),
         vec![
             (Some("native_about"), None),
+            (Some(crate::updates::CHECK), None),
+            (None, None),
             (None, None),
             (Some("show_settings"), Some("super+,")),
             (None, None),

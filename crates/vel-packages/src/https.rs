@@ -1,4 +1,7 @@
 //! Bounded, certificate-verified HTTPS using macOS's system `curl` (no shell and no plugins).
+mod get;
+pub use get::Response;
+
 use crate::{Result, invalid};
 use std::{
     fs,
