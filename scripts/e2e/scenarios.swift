@@ -208,6 +208,20 @@ func imeWindowSummary(_ pid: pid_t) -> String {
     return "on-screen above layer 0: [\(floating.joined(separator: "; "))] AX: \(axWindowSummary(pid))"
 }
 
+/// Input-method candidate panels: floating windows above layer 0 that this
+/// process owns and that are far wider than the small input-source indicator
+/// bubble. The Pinyin panel is layer 20 and roughly 397x28.
+func candidatePanels(_ pid: pid_t) -> [CGRect] {
+    let raw = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+    return raw.compactMap { entry -> CGRect? in
+        guard entry[kCGWindowOwnerPID as String] as? pid_t == pid,
+              let layer = entry[kCGWindowLayer as String] as? Int, layer >= 1,
+              let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return nil }
+        return (rect.width >= 150 && rect.height >= 20 && rect.height <= 80) ? rect : nil
+    }
+}
+
 /// Pinyin shows the preedit with syllable separators ("ni hao", "zhong'wen");
 /// compare without them. Either the Latin preedit or a candidate's characters count.
 func isComposing(_ text: String, pinyin: String = "zhongwen", hanzi: String = "中文") -> Bool {
@@ -418,6 +432,12 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     // 1d. Leaving a surface with a live composition discards it (documented). A
     // person leaves by clicking another tab: the click switches, the preedit lands
     // nowhere, and the tab that was left keeps its text.
+    // Positive control for the check below: while the composition is live the
+    // input method's candidate panel is on screen, so the predicate can see it.
+    let panelsWhileComposing = candidatePanels(pid)
+    report.check(!panelsWhileComposing.isEmpty,
+                 "the candidate panel is on screen while the composition is live",
+                 detail: imeWindowSummary(pid))
     if let cTab = tab(window, named: "c.txt") {
         _ = guardedClick(CGPoint(x: cTab.frame.midX, y: cTab.frame.midY), pid: pid, report: report, label: "c.txt tab")
     } else {
@@ -442,6 +462,10 @@ func scenarioIME(_ options: ArraySlice<String>) -> Never {
     // whether the abandoned composition is still alive and follows into c.txt.
     sleep(seconds: 1.5)
     report.info("IME windows 2 s after the click", detail: imeWindowSummary(pid))
+    let panelsAfterClick = candidatePanels(pid)
+    report.check(panelsAfterClick.isEmpty,
+                 "the candidate panel closes when the click discards the preedit",
+                 detail: "\(panelsAfterClick.count) panel(s) still on screen: \(imeWindowSummary(pid))")
     capture(report, pid: pid, label: "ime-2s-after-tab-click")
     typeKeys("a", gap: 55_000)
     _ = waitUntil(2) { editorText(window) != cText }
