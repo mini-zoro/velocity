@@ -385,87 +385,119 @@ struct PixelBox {
 struct Judgement {
     let time: Double
     let changed: Double   // differs from the screen before the launch
-    let matching: Double  // equals the final frame
-    let foreign: Double   // outside the before/final envelope
+    let matching: Double  // equals the final frame (tight)
+    let alien: Double     // a colour the final frame does not use (the flash measure)
+    let foreign: Double   // outside the before/final envelope per pixel (missing content too)
     let white: Double     // near-pure white (every channel >= 250)
-    let foreignColor: String
+    let alienColor: String
     let top: String
 }
 
 func hex(_ r: Int, _ g: Int, _ b: Int) -> String { String(format: "#%02X%02X%02X", r, g, b) }
 
 /// Per-channel tolerances. Captures are exact BGRA (no compression), so these only
-/// absorb colour-conversion rounding and caret anti-aliasing.
+/// absorb colour-conversion rounding and anti-aliasing.
 let envelopeTolerance = 8
-let sameTolerance = 24
+let changeTolerance = 24
+let matchTolerance = 6
+let paletteTolerance = 6
+/// A colour belongs to the final frame's palette when it covers at least this
+/// share of the window; rarer colours (text anti-aliasing) only count where they are.
+let paletteMinimumShare = 0.0005
 
-func judge(_ frame: ScreenFrame, before: ScreenFrame, final: ScreenFrame, boxes: [PixelBox]) -> Judgement {
-    var total = 0, changed = 0, matching = 0, foreign = 0, white = 0
-    var foreignSum = (0, 0, 0)
-    var bins = [Int](repeating: 0, count: 4096)
-    var binSums = [(Int, Int, Int)](repeating: (0, 0, 0), count: 4096)
+/// The colours of the final frame: any exact colour covering paletteMinimumShare.
+struct Palette {
+    let colors: [(Int, Int, Int)]
+
+    init(_ frame: ScreenFrame, boxes: [PixelBox]) {
+        var counts: [Int: Int] = [:]
+        var total = 0
+        forEachSample(frame, boxes: boxes) { i in
+            let key = Int(frame.pixels[i + 2]) << 16 | Int(frame.pixels[i + 1]) << 8 | Int(frame.pixels[i])
+            counts[key, default: 0] += 1
+            total += 1
+        }
+        let floor = max(1, Int(Double(total) * paletteMinimumShare))
+        colors = counts.filter { $0.value >= floor }.sorted { $0.value > $1.value }
+            .map { ($0.key >> 16 & 255, $0.key >> 8 & 255, $0.key & 255) }
+    }
+
+    func contains(_ r: Int, _ g: Int, _ b: Int) -> Bool {
+        colors.contains { max(abs($0.0 - r), abs($0.1 - g), abs($0.2 - b)) <= paletteTolerance }
+    }
+}
+
+/// Visits every second pixel of every second row inside the boxes (byte offsets).
+func forEachSample(_ frame: ScreenFrame, boxes: [PixelBox], _ body: (Int) -> Void) {
     let x0 = boxes.map(\.x0).min() ?? 0, x1 = boxes.map(\.x1).max() ?? 0
     let y0 = boxes.map(\.y0).min() ?? 0, y1 = boxes.map(\.y1).max() ?? 0
-    let f = frame.pixels, b = before.pixels, s = final.pixels
-    guard frame.width == final.width, frame.height == final.height, before.width == final.width,
-          before.height == final.height
-    else {
-        return Judgement(time: frame.time, changed: 0, matching: 0, foreign: 0, white: 0, foreignColor: "-",
-                         top: "size changed")
-    }
     var y = y0
     while y < y1 {
         var x = x0
         while x < x1 {
             if boxes.contains(where: { x >= $0.x0 && x < $0.x1 && y >= $0.y0 && y < $0.y1 }) {
-                let fi = y * frame.stride + x * 4, bi = y * before.stride + x * 4, si = y * final.stride + x * 4
-                let fr = Int(f[fi + 2]), fg = Int(f[fi + 1]), fb = Int(f[fi])
-                let br = Int(b[bi + 2]), bg = Int(b[bi + 1]), bb = Int(b[bi])
-                let sr = Int(s[si + 2]), sg = Int(s[si + 1]), sb = Int(s[si])
-                total += 1
-                if max(abs(fr - br), abs(fg - bg), abs(fb - bb)) > sameTolerance { changed += 1 }
-                if max(abs(fr - sr), abs(fg - sg), abs(fb - sb)) <= sameTolerance { matching += 1 }
-                let outside = fr > max(br, sr) + envelopeTolerance || fr < min(br, sr) - envelopeTolerance
-                    || fg > max(bg, sg) + envelopeTolerance || fg < min(bg, sg) - envelopeTolerance
-                    || fb > max(bb, sb) + envelopeTolerance || fb < min(bb, sb) - envelopeTolerance
-                if outside {
-                    foreign += 1
-                    foreignSum = (foreignSum.0 + fr, foreignSum.1 + fg, foreignSum.2 + fb)
-                }
-                if fr >= 250 && fg >= 250 && fb >= 250 { white += 1 }
-                let bin = (fr >> 4) << 8 | (fg >> 4) << 4 | (fb >> 4)
-                bins[bin] += 1
-                binSums[bin] = (binSums[bin].0 + fr, binSums[bin].1 + fg, binSums[bin].2 + fb)
+                body(y * frame.stride + x * 4)
             }
             x += 2
         }
         y += 2
     }
+}
+
+func judge(_ frame: ScreenFrame, before: ScreenFrame, final: ScreenFrame, palette: Palette,
+           boxes: [PixelBox]) -> Judgement {
+    var total = 0, changed = 0, matching = 0, alien = 0, foreign = 0, white = 0
+    var alienSum = (0, 0, 0)
+    var bins = [Int](repeating: 0, count: 4096)
+    var binSums = [(Int, Int, Int)](repeating: (0, 0, 0), count: 4096)
+    guard frame.width == final.width, frame.height == final.height, before.width == final.width,
+          before.height == final.height, frame.stride == final.stride, before.stride == final.stride
+    else {
+        return Judgement(time: frame.time, changed: 0, matching: 0, alien: 0, foreign: 0, white: 0,
+                         alienColor: "-", top: "size changed")
+    }
+    let f = frame.pixels, b = before.pixels, s = final.pixels
+    forEachSample(frame, boxes: boxes) { i in
+        let fr = Int(f[i + 2]), fg = Int(f[i + 1]), fb = Int(f[i])
+        let br = Int(b[i + 2]), bg = Int(b[i + 1]), bb = Int(b[i])
+        let sr = Int(s[i + 2]), sg = Int(s[i + 1]), sb = Int(s[i])
+        total += 1
+        let fromBefore = max(abs(fr - br), abs(fg - bg), abs(fb - bb))
+        let fromFinal = max(abs(fr - sr), abs(fg - sg), abs(fb - sb))
+        if fromBefore > changeTolerance { changed += 1 }
+        if fromFinal <= matchTolerance { matching += 1 }
+        let outside = fr > max(br, sr) + envelopeTolerance || fr < min(br, sr) - envelopeTolerance
+            || fg > max(bg, sg) + envelopeTolerance || fg < min(bg, sg) - envelopeTolerance
+            || fb > max(bb, sb) + envelopeTolerance || fb < min(bb, sb) - envelopeTolerance
+        if outside {
+            foreign += 1
+            if fromBefore > envelopeTolerance && !palette.contains(fr, fg, fb) {
+                alien += 1
+                alienSum = (alienSum.0 + fr, alienSum.1 + fg, alienSum.2 + fb)
+            }
+        }
+        if fr >= 250 && fg >= 250 && fb >= 250 { white += 1 }
+        let bin = (fr >> 4) << 8 | (fg >> 4) << 4 | (fb >> 4)
+        bins[bin] += 1
+        binSums[bin] = (binSums[bin].0 + fr, binSums[bin].1 + fg, binSums[bin].2 + fb)
+    }
     let n = Double(max(total, 1))
-    let foreignColor = foreign == 0 ? "-" : hex(foreignSum.0 / foreign, foreignSum.1 / foreign, foreignSum.2 / foreign)
+    let alienColor = alien == 0 ? "-" : hex(alienSum.0 / alien, alienSum.1 / alien, alienSum.2 / alien)
     let top = bins.indices.sorted { bins[$0] > bins[$1] }.prefix(3).filter { bins[$0] > 0 }.map { bin -> String in
         let count = bins[bin]
         return "\(hex(binSums[bin].0 / count, binSums[bin].1 / count, binSums[bin].2 / count)) \(Int((Double(count) / n * 100).rounded()))%"
     }.joined(separator: " ")
     return Judgement(time: frame.time, changed: Double(changed) / n, matching: Double(matching) / n,
-                     foreign: Double(foreign) / n, white: Double(white) / n, foreignColor: foreignColor, top: top)
+                     alien: Double(alien) / n, foreign: Double(foreign) / n, white: Double(white) / n,
+                     alienColor: alienColor, top: top)
 }
 
 func meanLuminance(_ frame: ScreenFrame, boxes: [PixelBox]) -> Double {
     var sum = 0.0, count = 0.0
-    for box in boxes {
-        var y = box.y0
-        while y < box.y1 {
-            var x = box.x0
-            while x < box.x1 {
-                let i = y * frame.stride + x * 4
-                sum += 0.2126 * Double(frame.pixels[i + 2]) + 0.7152 * Double(frame.pixels[i + 1])
-                    + 0.0722 * Double(frame.pixels[i])
-                count += 1
-                x += 8
-            }
-            y += 8
-        }
+    forEachSample(frame, boxes: boxes) { i in
+        sum += 0.2126 * Double(frame.pixels[i + 2]) + 0.7152 * Double(frame.pixels[i + 1])
+            + 0.0722 * Double(frame.pixels[i])
+        count += 1
     }
     return count > 0 ? sum / count : 0
 }
@@ -483,11 +515,13 @@ struct StartupCase {
     var windows: Int { restore ? 2 : 1 }
 }
 
-/// A frame counts as the first frame with content once this much of the window
-/// equals the final frame; stable once every later frame equals it this closely.
-let contentMatch = 0.90
+/// The first frame with content: this much of the window equals the final frame
+/// (text, tabs and title bar drawn). Stable: every later frame equals it this closely.
+let contentMatch = 0.95
 let stableMatch = 0.995
-/// A frame is a flash frame when more of the window than this is foreign.
+/// A frame is a flash frame when more of the window than this is in a colour the
+/// final frame does not use; an incomplete frame when this much is outside the
+/// per-pixel envelope (content still missing, in the theme's own colours).
 let flashFrameShare = 0.01
 
 struct LaunchResult {
@@ -499,10 +533,13 @@ struct LaunchResult {
     let spawn: Double            // CLI spawn, host seconds
     let timeline: [(String, Double)] // event, host seconds
     let judgements: [Judgement]
-    let maxForeign: Double
-    let maxForeignAt: Double?
-    let flashMs: Double
+    let maxAlien: Double
+    let maxAlienAt: Double?
+    let flashMs: Double         // frames over flashFrameShare alien
     let flashFrames: Int
+    let flashColors: String
+    let maxForeign: Double
+    let incompleteMs: Double    // frames over flashFrameShare foreign (content missing)
     let firstContent: Double?
     let stable: Double?
     let luminance: Double
@@ -571,15 +608,28 @@ struct StartupHarness {
         _ = waitUntil(5, interval: 0.1) { velocityWindowRows(owner: owner).isEmpty }
     }
 
-    func setDefaults(_ values: [(String, String, String)]) {
+    /// AppKit reads the global domain through CFPreferences, which follows $HOME:
+    /// the launched instance sees the isolated home's domain, so write both.
+    func setDefaults(_ values: [(String, String, String)], home: URL) {
+        try? FileManager.default.createDirectory(at: home.appendingPathComponent("Library/Preferences"),
+                                                 withIntermediateDirectories: true)
+        let isolated = home.appendingPathComponent("Library/Preferences/.GlobalPreferences").path
         for (key, type, value) in values {
-            _ = shell("defaults write -g \(key.shellQuoted) \(type) \(value.shellQuoted)")
+            let tail = "\(key.shellQuoted) \(type) \(value.shellQuoted)"
+            _ = shell("defaults write -g \(tail)")
+            _ = shell("HOME=\(home.path.shellQuoted) defaults write -g \(tail)")
+            _ = shell("defaults write \(isolated.shellQuoted) \(tail)")
+            let seen = shell("HOME=\(home.path.shellQuoted) defaults read -g \(key.shellQuoted) 2>&1").1
+            report.note("defaults \(key)", detail: "isolated home reads: \(seen.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     }
 
-    func clearDefaults(_ values: [(String, String, String)]) {
+    func clearDefaults(_ values: [(String, String, String)], home: URL) {
+        let isolated = home.appendingPathComponent("Library/Preferences/.GlobalPreferences").path
         for (key, _, _) in values {
             _ = shell("defaults delete -g \(key.shellQuoted) 2>/dev/null || true")
+            _ = shell("HOME=\(home.path.shellQuoted) defaults delete -g \(key.shellQuoted) 2>/dev/null || true")
+            _ = shell("defaults delete \(isolated.shellQuoted) \(key.shellQuoted) 2>/dev/null || true")
         }
     }
 
@@ -662,7 +712,7 @@ struct StartupHarness {
         let pids = Array(Set(seen.values.map(\.pid)))
         let birth = pids.compactMap(processStartHost).min()
         quit(data: data, home: home, pids: pids)
-        let milestones = readMilestones(output)
+        let milestones = readMilestones(output, label: label)
         guard windows.count >= startupCase.windows else {
             return failed(label, spawn: spawn, "\(windows.count) of \(startupCase.windows) windows on screen",
                           birth: birth, milestones: milestones)
@@ -675,25 +725,37 @@ struct StartupHarness {
     func failed(_ label: String, spawn: Double, _ why: String, birth: Double? = nil,
                 milestones: [(String, Double)] = []) -> LaunchResult {
         LaunchResult(label: label, windows: 0, frames: 0, dropped: 0, birth: birth, spawn: spawn, timeline: [],
-                     judgements: [], maxForeign: 0, maxForeignAt: nil, flashMs: 0, flashFrames: 0,
-                     firstContent: nil, stable: nil, luminance: 0, appMilestones: milestones, ownImageNotes: [],
+                     judgements: [], maxAlien: 0, maxAlienAt: nil, flashMs: 0, flashFrames: 0, flashColors: "",
+                     maxForeign: 0, incompleteMs: 0, firstContent: nil, stable: nil, luminance: 0, appMilestones: milestones, ownImageNotes: [],
                      failure: why)
     }
 
-    func readMilestones(_ url: URL) -> [(String, Double)] {
+    /// The app's startup clock (`--output` JSONL): one `milestone` line per mark, in
+    /// process milliseconds, and a `startup` line once a real scanout was seen.
+    func readMilestones(_ url: URL, label: String) -> [(String, Double)] {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        if let dir = artifacts {
+            try? FileManager.default.createDirectory(atPath: "\(dir)/startup", withIntermediateDirectories: true)
+            try? text.write(toFile: "\(dir)/startup/\(label).jsonl", atomically: true, encoding: .utf8)
+        }
         var result: [(String, Double)] = []
         for line in text.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["kind"] as? String == "startup",
-                  let milestones = object["milestones"] as? [[String: Any]] else { continue }
-            for milestone in milestones {
-                if let phase = milestone["phase"] as? String, let ms = milestone["process_ms"] as? Double {
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            switch object["kind"] as? String {
+            case "milestone":
+                if let milestone = object["milestone"] as? [String: Any],
+                   let phase = milestone["phase"] as? String, let ms = milestone["process_ms"] as? Double,
+                   !result.contains(where: { $0.0 == phase }) {
                     result.append((phase, ms))
                 }
+            case "startup":
+                if let scanout = object["scanout_process_ms"] as? Double {
+                    result.append(("scanout_process", scanout))
+                }
+            default:
+                continue
             }
-            if let scanout = object["scanout_process_ms"] as? Double { result.append(("scanout_process", scanout)) }
         }
         return result
     }
@@ -716,19 +778,25 @@ struct StartupHarness {
         // Frames from just before the window came on screen; the first recorded
         // frame (the screen before the launch) is the reference B.
         let judged = frames.dropFirst().filter { $0.time >= spawn }
-        let judgements = judged.map { judge($0, before: before, final: final, boxes: boxes) }
-        var maxForeign = 0.0, maxForeignAt: Double?
-        var flashMs = 0.0, flashFrames = 0
+        let palette = Palette(final, boxes: boxes)
+        let judgements = judged.map { judge($0, before: before, final: final, palette: palette, boxes: boxes) }
+        var maxAlien = 0.0, maxAlienAt: Double?, maxForeign = 0.0
+        var flashMs = 0.0, flashFrames = 0, incompleteMs = 0.0
+        var flashColors: [String] = []
         for (index, judgement) in judgements.enumerated() where judgement.time >= firstShown - 0.1 {
-            if judgement.foreign > maxForeign {
-                maxForeign = judgement.foreign
-                maxForeignAt = judgement.time
+            // A frame stays on screen until the next one (the last until the recording ends).
+            let next = index + 1 < judgements.count ? judgements[index + 1].time : judgement.time + 1.0 / 60
+            if judgement.alien > maxAlien {
+                maxAlien = judgement.alien
+                maxAlienAt = judgement.time
             }
-            if judgement.foreign > flashFrameShare {
+            maxForeign = max(maxForeign, judgement.foreign)
+            if judgement.alien > flashFrameShare {
                 flashFrames += 1
-                let next = index + 1 < judgements.count ? judgements[index + 1].time : judgement.time + 1.0 / 60
                 flashMs += (next - judgement.time) * 1000
+                if !flashColors.contains(judgement.alienColor) { flashColors.append(judgement.alienColor) }
             }
+            if judgement.foreign > flashFrameShare { incompleteMs += (next - judgement.time) * 1000 }
         }
         let firstPixels = judgements.first { $0.changed > 0.02 }?.time
         let firstContent = judgements.first { $0.matching >= contentMatch }?.time
@@ -742,7 +810,7 @@ struct StartupHarness {
             if let shown = window.onscreen { timeline.append(("window\(index + 1)_onscreen", shown)) }
         }
         if let firstPixels { timeline.append(("screen_first_window_pixels", firstPixels)) }
-        if let maxForeignAt, maxForeign > flashFrameShare { timeline.append(("screen_max_foreign", maxForeignAt)) }
+        if let maxAlienAt, maxAlien > flashFrameShare { timeline.append(("screen_max_alien", maxAlienAt)) }
         if let firstContent { timeline.append(("screen_first_content", firstContent)) }
         if let stable { timeline.append(("screen_stable", stable)) }
 
@@ -759,7 +827,7 @@ struct StartupHarness {
                 guard image.width == last.width, image.height == last.height else {
                     return "+\(fmt(((image.time - (birth ?? spawn)) * 1000))) size \(image.width)x\(image.height)"
                 }
-                let j = judge(image, before: last, final: last, boxes: box)
+                let j = judge(image, before: last, final: last, palette: Palette(last, boxes: box), boxes: box)
                 let t = fmt((image.time - (birth ?? spawn)) * 1000)
                 return "+\(t)ms white=\(pct(j.white)) top=\(j.top)"
             }
@@ -789,8 +857,10 @@ struct StartupHarness {
         if let streamStopped { failure = "capture stopped: \(streamStopped)" }
         return LaunchResult(label: label, windows: windows.count, frames: frames.count, dropped: dropped,
                             birth: birth, spawn: spawn, timeline: timeline, judgements: judgements,
-                            maxForeign: maxForeign, maxForeignAt: maxForeignAt, flashMs: flashMs,
-                            flashFrames: flashFrames, firstContent: firstContent, stable: stable,
+                            maxAlien: maxAlien, maxAlienAt: maxAlienAt, flashMs: flashMs,
+                            flashFrames: flashFrames, flashColors: flashColors.joined(separator: " "),
+                            maxForeign: maxForeign, incompleteMs: incompleteMs,
+                            firstContent: firstContent, stable: stable,
                             luminance: luminance, appMilestones: milestones, ownImageNotes: ownNotes,
                             failure: failure)
     }
@@ -798,25 +868,23 @@ struct StartupHarness {
     func describe(_ result: LaunchResult) {
         if let failure = result.failure { report.note("\(result.label) problem", detail: failure) }
         let origin = result.birth != nil ? "GUI process start" : "CLI spawn"
-        report.note("\(result.label) summary", detail: "windows=\(result.windows) frames=\(result.frames) dropped=\(result.dropped) max_foreign=\(pct(result.maxForeign)) flash_frames=\(result.flashFrames) flash_ms=\(fmt(result.flashMs)) first_content=\(fmt(result.ms(result.firstContent)))ms stable=\(fmt(result.ms(result.stable)))ms luminance=\(Int(result.luminance)) (times from \(origin))")
+        report.note("\(result.label) summary", detail: "windows=\(result.windows) frames=\(result.frames) dropped=\(result.dropped) max_alien=\(pct(result.maxAlien)) flash_frames=\(result.flashFrames) flash_ms=\(fmt(result.flashMs)) flash_colors=[\(result.flashColors)] max_foreign=\(pct(result.maxForeign)) incomplete_ms=\(fmt(result.incompleteMs)) first_content=\(fmt(result.ms(result.firstContent)))ms stable=\(fmt(result.ms(result.stable)))ms luminance=\(Int(result.luminance)) (times from \(origin))")
         let events = result.timeline.map { "\($0.0)=\(fmt(result.ms($0.1)))" }.joined(separator: " ")
         report.note("\(result.label) timeline ms", detail: events)
-        let interesting = ["window_layer_ready", "first_frame_prepared_before_order_front", "ordered_front",
-                           "launch_callback_finished", "first_visible_display_tick", "first_submit",
-                           "first_presented_callback", "first_real_scanout", "scanout_process"]
-        let app = result.appMilestones.filter { interesting.contains($0.0) }
-            .map { "\($0.0)=\(fmt($0.1))" }.joined(separator: " ")
+        let app = result.appMilestones.map { "\($0.0)=\(fmt($0.1))" }.joined(separator: " ")
         report.note("\(result.label) app milestones (process ms)", detail: app.isEmpty ? "none" : app)
         let firstShown = result.timeline.first { $0.0.hasSuffix("_onscreen") }?.1 ?? result.spawn
         let frames = result.judgements.filter { $0.time >= firstShown - 0.05 }.prefix(14).map { j in
-            "+\(fmt(result.ms(j.time))) chg=\(pct(j.changed)) eq=\(pct(j.matching)) foreign=\(pct(j.foreign))\(j.foreign > 0.001 ? "(\(j.foreignColor))" : "") white=\(pct(j.white)) [\(j.top)]"
+            "+\(fmt(result.ms(j.time))) chg=\(pct(j.changed)) eq=\(pct(j.matching)) alien=\(pct(j.alien))\(j.alien > 0.001 ? "(\(j.alienColor))" : "") foreign=\(pct(j.foreign)) white=\(pct(j.white)) [\(j.top)]"
         }
         report.note("\(result.label) frames", detail: "\n    " + frames.joined(separator: "\n    "))
         for note in result.ownImageNotes { report.note("\(result.label) own", detail: note) }
         // One machine-readable line per launch, for before/after comparisons.
         var json: [String: Any] = ["label": result.label, "windows": result.windows,
-                                   "max_foreign": result.maxForeign, "flash_ms": result.flashMs,
-                                   "flash_frames": result.flashFrames, "luminance": result.luminance]
+                                   "max_alien": result.maxAlien, "flash_ms": result.flashMs,
+                                   "flash_frames": result.flashFrames, "flash_colors": result.flashColors,
+                                   "max_foreign": result.maxForeign, "incomplete_ms": result.incompleteMs,
+                                   "luminance": result.luminance]
         for (name, host) in result.timeline { json[name] = result.ms(host) }
         for (name, ms) in result.appMilestones { json["app_" + name] = ms }
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
@@ -836,10 +904,11 @@ func median(_ values: [Double]) -> Double? {
 
 // MARK: - Scenario
 
-/// Judged ceilings. Foreign share per frame: a flash of the empty window covers
-/// nearly the whole content area; the caret and the edges of a scale animation
-/// stay far below 2 %.
-let maxForeignShare = 0.02
+/// Judged ceiling: the share of the window, in any one frame, painted in a colour
+/// the final frame does not use. The smallest region that can flash is the title
+/// bar (28 of 648 points, 4.3 % of a 900x620 window); caret blink and text
+/// anti-aliasing at the title stay under 0.3 %. 1 % sits between the two.
+let maxAlienShare = 0.01
 /// Median first-content time per case may not regress past the pre-fix median by
 /// more than this (CI noise on a shared 3-core runner), when a baseline is given.
 let regressionAllowanceMs = 40.0
@@ -900,9 +969,9 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
 
     var medians: [String: Double] = [:]
     for startupCase in cases {
-        harness.setDefaults(startupCase.defaults)
-        defer { harness.clearDefaults(startupCase.defaults) }
         let home = harness.home(startupCase.name)
+        harness.setDefaults(startupCase.defaults, home: home)
+        defer { harness.clearDefaults(startupCase.defaults, home: home) }
         var results: [LaunchResult] = []
         let restoreData = environment.work.appendingPathComponent("data-\(startupCase.name)")
         if startupCase.restore {
@@ -929,10 +998,13 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         report.check(judged.count == startupCase.samples && judged.allSatisfy { $0.windows == startupCase.windows },
                      "\(startupCase.name): every launch shows \(startupCase.windows) window(s) and is recorded",
                      detail: results.map { "\($0.label): \($0.failure ?? "ok")" }.joined(separator: "; "))
-        let worst = judged.max { $0.maxForeign < $1.maxForeign }
-        report.check(judged.allSatisfy { $0.maxForeign <= maxForeignShare },
-                     "\(startupCase.name): no frame shows more than \(pct(maxForeignShare)) of the window in a colour that is neither the screen before launch nor the final frame",
-                     detail: worst.map { "worst \($0.label): \(pct($0.maxForeign)) over \($0.flashFrames) frame(s), \(fmt($0.flashMs)) ms" } ?? "no launch")
+        let worst = judged.max { $0.maxAlien < $1.maxAlien }
+        report.check(judged.allSatisfy { $0.maxAlien <= maxAlienShare },
+                     "\(startupCase.name): no frame paints more than \(pct(maxAlienShare)) of the window in a colour the stable frame does not use",
+                     detail: worst.map { "worst \($0.label): \(pct($0.maxAlien)) [\($0.flashColors)] over \($0.flashFrames) frame(s), \(fmt($0.flashMs)) ms" } ?? "no launch")
+        let incomplete = judged.compactMap { $0.incompleteMs }
+        report.info("\(startupCase.name): frames still missing content (theme colours only)",
+                    detail: "median \(fmt(median(incomplete))) ms; max foreign \(judged.map { pct($0.maxForeign) }.joined(separator: ", "))")
         if startupCase.name.hasPrefix("dark") {
             let dark = judged.allSatisfy { $0.luminance < 110 }
             report.check(dark, "\(startupCase.name): the final window is dark",

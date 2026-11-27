@@ -22,6 +22,10 @@ on:
         description: "startup scenario: comma-separated cases to run (empty = all)"
         type: string
         default: ""
+      startup_baseline:
+        description: "startup scenario: pre-fix first-content medians, e.g. light=700,dark=720 (empty = report only)"
+        type: string
+        default: ""
 
 concurrency:
   group: gui-e2e-${{ github.workflow }}-${{ github.ref }}
@@ -80,6 +84,7 @@ jobs:
         continue-on-error: true
         env:
           E2E_STARTUP_CASES: ${{ inputs.startup_cases }}
+          E2E_STARTUP_BASELINE: ${{ inputs.startup_baseline }}
         run: scripts/e2e/run.sh scenario startup
 
       - name: Summarise
