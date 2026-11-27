@@ -13,6 +13,8 @@ pub mod fonts;
 pub mod fullscreen;
 #[cfg(target_os = "macos")]
 pub mod image_io;
+#[cfg(any(target_os = "macos", test))]
+mod ime_discard;
 mod input;
 pub mod mouse;
 #[cfg(any(target_os = "macos", windows, test))]
