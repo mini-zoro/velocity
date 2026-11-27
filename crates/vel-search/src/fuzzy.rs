@@ -2299,7 +2299,7 @@ mod tests {
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut labels = Vec::new();
-        for dir in ["crates", "docs", "specs"] {
+        for dir in ["crates", "docs"] {
             paths(&root, &root.join(dir), &mut labels);
         }
         labels.sort_unstable();

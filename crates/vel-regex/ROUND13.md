@@ -66,8 +66,8 @@ Worker timing includes service creation, full background parsing, scope/style/ru
 construction, checkpoints and completion polling. It excludes fixture I/O, engine
 construction, one full warmup and asynchronous teardown. Production caches remain
 enabled. Inputs/binaries/source fingerprints and every sample are in
-[full sweep](round13-workers.json), [first C++ follow-up](round13-cpp-paired.json)
-and [final C++ follow-up](round13-cpp-final.json).
+full sweep, first C++ follow-up
+and final C++ follow-up.
 
 The matcher now permits 1 MiB per-direction transition caches/NFA allowances,
 retaining the existing **32 MiB shared resident-machine cap**. Larger combined rule
@@ -93,7 +93,7 @@ files; existing symlink/relocation/corruption/ordering tests still pass.
 
 Warm p95 meets the 20 ms target, including its reported upper CI. Cold here means
 an absent binary cache, not an empty OS filesystem cache. Raw evidence:
-[loading pairs](round13-loading.json).
+loading pairs.
 
 The export fixture is 400,000 bytes, 10,000 LF-terminated highlighted lines and
 30,000 supplied spans (two resolved styles), with tabs, CJK, emoji, HTML punctuation,
@@ -108,9 +108,9 @@ export implementation in the baseline commit.
 | Median | 26.772 [26.705, 26.885] | 24.700 [24.640, 25.331] |
 | p95 | 28.240 [27.330, 28.470] | 25.886 [25.640, 27.385] |
 
-The tested export is within 50 ms. Raw evidence: [export pairs](round13-export.json).
+The tested export is within 50 ms. Raw evidence: export pairs.
 The rejected line-copy validation experiment is preserved in
-[experimental pairs](round13-export-experiment.json); that code is absent from B.
+experimental pairs; that code is absent from B.
 
 The real vel-buffer perf worker runs over the unchanged 100 MB fixture. Baseline
 buffer/text sources were archived from the baseline commit into a separate build;
@@ -138,23 +138,23 @@ result. Undo metadata remains identical.
 
 The `undo_metadata` row uses bytes/caret, not milliseconds. Positive changes are
 slowdowns; intervals invert the paired speedup distribution. Raw evidence:
-[first pass](../vel-buffer/round13-paired.json),
-[follow-up](../vel-buffer/round13-follow-up.json),
-[combined statistics](../vel-buffer/round13-combined.json).
+first pass,
+follow-up,
+combined statistics.
 
 Validation passed: fmt, workspace/all-target clippy with `-D warnings`, syntax/regex
 all-feature clippy, `cargo test --workspace --release`, rustdoc with `-D warnings`,
 and 1,024-case buffer model/operation tests. The first complete workspace attempt
 hit the existing TLS test's non-atomic readiness-file race; the targeted retry and
 second complete workspace run passed. No files in vel-packages were changed.
-[Check records](round13-checks.json) retain that failed attempt as well as successes.
+Check records retain that failed attempt as well as successes.
 
 Native verified differential: **242 official files / 193,704 lines / 8,831,216 bytes /
 486 rewinds, zero divergences**; **8 large fixtures / 1,704,072 lines / 65,279,368 bytes /
 7,624 rewinds, zero divergences**. The release oracle enables `verify-prefilters`
 and `--verify-matches` to compare rejection decisions and winner spans/capture slots,
 as well as operations, corrections, rewinds and warnings. Workspace tests also
-exercise memoized transitions. [Raw differential](round13-differential.json).
+exercise memoized transitions. Raw differential.
 
 Reproduction (prepare baseline binaries from 85e6cc1 before changing sources):
 

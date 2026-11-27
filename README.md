@@ -45,9 +45,11 @@ Not in scope for 1.0: Python plugin API compatibility, Linux.
 |---|---|
 | `crates/` | Product crates (`vel-*`) |
 | `docs/PLAN.md` | Feasibility study, architecture and roadmap (Chinese) |
-| `specs/` | Per-component specifications and acceptance criteria |
-| `spikes/` | Building-block benchmarks (rope, syntect, search, text layout) and results |
-| `prototypes/` | Throwaway prototypes that de-risk specific decisions |
+| `docs/` | Behavior, parity, performance, settings and release notes |
+| `scripts/` | Packaging, release and GUI end-to-end tooling |
+
+Working material from development (component specs, spikes, prototypes, raw benchmark
+logs and design review screenshots) is kept out of this repository.
 
 ## Building
 

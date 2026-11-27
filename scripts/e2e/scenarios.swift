@@ -725,7 +725,12 @@ func scenarioActivate(_ options: ArraySlice<String>) -> Never {
         report.check(false, "TextEdit came to the front"); report.finish()
     }
     // Keep TextEdit clear of Velocity's tab strip, or the click below hits TextEdit.
-    if let editWindow = axDocumentWindow(otherPid) {
+    // TextEdit's accessibility tree can refuse reads (cannotComplete) for a moment
+    // after launch; poll until its window is readable so a slow start is not
+    // reported as a failed read.
+    var editWindow: AXUIElement?
+    _ = waitUntil(5) { editWindow = axDocumentWindow(otherPid); return editWindow != nil }
+    if let editWindow {
         _ = moveWindow(editWindow, to: CGRect(x: 560, y: 430, width: 440, height: 320))
     }
     _ = waitUntil(8) { frontmostPid() == otherPid }

@@ -111,8 +111,8 @@ To build it afresh without touching a branch, export the commit and provide its 
 R12_BASE=$(mktemp -d /tmp/velocity-r12-base.XXXXXX)
 git archive 4e6a16a | tar -x -C "$R12_BASE"
 rmdir "$R12_BASE/third_party/sublime-packages"
-ln -s /Users/zoro/dev/velocity-lane-a/third_party/sublime-packages "$R12_BASE/third_party/sublime-packages"
-ln -s /Users/zoro/dev/velocity/spikes/data "$R12_BASE/spikes/data"
+ln -s <lane-checkout>/third_party/sublime-packages "$R12_BASE/third_party/sublime-packages"
+ln -s <checkout>/spikes/data "$R12_BASE/spikes/data"
 cargo build --release --manifest-path "$R12_BASE/Cargo.toml" -p velocity
 cargo build --release -p velocity
 python3 crates/velocity/scripts/measure-normal.py \

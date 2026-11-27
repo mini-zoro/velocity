@@ -2,7 +2,7 @@
 
 Native macOS editor, lane A round 13. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
-[MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
+MANUAL_TEST.md for native input/editing acceptance.
 
 ```sh
 cargo build --release -p velocity
@@ -192,5 +192,5 @@ The default package index is unset. The native accessibility bridge exposes a bo
 text area plus tabs, project/quick rows, panel controls, completions, status and popup links;
 Cmd+F6 / Cmd+Shift+F6 traverses controls. System Reduce Motion and stronger chrome boundaries
 follow live accessibility preferences. See [ROUND13.md](ROUND13.md) for evidence/commands and
-[MANUAL_TEST.md](MANUAL_TEST.md#round-13-release-wiring-and-voiceover-human-review-required)
+MANUAL_TEST.md
 for native release and VoiceOver acceptance.

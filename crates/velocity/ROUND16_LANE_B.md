@@ -168,6 +168,6 @@ history and text storage; it is not a measure of replay metadata alone.
 Seven idle pairs (steady 0.5–2.5 s window): 0.711% → 0.702% of one CPU core; peak RSS 32.22 → 32.69 MiB.
 
 Raw evidence and reproduction scripts: `/tmp/velocity-r16-review3`. Structured results, raw counters, exact commands,
-binary/source hashes and prior accepted review evidence are in `fixtures/round16-performance.json`.
+binary/source hashes and prior accepted review evidence are in the round 16 review record (kept out of the public repository).
 Native display/IME/drag interactions, event-to-present latency, GPU/scanout and FSEvents remain
 for the reviewer; see the unchecked third-review rows in `MANUAL_TEST.md`.

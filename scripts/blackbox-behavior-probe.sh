@@ -16,7 +16,7 @@ if [[ $kind == sublime ]]; then
   $AX press $pid OK >/dev/null 2>&1; sleep 0.5   # dismiss the Safe Mode notice
 else
   d=$(mktemp -d /tmp/live/bbprof.XXXX)
-  /usr/bin/open -n -a ${VA:-/Users/zoro/dev/velocity/target/package-macos/Velocity.app} --args --data-dir $d/data "$f"; owner=Velocity
+  /usr/bin/open -n -a "${VA:-$(git rev-parse --show-toplevel)/target/package-macos/Velocity.app}" --args --data-dir $d/data "$f"; owner=Velocity
   sleep 3; pid=$(pgrep -n -f "velocity --data-dir $d/data")
 fi
 $AX activate $pid >/dev/null; sleep 1.2
