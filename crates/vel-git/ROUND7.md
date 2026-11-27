@@ -77,8 +77,8 @@ The last command creates only temporary fixture repositories and writes timing e
 the four lane-B crates. `--fixtures-json FILE` reuses prepared fixtures. Build before measuring;
 the harness runs binaries serially and never times compilation.
 
-Raw data: [history](../vel-buffer/round7-timings.json), [diff](../vel-diff/round7-timings.json),
-[Git](round7-timings.json), [spelling](../vel-spell/round7-timings.json), [summary](round7-summary.json).
+Raw data: history, diff,
+Git, spelling, summary.
 Integration examples: [history](../vel-buffer/README.md#round-seven-native-hot-exit-history),
 [diff](../vel-diff/README.md), [Git](README.md), [spelling](../vel-spell/README.md).
 
