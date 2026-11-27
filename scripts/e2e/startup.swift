@@ -512,6 +512,8 @@ struct StartupCase {
     var preferences: String? = nil
     /// Two windows saved by Hot Exit, restored by a launch without files.
     var restore = false
+    /// Launched under the dark system appearance (switched on CI runners only).
+    var systemDark = false
     var windows: Int { restore ? 2 : 1 }
 }
 
@@ -902,6 +904,32 @@ func median(_ values: [Double]) -> Double? {
         : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
 }
 
+// MARK: - System appearance
+
+/// SkyLight's appearance switch (what the Appearance setting calls). Private, so
+/// looked up at run time; used only on CI runners.
+enum SystemAppearance {
+    private typealias Setter = @convention(c) (Bool) -> Void
+    private typealias Getter = @convention(c) () -> Bool
+    private static let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+    private static func symbol<T>(_ name: String, as _: T.Type) -> T? {
+        guard let handle, let pointer = dlsym(handle, name) else { return nil }
+        return unsafeBitCast(pointer, to: T.self)
+    }
+
+    static func isDark() -> Bool? { symbol("SLSGetAppearanceThemeLegacy", as: Getter.self).map { $0() } }
+
+    static func set(dark: Bool) -> Bool {
+        guard let setter = symbol("SLSSetAppearanceThemeLegacy", as: Setter.self) else { return false }
+        setter(dark)
+        return waitUntil(5, interval: 0.1) { isDark() == dark }
+    }
+
+    static func describe() -> String {
+        "SkyLight \(handle == nil ? "missing" : "loaded"); dark now \(isDark().map { "\($0)" } ?? "unknown")"
+    }
+}
+
 // MARK: - Scenario
 
 /// Judged ceiling: the share of the window, in any one frame, painted in a colour
@@ -945,7 +973,7 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         StartupCase(name: "light", samples: 3),
         StartupCase(name: "light-noanim", samples: 2,
                     defaults: [("NSAutomaticWindowAnimationsEnabled", "-bool", "false")]),
-        StartupCase(name: "dark", samples: 3, defaults: [("AppleInterfaceStyle", "-string", "Dark")]),
+        StartupCase(name: "dark", samples: 3, systemDark: true),
         StartupCase(name: "dark-scheme-light-system", samples: 2, preferences: darkScheme),
         StartupCase(name: "restore2", samples: 2, restore: true),
     ].filter { only?.contains($0.name) ?? true }
@@ -972,6 +1000,24 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
         let home = harness.home(startupCase.name)
         harness.setDefaults(startupCase.defaults, home: home)
         defer { harness.clearDefaults(startupCase.defaults, home: home) }
+        if startupCase.systemDark {
+            // The appearance belongs to the window server session, not to the
+            // preferences an app reads at launch; only an ephemeral runner may flip it.
+            guard ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true" else {
+                report.note("\(startupCase.name) skipped", detail: "switches the system appearance; CI runners only")
+                continue
+            }
+            let switched = SystemAppearance.set(dark: true)
+            report.check(switched, "\(startupCase.name): system appearance switched to dark",
+                         detail: SystemAppearance.describe())
+            sleep(seconds: 1.5)
+        }
+        defer {
+            if startupCase.systemDark {
+                _ = SystemAppearance.set(dark: false)
+                sleep(seconds: 1.5)
+            }
+        }
         var results: [LaunchResult] = []
         let restoreData = environment.work.appendingPathComponent("data-\(startupCase.name)")
         if startupCase.restore {
