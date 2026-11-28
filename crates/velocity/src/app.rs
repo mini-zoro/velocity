@@ -4748,13 +4748,35 @@ impl App {
                     self.tab_painted.push((*sheet, group_index, rect.x));
                     let paint = &mut chrome;
                     let selected = group.selected.contains(sheet);
-                    let mut attrs = [""; 8];
+                    let mut attrs = [""; 12];
                     let mut n = 0;
+                    // The neighbour attributes let a theme drop the divider beside a card:
+                    // dividers sit on right edges, so the tab left of a selected or
+                    // hovered one hides its own. Themes that never name them see no change.
+                    let hovered = |other: &_| {
+                        self.panels
+                            .tree
+                            .nodes
+                            .get(&(100 + *other))
+                            .is_some_and(|node| node.attributes.contains("hover"))
+                    };
+                    let next = tabs.get(position + 1);
+                    let previous = position.checked_sub(1).and_then(|p| tabs.get(p));
                     for (enabled, attr) in [
                         (selected, "selected"),
                         (Some(*sheet) == focused_tab, "focused"),
                         (tab.dirty(), "dirty"),
                         (tab.transient, "transient"),
+                        (
+                            next.is_some_and(|s| group.selected.contains(s)),
+                            "left_of_selected",
+                        ),
+                        (next.is_some_and(hovered), "left_of_hover"),
+                        (
+                            previous.is_some_and(|s| group.selected.contains(s)),
+                            "right_of_selected",
+                        ),
+                        (previous.is_some_and(hovered), "right_of_hover"),
                     ] {
                         if enabled {
                             attrs[n] = attr;

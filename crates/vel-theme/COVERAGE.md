@@ -78,6 +78,7 @@ Velocity's bundled theme uses them for inset cards, soft shadows, focus rings an
 | Property | Type | Effect |
 | --- | --- | --- |
 | `surface_inset` | Insets | Paints layers, border and shadow inside the element's bounds by these margins; the hit target is unchanged. |
+| `layerN.surface_inset` | Insets | Paints this layer inside the element's bounds by these margins instead of `surface_inset`, e.g. a divider on a tab's edge beside an inset card. |
 | `shadow_blur` | Number | Blur of `shadow_color` (default 4). |
 | `shadow_spread` | Number | How far the shadow extends past the surface before blurring (default 4); its corners follow `radius` plus the spread. With `shadow_blur: 0` this draws a focus ring outside an opaque control. |
 | `pill` | Boolean | Corner radius is half the shorter side: capsules and circles at any size. |
@@ -226,5 +227,7 @@ Unknown application classes and attributes remain matchable.
 ## Lane A seam
 
 Every class/attribute from vel-ui/README.md is accepted, including tab_connector selected and
-tab_control focused/selected/transient/dirty. WIDGET_ALIASES is the authoritative alias table.
+tab_control focused/selected/transient/dirty. The host also sets tab_control
+left_of_selected/left_of_hover/right_of_selected/right_of_hover on the tab immediately beside a
+selected or hovered one in the strip's order. WIDGET_ALIASES is the authoritative alias table.
 The default theme covers all registry entries and has additional direct-widget state rules.

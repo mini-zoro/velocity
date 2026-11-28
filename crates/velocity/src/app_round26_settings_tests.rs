@@ -93,6 +93,81 @@ fn rounded_and_square_tab_styles_change_the_drawn_tab_not_the_hit_rect() {
     }
 }
 
+/// Rounded tabs mark each plain tab's right edge with a short divider (1 DIP by 16, centred)
+/// and drop it beside a card: on the selected and hovered tabs and on the tab left of each.
+/// Square tabs ignore the neighbour attributes and keep their taller `line` divider.
+#[test]
+fn rounded_dividers_mark_plain_tabs_and_skip_the_cards() {
+    let mut app = app(None);
+    // Wide enough for five tabs at ×2 without scrolling.
+    app.window_size = Size {
+        width: 3000.,
+        height: 600.,
+    };
+    for _ in 0..4 {
+        app.run_named(None, "new_file", &json!({}));
+    }
+    app.run_named(None, "select_by_index", &json!({"index": 2}));
+    for scale in [1., 2.] {
+        preference(&mut app, "ui_scale", json!(scale));
+        for dark in [false, true] {
+            app.workspace.set_appearance(dark).unwrap();
+            for (style, hover, expected) in [
+                ("rounded", None, [0, 3, 4].as_slice()),
+                ("rounded", Some(1), &[3, 4]),
+                ("rounded", Some(4), &[0]),
+                ("square", Some(1), &[0, 1, 3, 4]),
+            ] {
+                preference(&mut app, "file_tab_style", json!(style));
+                let _ = app.scene();
+                let tabs: Vec<Rect> = app.tab_hits.iter().map(|hit| hit.1).collect();
+                assert_eq!(tabs.len(), 5);
+                let position = hover.map_or(
+                    Point {
+                        x: tabs[0].x + 10.,
+                        y: tabs[0].y + tabs[0].height + 100.,
+                    },
+                    |i: usize| Point {
+                        x: tabs[i].x + tabs[i].width / 2.,
+                        y: tabs[i].y + tabs[i].height / 2.,
+                    },
+                );
+                app.handle_mouse_event(
+                    None,
+                    MouseEvent {
+                        button: 0,
+                        kind: MouseKind::Move,
+                        position,
+                        click_count: 1,
+                        modifiers: Modifiers::default(),
+                        timestamp: 0.,
+                    },
+                );
+                let scene = app.scene();
+                let inset = if style == "rounded" { 8. } else { 7. } * scale;
+                let close = |a: f64, b: f64| (a - b).abs() < 0.01;
+                let drawn: Vec<usize> = (0..tabs.len())
+                    .filter(|&i| {
+                        let tab = tabs[i];
+                        scene.layers.iter().flat_map(|l| &l.surfaces).any(|s| {
+                            matches!(s, Surface::Image(q)
+                                if q.color[3] > 0.
+                                    && close(q.rect.x, tab.x + tab.width - scale)
+                                    && close(q.rect.width, scale)
+                                    && close(q.rect.y, tab.y + inset)
+                                    && close(q.rect.height, tab.height - 2. * inset))
+                        })
+                    })
+                    .collect();
+                assert_eq!(
+                    drawn, expected,
+                    "{style} hover {hover:?} dark {dark} ×{scale}"
+                );
+            }
+        }
+    }
+}
+
 /// `file_tab_style: "square"` (and `angled`): the selected tab joins the sheet and a focused
 /// one keeps its accent line with crisp ends. `rounded` (the default): the selected tab is a
 /// floating card with a hairline and, while its group is focused, a soft shadow; no accent
