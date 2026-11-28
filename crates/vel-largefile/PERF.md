@@ -90,7 +90,7 @@ the dense engine and exercise checkpoint eviction, edits, palettes and branch fa
 
 The complete original benches were rerun against the final isolated-module implementation:
 25 independent pairs for all three loads, all 21 text operations and all eight buffer scenarios;
-undo_50mb was extended to 101 pairs. Raw observations: [legacy-pairs.jsonl](legacy-pairs.jsonl).
+undo_50mb was extended to 101 pairs. Raw observations: legacy-pairs.jsonl.
 All paired median changes and all ratios of marginal medians are within the 5% regression
 limit. The worst paired increase is undo_50mb, +4.59% (875 -> 917 ns marginal medians, +4.80%).
 The 95% ratio interval for that sub-microsecond case is [1.000, 1.09486], so the confidence

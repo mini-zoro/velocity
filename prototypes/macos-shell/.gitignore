@@ -1,6 +1,0 @@
-/target/
-/output/*
-!/output/.gitkeep
-/backups/
-/native-floor/floor
-__pycache__/

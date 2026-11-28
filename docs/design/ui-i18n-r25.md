@@ -1,6 +1,6 @@
 # Round 25: Simplified Chinese editor chrome
 
-Scope: section D of [the UI localization spec](../../specs/vel-ui-menus-settings-i18n.md),
+Scope: section D of the UI localization spec,
 following the visual checks in [design round 5](ui-audit-r5.md). The User preference
 still defaults to English. Locale and catalog changes invalidate prepared labels
 and retained messages rather than reopening panels, discarding the search, or

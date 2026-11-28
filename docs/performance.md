@@ -99,8 +99,8 @@ establish a non-JavaScript latency win or rule out a small CPU regression.
 | `sqlite3.c`, full highlight | Not published | 14.247B instructions and 2.028 s user CPU per process; warm 146.8k lines/s | — | Not comparable | Local before/after only |
 | 10 MB Rust, full highlight | Not published | 60.324B instructions and 7.961 s user CPU per process; warm 65.0k lines/s | — | Not comparable | Local before/after only |
 | 10 MB JavaScript, full highlight | Not published | 49.265B instructions and 6.269 s user CPU per process; warm 81.5k lines/s | — | Not comparable | Local before/after only |
-| Typing, input to present-return | No same-endpoint public value | Current not measured; [P0 Fifo prototype](../prototypes/macos-shell/RESULTS.md) 1.748 / 3.188 ms at 2400×1600 on Rust; one run, 500 events, LA 5.7–8 | — | Not comparable to pixel change or physical photons | Current native budget unverified |
-| Near-4K GPU render | 3 ms full render at 4K ([Sublime HQ](https://www.sublimetext.com/blog/articles/hardware-accelerated-rendering), RX560 / 2080 Ti) | Current not measured; [P0 Fifo prototype](../prototypes/macos-shell/RESULTS.md) render pass 1.566 / 2.109 ms at 4096×2178; one run, 600 frames, LA 5.7–8 | — | Similar scale; different stage and hardware | Current native budget unverified |
+| Typing, input to present-return | No same-endpoint public value | Current not measured; P0 Fifo prototype 1.748 / 3.188 ms at 2400×1600 on Rust; one run, 500 events, LA 5.7–8 | — | Not comparable to pixel change or physical photons | Current native budget unverified |
+| Near-4K GPU render | 3 ms full render at 4K ([Sublime HQ](https://www.sublimetext.com/blog/articles/hardware-accelerated-rendering), RX560 / 2080 Ti) | Current not measured; P0 Fifo prototype render pass 1.566 / 2.109 ms at 4096×2178; one run, 600 frames, LA 5.7–8 | — | Similar scale; different stage and hardware | Current native budget unverified |
 
 **English.** Velocity's large-file mode uses substantially less memory in
 this headless exercise, but it does less highlighting work. Full-file
@@ -176,7 +176,7 @@ by just two trailing spaces at the end of the opening comment; GCC is the
 [same published file](https://github.com/peeknext/keypress/blob/main/test_files/gcc.c).
 jQuery 2.1.4 (247,597 bytes, 9,210 newline records) is the closer workload;
 3.7.1 (285,314 bytes, 10,716 newline records) is the requested 3.x fixture.
-The 10 MB inputs are the [spike Rust/JS corpora](../spikes/RESULTS.md#输入数据).
+The 10 MB inputs are the spike Rust/JS corpora.
 Velocity counts an empty trailing line; e.g. the generated C files are exactly
 1M/5M LF-terminated records and 29/145 MB, with different source from Peeknext.
 
@@ -216,7 +216,7 @@ Velocity counts an empty trailing line; e.g. the generated C files are exactly
 keeps JSONL, uptime and macOS own-child counters, with five new processes per
 case. For headless event series see the aggregation note beside the results.
 Use an isolated home and
-`RUSTUP_HOME=/Users/zoro/.rustup CARGO_HOME=/Users/zoro/.cargo` for measurement;
+`RUSTUP_HOME=~/.rustup CARGO_HOME=~/.cargo` for measurement;
 builds used an offline temporary copy of the existing Cargo registry to keep
 the real Cargo home unchanged. No privileged access was used.
 
@@ -789,7 +789,7 @@ median summed matching time were `expression-begin` (1,623 ms),
 The multi-pattern profile registered 37 contexts, 17 native fallbacks and zero
 DFA evictions on that input. Those are attribution measurements, not the
 unprofiled throughput numbers. The older full-corpus
-[round-13 differential](../crates/vel-regex/round13-differential.json) did see
+round-13 differential did see
 evictions.
 
 The ordered matcher now reuses verified group-zero spans for captureless native
@@ -1121,8 +1121,8 @@ Both release builds include the same diagnostic code and used
 `spikes/data/sublime-comparison/sqlite3.c`: 5,385,123 UTF-8 bytes and 151,639
 editor rows. The 7,533,858-byte generated C source below is a separate
 regression fixture. Reproduce with a disposable HOME, zsh, and log directory.
-Runs used `RUSTUP_HOME=/Users/zoro/.rustup` and
-`CARGO_HOME=/Users/zoro/.cargo`; builds used a disposable offline Cargo
+Runs used `RUSTUP_HOME=~/.rustup` and
+`CARGO_HOME=~/.cargo`; builds used a disposable offline Cargo
 registry so the real Cargo home was not written.
 
 ```sh

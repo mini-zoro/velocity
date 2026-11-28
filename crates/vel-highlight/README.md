@@ -284,4 +284,4 @@ and sparse viewport tests still exercise the real snapshot construction paths.
 `cargo run --release -p vel-highlight --example completeness_bench` measures the
 old and new query against the actual 10 MB fixture in nine alternating pairs.
 Results and paired application benches are in
-[tools/scroll-gate/RESULTS.md](../../tools/scroll-gate/RESULTS.md).
+tools/scroll-gate/RESULTS.md.

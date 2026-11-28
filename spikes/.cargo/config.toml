@@ -1,4 +1,0 @@
-[http]
-multiplexing = false
-[net]
-retry = 4

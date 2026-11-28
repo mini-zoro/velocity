@@ -1,7 +1,7 @@
 # Round 11: exact checks and review
 
 ```sh
-cd /Users/zoro/dev/velocity-lane-a
+cd <lane-checkout>
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --release
@@ -32,11 +32,11 @@ Earlier runbooks follow.
 
 # Round 9: Hot Exit history, Git, diff and spelling
 
-Run in `/Users/zoro/dev/velocity-lane-a`. This round touches only `velocity`, `vel-session`,
+Run in `<lane-checkout>`. This round touches only `velocity`, `vel-session`,
 `vel-commands`, `vel-config` and root Cargo.lock. No GUI/Metal is initialized by the CPU checks.
 
 ```sh
-cd /Users/zoro/dev/velocity-lane-a
+cd <lane-checkout>
 cargo fmt -p velocity -p vel-session -p vel-commands -p vel-config --check
 cargo clippy -p velocity -p vel-session -p vel-commands -p vel-config --all-targets -- -D warnings
 cargo test -p velocity -p vel-session -p vel-commands -p vel-config --release
@@ -77,7 +77,7 @@ The complete matrix below is also runnable with
 temporary output/profile root, runs the automatic modes, then opens the manual fixture.
 
 ```sh
-cd /Users/zoro/dev/velocity-lane-a
+cd <lane-checkout>
 cargo build --release -p velocity
 VELOCITY_R9_GUI=$(mktemp -d /tmp/velocity-r9-gui.XXXXXX)
 for run in 1 2 3 4 5; do
@@ -232,12 +232,12 @@ keymaps. Details are rendered as plain text; minihtml remains deferred.
 
 ## Round 7 archive: layouts, sessions, projects and builds
 
-Run from `/Users/zoro/dev/velocity`. Do not commit. This round changes velocity, vel-ui,
+Run from `<checkout>`. Do not commit. This round changes velocity, vel-ui,
 vel-config, vel-commands, vel-platform and the new vel-build/vel-session, plus Cargo.lock.
 Other lanes' working-tree changes and Color Scheme - Velocity are left untouched.
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo fmt -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session --check
 cargo clippy -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session --all-targets -- -D warnings
 cargo test -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session -p vel-fileio -p vel-search -p vel-render
@@ -282,7 +282,7 @@ Use an awake, unlocked visible display. First produce an isolated, initially abs
 50-file session without any GUI. The directory names below are new on every run.
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo build --release -p velocity
 VELOCITY_R7=$(mktemp -d /tmp/velocity-r7-review.XXXXXX)
 python3 crates/velocity/scripts/measure-workbench.py --runs 1 --output-dir "$VELOCITY_R7/cpu"
@@ -375,13 +375,13 @@ This limitation is explicit; full native history fidelity is pending that API.
 
 # Round 6: syntax, language editing and view features
 
-Run from `/Users/zoro/dev/velocity`. Keep lane B's concurrent files unchanged and do not
+Run from `<checkout>`. Keep lane B's concurrent files unchanged and do not
 commit. Round-6 code touches velocity, vel-ui, vel-render, vel-platform, vel-config and
 vel-commands, plus the shared root lockfile. Resources under Color Scheme - Velocity are
 consumed without editing them. Older round sections below are historical.
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo fmt -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands --check
 cargo clippy -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands --all-targets -- -D warnings
 cargo test -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands -p vel-fileio -p vel-search
@@ -408,7 +408,7 @@ The Python wrapper copies one release binary, runs it sequentially, retains raw 
 records binary/source hashes and interpolated pooled quantiles. It never overwrites results.
 Use at least five sequential runs, retain outliers and record concurrent lane activity.
 
-Final round-6 results: [RESULTS.md](RESULTS.md) and [timings-round6.json](timings-round6.json). All 100 lane-A tests and required strict
+Final round-6 results: [RESULTS.md](RESULTS.md) and timings-round6.json. All 100 lane-A tests and required strict
 checks pass. Five CPU runs retain all outliers; two individual typing p95s exceed
 4 ms despite the pooled p95 meeting the target. Native results remain pending.
 
@@ -418,7 +418,7 @@ Use an awake, unlocked, visible display. These commands exit automatically. No G
 measurement or display wake was attempted in the agent session.
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo build --release -p velocity
 VELOCITY_ROUND6_GUI=$(mktemp -d /tmp/velocity-round6-gui.XXXXXX)
 mkdir -p "$VELOCITY_ROUND6_GUI/data/Packages/User"
@@ -482,14 +482,14 @@ Lane-B API requests (optional cleanup; no functional blocker):
 
 # Round 5: panels, navigation, project tree and search
 
-All commands start in `/Users/zoro/dev/velocity`. Do not commit this lane's work. The new
+All commands start in `<checkout>`. Do not commit this lane's work. The new
 `vel-ui` and `vel-search` crates are workspace members through the existing `crates/*` glob.
 No lane-B crate/API is required; the symbol provider is deliberately an integration hook.
 The following checks target all touched crates plus the existing render/file-IO seams, so
 parallel syntax/highlight work is not formatted or edited by these commands.
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo fmt -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio --check
 cargo clippy -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio --all-targets -- -D warnings
 cargo test -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio
@@ -602,7 +602,7 @@ window server or Metal; only headless checks and helper compilation were run the
 macOS 14+ is required. Commands start in the repository root:
 
 ```sh
-cd /Users/zoro/dev/velocity
+cd <checkout>
 cargo fmt --all
 cargo clippy -p vel-platform -p vel-render -p velocity --all-targets -- -D warnings
 cargo test -p vel-platform -p vel-render -p velocity
@@ -728,7 +728,7 @@ python3 crates/velocity/scripts/measure.py --validate path/to/startup.jsonl path
 ./target/release/velocity --log-input crates/velocity/fixtures/ime-and-unicode.rs
 sh crates/velocity/scripts/bundle.sh
 open -n crates/velocity/dist/Velocity.app --args \
-  --log-input /Users/zoro/dev/velocity/crates/velocity/fixtures/ime-and-unicode.rs
+  --log-input <checkout>/crates/velocity/fixtures/ime-and-unicode.rs
 ```
 
 The script produces dev.velocity.Velocity with NSHighResolutionCapable and macOS 14
