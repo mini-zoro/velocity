@@ -8,13 +8,13 @@
 // when a call blocks, so samples stay evenly spaced in time.
 //
 // Reported per drag: the distance between the tab and "pointer - grab offset"
-// (median, p95); the largest jump, the tab's step minus the pointer's step at the
-// measured input-to-screen latency (a constant delay is not a jump), both between
-// displayed frames (judged) and between 120 Hz samples (on a 60 Hz display that one
-// cannot go below one pointer step, since each frame moves two steps at once); the
-// step where the floating window first shows the tab; the share of 120 Hz steps in
-// which the pointer moved and the tab did not; frame intervals and late frames; and
-// the latency. The footprint is taken after a warm-up drag, before and after the
+// (median, p95); the largest jump between displayed frames (judged): how much the
+// tab's offset from the pointer event a frame shows changes between frames; the
+// literal largest difference between the tab's and the pointer's step over 120 Hz
+// samples at the measured latency (on a 60 Hz display that one cannot go below one
+// pointer step, since each frame moves two steps at once); the jump where the
+// floating window first shows the tab; the share of 120 Hz steps in which the
+// pointer moved and the tab did not; frame intervals, late frames and latency. The footprint is taken after a warm-up drag, before and after the
 // measured drags, once it settles.
 //
 // E2E_TABDRAG_LAUNCHERS="before=/a/velocity,after=/b/velocity" measures two builds on
@@ -89,7 +89,8 @@ private struct DragMetrics {
     var floatingShare = 0.0
     var errorMedian = Double.nan
     var errorP95 = Double.nan
-    /// Per displayed frame: the tab's step between two frames minus the pointer's.
+    /// Per displayed frame: how much the tab's offset from the pointer event it
+    /// shows changes from one frame to the next.
     var maxJump = Double.nan
     /// Per 120 Hz sample pair, as literally defined; on a 60 Hz display its floor
     /// is one pointer step (the frame moves two at once).
@@ -101,6 +102,7 @@ private struct DragMetrics {
     var stallShare = 0.0
     var frameMs = Double.nan
     var lateFrameShare = 0.0
+    var frameLatencyMs = Double.nan
     var lagMs = Double.nan
     var sampleP95Ms = Double.nan
     var postP95Ms = Double.nan
@@ -109,9 +111,9 @@ private struct DragMetrics {
     var realtime = false
 
     var line: String {
-        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump_frame=%.2f max_jump_120hz=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
+        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump_frame=%.2f max_jump_120hz=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% frame_latency_ms=%.1f lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
                moving, floatingShare * 100, errorMedian, errorP95, maxJump, maxJump120, maxJumpRaw, entryJump,
-               entryShift, stallShare * 100, frameMs, lateFrameShare * 100, lagMs, sampleP95Ms, postP95Ms,
+               entryShift, stallShare * 100, frameMs, lateFrameShare * 100, frameLatencyMs, lagMs, sampleP95Ms, postP95Ms,
                postLateP95Ms, postLateMaxMs, realtime ? "yes" : "no")
     }
 }
@@ -383,24 +385,47 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
     let lag = best.error.isFinite ? best.lag : 0
     metrics.lagMs = lag * 1000
 
-    // Displayed frames: each change of the tab's position, timed halfway between the
-    // last sample that saw the old position and the first that saw the new one.
-    var frames: [(t: Double, tab: CGPoint)] = []
+    // Displayed frames: each change of the tab's position, seen first at sample `i`.
+    // A frame shows some recent pointer event: the one whose "pointer - grab" is
+    // nearest, among the last seven posted (58 ms) before the frame was seen. A
+    // jump is a change of the residual (tab minus that event's position) between
+    // frames. Unlike a fixed time lag this does not depend on where 60 Hz frames
+    // fall between 120 Hz events, so a tab that shows events exactly scores ~0.
+    var frames: [(t: Double, tab: CGPoint, source: TabSource)] = []
     var previous: Int?
     for i in samples.indices where samples[i].phase <= legs {
         guard let tab = samples[i].tab else { continue }
         if let j = previous, let old = samples[j].tab, old != tab, i >= first {
-            if frames.isEmpty { frames.append((samples[j].t, old)) }
-            frames.append(((samples[j].t + samples[i].t) / 2, tab))
+            if frames.isEmpty { frames.append((samples[j].t, old, samples[j].source)) }
+            frames.append((samples[i].t, tab, samples[i].source))
         }
         previous = i
     }
-    var frameJumps: [Double] = []
-    for (a, b) in zip(frames, frames.dropFirst()) {
-        let moved = CGVector(dx: b.tab.x - a.tab.x, dy: b.tab.y - a.tab.y)
-        frameJumps.append(gap(moved, step(a.t, b.t, lag: lag)))
+    var residuals: [CGVector] = []
+    var latencies: [Double] = []
+    for frame in frames {
+        var low = 0, high = log.count
+        while low < high {
+            let mid = (low + high) / 2
+            if log[mid].t <= frame.t { low = mid + 1 } else { high = mid }
+        }
+        var best: (d: Double, e: CGVector, k: Int)?
+        for k in max(0, low - 7)..<low {
+            let e = CGVector(dx: frame.tab.x - (log[k].point.x - grab.dx), dy: frame.tab.y - (log[k].point.y - grab.dy))
+            let d = Double(hypot(e.dx, e.dy))
+            if best.map({ d < $0.d }) ?? true { best = (d, e, k) }
+        }
+        let fallback = CGVector(dx: frame.tab.x - (press.x - grab.dx), dy: frame.tab.y - (press.y - grab.dy))
+        residuals.append(best?.e ?? fallback)
+        if let best { latencies.append((frame.t - log[best.k].t) * 1000) }
     }
+    let frameJumps = zip(residuals, residuals.dropFirst()).map { gap($1, $0) }
     metrics.maxJump = frameJumps.max() ?? .nan
+    metrics.frameLatencyMs = percentile(latencies, 0.5)
+    if let entry = frames.indices.first(where: { $0 > 0 && frames[$0].source == .floating }) {
+        metrics.entryJump = gap(residuals[entry], residuals[entry - 1])
+        metrics.entryShift = distance(frames[entry].tab, frames[entry - 1].tab)
+    }
     let intervals = zip(frames, frames.dropFirst()).map { ($1.t - $0.t) * 1000 }
     metrics.frameMs = percentile(intervals, 0.5)
     if !intervals.isEmpty {
@@ -428,15 +453,6 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
     metrics.maxJumpRaw = raw.max() ?? .nan
     metrics.stallShare = moves == 0 ? 0 : Double(stalls) / Double(moves)
 
-    // Entry: the first sample that shows the floating window, against the last
-    // sample that knew where the tab was drawn before it.
-    if let entry = samples.indices.first(where: { samples[$0].source == .floating && samples[$0].phase >= 1 }),
-       let before = samples[..<entry].lastIndex(where: { $0.tab != nil }),
-       let ta = samples[before].tab, let tb = samples[entry].tab {
-        let moved = CGVector(dx: tb.x - ta.x, dy: tb.y - ta.y)
-        metrics.entryJump = gap(moved, step(samples[before].t, samples[entry].t, lag: lag))
-        metrics.entryShift = Double(hypot(moved.dx, moved.dy))
-    }
     return metrics
 }
 
@@ -563,8 +579,8 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         if judged {
             report.check(metrics.maxJump <= maxJumpLimit,
                          "[\(name)] rep \(rep): largest jump between displayed frames <= \(maxJumpLimit) points",
-                         detail: String(format: "%.2f per frame (%.1f ms frames, latency %.0f ms); per 120 Hz sample %.2f",
-                                        metrics.maxJump, metrics.frameMs, metrics.lagMs, metrics.maxJump120))
+                         detail: String(format: "%.2f per frame (%.1f ms frames, %.0f ms from event to frame); per 120 Hz sample %.2f",
+                                        metrics.maxJump, metrics.frameMs, metrics.frameLatencyMs, metrics.maxJump120))
         }
         sleep(seconds: 0.3)
     }
@@ -663,11 +679,11 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
         let mib = { (bytes: Int64) in String(format: "%.1f", Double(bytes) / 1_048_576) }
         let grown = mine.map { String(format: "%+.2f", Double($0.footprintAfter - $0.footprintBefore) / 1_048_576) }
         report.info("COMPARE \(name)", detail: String(
-            format: "reps=%d err_med=%.2f err_p95=%.2f max_jump_frame(median)=%.2f max_jump_frame(worst)=%.2f max_jump_120hz(median)=%.2f max_jump_120hz(worst)=%.2f entry_jump(median)=%.2f entry_jump(worst)=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% floating=%.1f%% lag_ms=%.1f",
+            format: "reps=%d err_med=%.2f err_p95=%.2f max_jump_frame(median)=%.2f max_jump_frame(worst)=%.2f max_jump_120hz(median)=%.2f max_jump_120hz(worst)=%.2f entry_jump(median)=%.2f entry_jump(worst)=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% frame_latency_ms=%.1f floating=%.1f%%",
             reps.count, median(\.errorMedian), median(\.errorP95), median(\.maxJump), worst(\.maxJump),
             median(\.maxJump120), worst(\.maxJump120), median(\.entryJump), worst(\.entryJump),
             median(\.stallShare) * 100, median(\.frameMs), median(\.lateFrameShare) * 100,
-            median(\.floatingShare) * 100, median(\.lagMs))
+            median(\.frameLatencyMs), median(\.floatingShare) * 100)
             + " footprint launch=" + mine.map { mib($0.footprintLaunch) }.joined(separator: "/")
             + " before=" + mine.map { mib($0.footprintBefore) }.joined(separator: "/")
             + " after=" + mine.map { mib($0.footprintAfter) }.joined(separator: "/")
