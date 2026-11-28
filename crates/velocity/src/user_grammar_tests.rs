@@ -29,7 +29,9 @@ fn open(w: &mut Workspace, path: &Path) {
     wait(w);
 }
 fn wait(w: &mut Workspace) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A hang watchdog, not a budget: each reload rebuilds every grammar, which takes
+    // 4-5 s alone and more than 10 s while the whole suite runs in parallel.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         w.wait_resources();
         let ready = !w.resources_busy()
