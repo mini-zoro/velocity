@@ -12,7 +12,7 @@ const IMAGE_HIDE_DELAY: Duration = Duration::from_millis(34);
 const IMAGE_HIDE_TIMEOUT: Duration = Duration::from_millis(250);
 const IMAGE_PAD: f64 = 12.;
 /// The floating tab closes the click threshold's lead on the pointer over this long.
-const CATCH_UP: Duration = Duration::from_millis(100);
+const CATCH_UP: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TabStrip {
@@ -57,6 +57,9 @@ pub(super) struct TabDrag {
     pub floating: bool,
     /// The pointer's latest screen point.
     pub pointer: Point,
+    /// When `pointer` was current, in `MouseEvent::timestamp` units. A live read
+    /// between renders can be newer than events still queued behind it.
+    seen: f64,
     /// How far the pointer had moved when the drag began. The floating tab first
     /// covers the strip tab exactly, then closes this lead over `CATCH_UP`.
     lead: Point,
@@ -300,6 +303,7 @@ impl App {
                 transferable,
                 floating,
                 pointer,
+                seen: f64::NEG_INFINITY,
                 lead: Point {
                     x: pointer.x - from.x,
                     y: pointer.y - from.y,
@@ -365,13 +369,19 @@ impl App {
         let slot = hit
             .or_else(|| previous.filter(|slot| !drag.detached && slot.window == self.session_id));
         self.set_shared_slot(slot);
-        drag.pointer = screen;
+        // An event older than a live read already shown would pull the tab back.
+        let fresh = event.timestamp >= drag.seen;
+        if fresh {
+            drag.pointer = screen;
+            drag.seen = event.timestamp;
+        }
         if event.kind == MouseKind::Up {
             self.tab_press = None;
             self.drop_tab(window, sheet, grab, drag, hit);
             return;
         }
         if drag.floating
+            && fresh
             && let Some(window) = window
         {
             window.move_drag_image(drag.settle(Instant::now()));
@@ -481,6 +491,30 @@ impl App {
     }
 
     /// Closes the threshold lead between pointer events, from the frame loop.
+    /// Puts the floating tab under the pointer's live location, from the frame loop
+    /// before and after rendering: events queued while a frame renders would only
+    /// arrive after it, so the tab would skip a frame and then lurch.
+    pub(super) fn follow_live_pointer(&mut self, window: Option<&WindowHandle>) {
+        let Some(window) = window else {
+            return;
+        };
+        let Some(drag) = self
+            .tab_press
+            .as_mut()
+            .and_then(|press| press.drag.as_mut())
+            .filter(|drag| drag.floating)
+        else {
+            return;
+        };
+        if let Some((point, at)) = window.pointer_screen_location()
+            && at > drag.seen
+        {
+            drag.pointer = point;
+            drag.seen = at;
+            window.move_drag_image(drag.settle(Instant::now()));
+        }
+    }
+
     /// Closes the rest of the threshold lead when the pointer stopped during it.
     pub(super) fn catch_up_tab_drag(&mut self, window: Option<&WindowHandle>, now: Instant) {
         let Some(drag) = self

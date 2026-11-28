@@ -185,14 +185,15 @@ fn tab_press_threshold_floats_the_tab_and_escape_eases_it_home() {
         drag.anchor(began + at)
     };
     assert_eq!(fresh(drag, Duration::ZERO), on_screen(start));
-    // ... then closes the threshold's lead on the pointer smoothly, in under 2 points
-    // per 120 Hz frame, and keeps the press-time grab offset from then on.
+    // ... then closes the threshold's lead on the pointer smoothly, at most half a
+    // point ahead of a still pointer per 60 Hz frame, and keeps the press-time grab
+    // offset from then on.
     let mut last = on_screen(start);
-    for tick in 1..=15 {
-        let at = fresh(drag, Duration::from_micros(8_333 * tick));
+    for frame in 1..=13 {
+        let at = fresh(drag, Duration::from_micros(16_667 * frame));
         assert!(
-            (at.x - last.x).abs() < 1.,
-            "tick {tick}: {last:?} -> {at:?}"
+            (at.x - last.x).abs() < 0.5,
+            "frame {frame}: {last:?} -> {at:?}"
         );
         assert_eq!(at.y, last.y);
         last = at;
@@ -279,6 +280,40 @@ fn tab_press_threshold_floats_the_tab_and_escape_eases_it_home() {
     );
     assert!(a.tab_press.is_none() && a.torn_off_windows.is_empty());
     assert_eq!(a.workspace.workbench.groups[0].sheets, order);
+}
+
+#[test]
+fn an_event_older_than_the_shown_pointer_never_pulls_the_floating_tab_back() {
+    let mut a = app();
+    a.workspace.new_file().unwrap();
+    a.scene();
+    let start = center(tab(&a, a.workspace.tabs[0].sheet));
+    let at = |x: f64, y: f64, timestamp: f64| MouseEvent {
+        button: 0,
+        kind: MouseKind::Drag,
+        position: Point {
+            x: start.x + x,
+            y: start.y + y,
+        },
+        click_count: 1,
+        modifiers: Modifiers::default(),
+        timestamp,
+    };
+    mouse(&mut a, MouseKind::Down, start);
+    a.handle_mouse_event(None, at(10., 20., 5.));
+    let shown = dragged(&a).pointer;
+    // Queued behind a newer read: the slot logic still sees it, the tab does not move.
+    a.handle_mouse_event(None, at(6., 12., 4.));
+    assert_eq!(dragged(&a).pointer, shown);
+    a.handle_mouse_event(None, at(30., 40., 6.));
+    assert_eq!(
+        dragged(&a).pointer,
+        Point {
+            x: start.x + 30.,
+            y: start.y + 40.
+        }
+    );
+    mouse(&mut a, MouseKind::Up, start);
 }
 
 #[test]

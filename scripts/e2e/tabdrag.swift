@@ -2,17 +2,20 @@
 //
 // A pressed tab is dragged with synthetic HID events at 120 Hz on a diagonal out of
 // the strip and back to another slot. One thread posts the pointer events on fixed
-// deadlines; another samples, also at 120 Hz, where the dragged tab is drawn: the
+// deadlines; another samples, at 240 Hz, where the dragged tab is drawn: the
 // floating drag window from CGWindowList (Velocity's own window at the floating
 // level), else the tab's AXFrame in the strip. Neither thread catches up in bursts
 // when a call blocks, so samples stay evenly spaced in time.
 //
 // Reported per drag: the distance between the tab and "pointer - grab offset"
-// (median, p95), the largest step in which the tab moved differently from the
-// pointer (compared at the measured input-to-screen latency, so a constant delay is
-// not a jump), the step where the floating window first shows the tab, the share of
-// steps in which the pointer moved and the tab did not, and the latency. The process
-// footprint is taken after a warm-up drag, before and after the measured drags.
+// (median, p95); the largest jump, the tab's step minus the pointer's step at the
+// measured input-to-screen latency (a constant delay is not a jump), both between
+// displayed frames (judged) and between 120 Hz samples (on a 60 Hz display that one
+// cannot go below one pointer step, since each frame moves two steps at once); the
+// step where the floating window first shows the tab; the share of 120 Hz steps in
+// which the pointer moved and the tab did not; frame intervals and late frames; and
+// the latency. The footprint is taken after a warm-up drag, before and after the
+// measured drags, once it settles.
 //
 // E2E_TABDRAG_LAUNCHERS="before=/a/velocity,after=/b/velocity" measures two builds on
 // the same runner, alternating; only "after" (or the single default build) is judged.
@@ -26,6 +29,8 @@ import Foundation
 /// IMAGE_PAD in crates/velocity/src/app_tab_drag.rs: transparent margin around the tab.
 private let tabImagePad: CGFloat = 12
 private let tick = 1.0 / 120
+/// The sampler runs at twice the pointer rate, to time each displayed frame.
+private let sampleTick = tick / 2
 /// THRESHOLD in app_tab_drag.rs: a press stays a click until it moves this far.
 private let clickThreshold = 4.0
 private let floatingLevel = Int(CGWindowLevelForKey(.floatingWindow))
@@ -84,12 +89,18 @@ private struct DragMetrics {
     var floatingShare = 0.0
     var errorMedian = Double.nan
     var errorP95 = Double.nan
+    /// Per displayed frame: the tab's step between two frames minus the pointer's.
     var maxJump = Double.nan
+    /// Per 120 Hz sample pair, as literally defined; on a 60 Hz display its floor
+    /// is one pointer step (the frame moves two at once).
+    var maxJump120 = Double.nan
     var maxJumpRaw = Double.nan
     var entryJump = Double.nan
     /// How far the tab itself moved on screen at that step.
     var entryShift = Double.nan
     var stallShare = 0.0
+    var frameMs = Double.nan
+    var lateFrameShare = 0.0
     var lagMs = Double.nan
     var sampleP95Ms = Double.nan
     var postP95Ms = Double.nan
@@ -98,9 +109,10 @@ private struct DragMetrics {
     var realtime = false
 
     var line: String {
-        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall=%.1f%% lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
-               moving, floatingShare * 100, errorMedian, errorP95, maxJump, maxJumpRaw, entryJump, entryShift,
-               stallShare * 100, lagMs, sampleP95Ms, postP95Ms, postLateP95Ms, postLateMaxMs, realtime ? "yes" : "no")
+        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump_frame=%.2f max_jump_120hz=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
+               moving, floatingShare * 100, errorMedian, errorP95, maxJump, maxJump120, maxJumpRaw, entryJump,
+               entryShift, stallShare * 100, frameMs, lateFrameShare * 100, lagMs, sampleP95Ms, postP95Ms,
+               postLateP95Ms, postLateMaxMs, realtime ? "yes" : "no")
     }
 }
 
@@ -233,7 +245,7 @@ private final class Poster: @unchecked Sendable {
     }
 }
 
-/// Samples the dragged tab on its own real-time thread at 120 Hz.
+/// Samples the dragged tab on its own real-time thread at 240 Hz.
 private final class Sampler: @unchecked Sendable {
     let clock: MachClock
     let floating: FloatingTab
@@ -252,7 +264,7 @@ private final class Sampler: @unchecked Sendable {
 
     func start() {
         let thread = Thread { [self] in
-            _ = makeRealtime(period: tick)
+            _ = makeRealtime(period: sampleTick)
             run()
             done.signal()
         }
@@ -261,17 +273,19 @@ private final class Sampler: @unchecked Sendable {
     }
 
     private func run() {
-        // Half a tick after the posts, so a sample sees the latest event's effect.
-        var deadline = clock.now() + tick / 2
+        // Offset from the posts, so a sample sees the latest event's effect.
+        var deadline = clock.now() + sampleTick / 2
         var released: Double?
+        var n = 0
         while released.map({ clock.now() < $0 + 0.32 }) ?? true {
             clock.wait(until: deadline)
             let start = clock.now()
             var tab = floating.tabOrigin()
             var source = tab == nil ? TabSource.none : .floating
-            // AX makes the app answer on its main thread; read it only while no
-            // floating window shows the tab.
-            if tab == nil, let stripTab,
+            // AX makes the app answer on its main thread; read it at 120 Hz and only
+            // while no floating window shows the tab.
+            n += 1
+            if tab == nil, n % 2 == 0, let stripTab,
                let rect = AXReadErrors.shared.quietly({ axRect(stripTab) }), rect.width > 1, rect.height > 1 {
                 tab = rect.origin
                 source = .strip
@@ -279,7 +293,7 @@ private final class Sampler: @unchecked Sendable {
             let end = clock.now()
             samples.append(DragSample(t: (start + end) / 2, tab: tab, source: source, cost: end - start))
             // A blocked read delays the next sample; it never bunches samples together.
-            deadline = max(deadline + tick, clock.now())
+            deadline = max(deadline + sampleTick, clock.now())
             if released == nil, poster.done.wait(timeout: .now()) == .success { released = clock.now() }
         }
     }
@@ -324,17 +338,6 @@ private func distance(_ a: CGPoint, _ b: CGPoint) -> Double {
     Double(hypot(a.x - b.x, a.y - b.y))
 }
 
-/// Where the pointer was `lag` seconds before sample `i`: the last event posted by then.
-private func pointerAt(_ samples: [DragSample], _ i: Int, lag: Double, log: [Posted], press: CGPoint) -> CGPoint {
-    let t = samples[i].t - lag
-    var low = 0, high = log.count
-    while low < high {
-        let mid = (low + high) / 2
-        if log[mid].t <= t { low = mid + 1 } else { high = mid }
-    }
-    return low == 0 ? press : log[low - 1].point
-}
-
 /// Metrics over the moving legs (phases 1...legs) once the pointer has passed the
 /// click threshold. `grab` is pointer minus tab origin at the press.
 private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, legs: Int, grab: CGVector) -> DragMetrics {
@@ -344,9 +347,19 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
     metrics.postP95Ms = percentile(log.map { $0.cost * 1000 }, 0.95)
     metrics.postLateP95Ms = percentile(log.map { $0.late * 1000 }, 0.95)
     metrics.postLateMaxMs = log.map { $0.late * 1000 }.max() ?? .nan
-    func pointer(_ i: Int, lag: Double) -> CGPoint {
-        pointerAt(samples, i, lag: lag, log: log, press: press)
+    func pointer(at t: Double) -> CGPoint {
+        var low = 0, high = log.count
+        while low < high {
+            let mid = (low + high) / 2
+            if log[mid].t <= t { low = mid + 1 } else { high = mid }
+        }
+        return low == 0 ? press : log[low - 1].point
     }
+    func step(_ from: Double, _ to: Double, lag: Double) -> CGVector {
+        let a = pointer(at: from - lag), b = pointer(at: to - lag)
+        return CGVector(dx: b.x - a.x, dy: b.y - a.y)
+    }
+    func gap(_ a: CGVector, _ b: CGVector) -> Double { Double(hypot(a.dx - b.dx, a.dy - b.dy)) }
     guard let first = samples.firstIndex(where: {
         (1...legs).contains($0.phase) && distance($0.pointer, press) >= clickThreshold
     }) else { return metrics }
@@ -361,49 +374,67 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
     // Latency: the delay that best explains where the floating tab is drawn.
     var best = (lag: 0.0, error: Double.infinity)
     for ms in stride(from: 0.0, through: 50.0, by: 1.0) {
-        let lag = ms / 1000
         let e = percentile(moving.compactMap { i -> Double? in
             guard samples[i].source == .floating, let tab = samples[i].tab else { return nil }
-            return distance(tab, expected(pointer(i, lag: lag)))
+            return distance(tab, expected(pointer(at: samples[i].t - ms / 1000)))
         }, 0.5)
-        if e < best.error { best = (lag, e) }
+        if e < best.error { best = (ms / 1000, e) }
     }
     let lag = best.error.isFinite ? best.lag : 0
     metrics.lagMs = lag * 1000
-    // Jumps: the tab's step between neighbouring samples beyond the pointer's step
-    // (the pointer as the screen shows it, `lag` earlier). Raw: without the lag.
+
+    // Displayed frames: each change of the tab's position, timed halfway between the
+    // last sample that saw the old position and the first that saw the new one.
+    var frames: [(t: Double, tab: CGPoint)] = []
+    var previous: Int?
+    for i in samples.indices where samples[i].phase <= legs {
+        guard let tab = samples[i].tab else { continue }
+        if let j = previous, let old = samples[j].tab, old != tab, i >= first {
+            if frames.isEmpty { frames.append((samples[j].t, old)) }
+            frames.append(((samples[j].t + samples[i].t) / 2, tab))
+        }
+        previous = i
+    }
+    var frameJumps: [Double] = []
+    for (a, b) in zip(frames, frames.dropFirst()) {
+        let moved = CGVector(dx: b.tab.x - a.tab.x, dy: b.tab.y - a.tab.y)
+        frameJumps.append(gap(moved, step(a.t, b.t, lag: lag)))
+    }
+    metrics.maxJump = frameJumps.max() ?? .nan
+    let intervals = zip(frames, frames.dropFirst()).map { ($1.t - $0.t) * 1000 }
+    metrics.frameMs = percentile(intervals, 0.5)
+    if !intervals.isEmpty {
+        metrics.lateFrameShare = Double(intervals.filter { $0 > metrics.frameMs * 1.5 }.count) / Double(intervals.count)
+    }
+
+    // The literal 120 Hz definition: every other sample, neighbour to neighbour.
+    let grid = moving.filter { ($0 - first) % 2 == 0 }
     var jumps: [Double] = []
     var raw: [Double] = []
     var stalls = 0
     var moves = 0
-    for (a, b) in zip(moving, moving.dropFirst()) where b == a + 1 {
+    for (a, b) in zip(grid, grid.dropFirst()) where b == a + 2 {
         guard let ta = samples[a].tab, let tb = samples[b].tab else { continue }
         let moved = CGVector(dx: tb.x - ta.x, dy: tb.y - ta.y)
-        func step(_ shift: Double) -> CGVector {
-            let pa = pointer(a, lag: shift), pb = pointer(b, lag: shift)
-            return CGVector(dx: pb.x - pa.x, dy: pb.y - pa.y)
-        }
-        let led = step(lag)
-        jumps.append(Double(hypot(moved.dx - led.dx, moved.dy - led.dy)))
-        let direct = step(0)
-        raw.append(Double(hypot(moved.dx - direct.dx, moved.dy - direct.dy)))
+        let led = step(samples[a].t, samples[b].t, lag: lag)
+        jumps.append(gap(moved, led))
+        raw.append(gap(moved, step(samples[a].t, samples[b].t, lag: 0)))
         if hypot(led.dx, led.dy) >= 1 {
             moves += 1
             if hypot(moved.dx, moved.dy) < 0.5 { stalls += 1 }
         }
     }
-    metrics.maxJump = jumps.max() ?? .nan
+    metrics.maxJump120 = jumps.max() ?? .nan
     metrics.maxJumpRaw = raw.max() ?? .nan
     metrics.stallShare = moves == 0 ? 0 : Double(stalls) / Double(moves)
+
     // Entry: the first sample that shows the floating window, against the last
     // sample that knew where the tab was drawn before it.
     if let entry = samples.indices.first(where: { samples[$0].source == .floating && samples[$0].phase >= 1 }),
        let before = samples[..<entry].lastIndex(where: { $0.tab != nil }),
        let ta = samples[before].tab, let tb = samples[entry].tab {
         let moved = CGVector(dx: tb.x - ta.x, dy: tb.y - ta.y)
-        let pa = pointer(before, lag: lag), pb = pointer(entry, lag: lag)
-        let led = CGVector(dx: pb.x - pa.x, dy: pb.y - pa.y)
-        metrics.entryJump = Double(hypot(moved.dx - led.dx, moved.dy - led.dy))
+        metrics.entryJump = gap(moved, step(samples[before].t, samples[entry].t, lag: lag))
         metrics.entryShift = Double(hypot(moved.dx, moved.dy))
     }
     return metrics
@@ -432,17 +463,18 @@ private func tabElement(_ window: AXUIElement, named name: String) -> AXUIElemen
     }
 }
 
-/// The footprint once it stops moving (two reads 250 ms apart within 128 KiB), or
-/// the last read after five seconds.
-private func settledFootprint(_ pid: pid_t) -> Int64 {
-    var last = Int64(footprintBytes(pid) ?? 0)
-    for _ in 0..<20 {
+/// The footprint once it stops moving (three reads 250 ms apart within 128 KiB),
+/// or the last read after eight seconds. `series` gets every read, in MiB.
+private func settledFootprint(_ pid: pid_t, series: inout [String]) -> Int64 {
+    var reads = [Int64(footprintBytes(pid) ?? 0)]
+    for _ in 0..<32 {
         usleep(250_000)
-        let now = Int64(footprintBytes(pid) ?? 0)
-        if abs(now - last) < 128 * 1024 { return now }
-        last = now
+        reads.append(Int64(footprintBytes(pid) ?? 0))
+        let tail = reads.suffix(3)
+        if tail.count == 3, tail.max()! - tail.min()! < 128 * 1024 { break }
     }
-    return last
+    series = reads.map { String(format: "%.2f", Double($0) / 1_048_576) }
+    return reads.last!
 }
 
 private struct VariantResult {
@@ -504,7 +536,8 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
     }
     _ = waitUntil(10) { tabs(window).count == 3 }
     sleep(seconds: 1.0)
-    result.footprintLaunch = settledFootprint(pid)
+    var series: [String] = []
+    result.footprintLaunch = settledFootprint(pid, series: &series)
 
     // 0. Warm-up: the first drag in a process creates the drag window.
     if let (_, expected) = measuredDrag(window, pid: pid, label: "\(name)-round\(round)-warmup") {
@@ -513,7 +546,8 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         verdict(false, "three tabs before the warm-up drag", detail: tabSummary(window))
     }
     sleep(seconds: 0.3)
-    result.footprintBefore = settledFootprint(pid)
+    result.footprintBefore = settledFootprint(pid, series: &series)
+    report.info("footprint settle [\(name)] after warm-up", detail: series.joined(separator: " "))
 
     // 1. Three measured drags.
     for rep in 1...3 {
@@ -527,13 +561,15 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         verdict(labels(window) == expected, "rep \(rep): the dropped tab lands in slot 0",
                 detail: "\(labels(window)) expected \(expected)")
         if judged {
-            report.check(metrics.maxJump <= maxJumpLimit, "[\(name)] rep \(rep): largest jump <= \(maxJumpLimit) points",
-                         detail: String(format: "%.2f (latency %.0f ms, raw %.2f)", metrics.maxJump, metrics.lagMs,
-                                        metrics.maxJumpRaw))
+            report.check(metrics.maxJump <= maxJumpLimit,
+                         "[\(name)] rep \(rep): largest jump between displayed frames <= \(maxJumpLimit) points",
+                         detail: String(format: "%.2f per frame (%.1f ms frames, latency %.0f ms); per 120 Hz sample %.2f",
+                                        metrics.maxJump, metrics.frameMs, metrics.lagMs, metrics.maxJump120))
         }
         sleep(seconds: 0.3)
     }
-    result.footprintAfter = settledFootprint(pid)
+    result.footprintAfter = settledFootprint(pid, series: &series)
+    report.info("footprint settle [\(name)] after 3 drags", detail: series.joined(separator: " "))
     let grown = result.footprintAfter - result.footprintBefore
     verdict(abs(grown) <= footprintSlack, "footprint after the drags is within 2 MiB of before",
             detail: String(format: "launch %.1f MiB, after warm-up %.1f MiB, after 3 drags %.1f MiB (%+.2f MiB)",
@@ -584,7 +620,7 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
     } else {
         verdict(false, "a second window opened", detail: "\(windows.count) window(s)")
     }
-    result.footprintEnd = settledFootprint(pid)
+    result.footprintEnd = settledFootprint(pid, series: &series)
     if report.failures > 0 && judged { dumpOnFailure(report, pid: pid, label: "tabdrag-\(name)") }
     killVelocity(at: launcher)
     return result
@@ -627,9 +663,10 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
         let mib = { (bytes: Int64) in String(format: "%.1f", Double(bytes) / 1_048_576) }
         let grown = mine.map { String(format: "%+.2f", Double($0.footprintAfter - $0.footprintBefore) / 1_048_576) }
         report.info("COMPARE \(name)", detail: String(
-            format: "reps=%d err_med=%.2f err_p95=%.2f max_jump(median)=%.2f max_jump(worst)=%.2f max_jump_raw(worst)=%.2f entry_jump=%.2f entry_shift=%.2f stall=%.1f%% floating=%.1f%% lag_ms=%.1f",
+            format: "reps=%d err_med=%.2f err_p95=%.2f max_jump_frame(median)=%.2f max_jump_frame(worst)=%.2f max_jump_120hz(median)=%.2f max_jump_120hz(worst)=%.2f entry_jump(median)=%.2f entry_jump(worst)=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% floating=%.1f%% lag_ms=%.1f",
             reps.count, median(\.errorMedian), median(\.errorP95), median(\.maxJump), worst(\.maxJump),
-            worst(\.maxJumpRaw), median(\.entryJump), median(\.entryShift), median(\.stallShare) * 100,
+            median(\.maxJump120), worst(\.maxJump120), median(\.entryJump), worst(\.entryJump),
+            median(\.stallShare) * 100, median(\.frameMs), median(\.lateFrameShare) * 100,
             median(\.floatingShare) * 100, median(\.lagMs))
             + " footprint launch=" + mine.map { mib($0.footprintLaunch) }.joined(separator: "/")
             + " before=" + mine.map { mib($0.footprintBefore) }.joined(separator: "/")

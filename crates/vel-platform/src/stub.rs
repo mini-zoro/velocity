@@ -8,6 +8,10 @@ impl WindowHandle {
     pub fn load_drag_image(&self, _image: &crate::DragImage, _grab_offset: crate::Point) {}
     /// Unsupported platforms have no floating native drag image.
     pub fn move_drag_image(&self, _screen_point: crate::Point) {}
+    /// Unsupported platforms have no native pointer.
+    pub fn pointer_screen_location(&self) -> Option<(crate::Point, f64)> {
+        None
+    }
     /// Unsupported platforms have no floating native drag image.
     pub fn hide_drag_image(&self) {}
     /// Unsupported platforms have no native z-order.

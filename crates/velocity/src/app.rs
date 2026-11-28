@@ -6678,6 +6678,7 @@ impl AppHandler for App {
                 query = Some(b.completed as u32);
             }
         }
+        self.follow_live_pointer(Some(w));
         self.catch_up_tab_drag(Some(w), Instant::now());
         self.advance_tab_landing(Some(w), Instant::now());
         let scene = self.render_scene();
@@ -6696,6 +6697,7 @@ impl AppHandler for App {
             w.scale_factor() as f32,
             query,
         )?;
+        self.follow_live_pointer(Some(w));
         // A pressed tab's floating image renders after the frame showing the press.
         self.prepare_tab_image(Some(w));
         self.release_landed_tab_image(Some(w), Instant::now(), result.is_some());

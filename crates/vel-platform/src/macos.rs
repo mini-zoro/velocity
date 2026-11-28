@@ -127,6 +127,14 @@ impl WindowHandle {
     pub fn move_drag_image(&self, point: Point) {
         drag_image::follow(point);
     }
+    /// The pointer's current screen location (as `screen_point` returns it), read
+    /// without waiting for queued events, and when it was read, in the units of
+    /// `MouseEvent::timestamp`.
+    pub fn pointer_screen_location(&self) -> Option<(Point, f64)> {
+        let p = NSEvent::mouseLocation();
+        let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+        Some((Point { x: p.x, y: p.y }, now))
+    }
     /// Hides the drag image and releases its pixels.
     pub fn hide_drag_image(&self) {
         drag_image::hide(true);

@@ -72,6 +72,11 @@ impl WindowHandle {
     pub fn move_drag_image(&self, point: Point) {
         drag_image::follow(point);
     }
+    /// Not offered: message times tick every 10-16 ms, too coarse to order a live
+    /// read against queued mouse messages, so the drag image follows messages only.
+    pub fn pointer_screen_location(&self) -> Option<(Point, f64)> {
+        None
+    }
     /// Hides the drag image and releases its pixels.
     pub fn hide_drag_image(&self) {
         drag_image::hide(true);
