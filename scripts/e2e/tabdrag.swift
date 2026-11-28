@@ -14,8 +14,19 @@
 // samples at the measured latency (on a 60 Hz display that one cannot go below one
 // pointer step, since each frame moves two steps at once); the jump where the
 // floating window first shows the tab; the share of 120 Hz steps in which the
-// pointer moved and the tab did not; frame intervals, late frames and latency. The footprint is taken after a warm-up drag, before and after the
-// measured drags, once it settles.
+// pointer moved and the tab did not; frame intervals, late frames, freezes and
+// latency. A freeze (no frame for 2.5 frame intervals: the whole session stalled,
+// seen in old and new builds alike on hosted runners) is counted on its own, and
+// the two frames after it are left out of the judged jump.
+//
+// The footprint is read once it settles: after a warm-up drag (the first drag
+// creates the drag window), after three measured drags and after three more. A
+// leak grows both blocks; the window's third drawable (the drawable pool's
+// 2-to-3 step during animations, about one window surface) appears at most once,
+// so the check is that one block stays within 2 MiB.
+//
+// Every step prints a line first (stdout is line-buffered, and a fatal signal
+// prints a backtrace), so a crash shows its last checkpoint.
 //
 // E2E_TABDRAG_LAUNCHERS="before=/a/velocity,after=/b/velocity" measures two builds on
 // the same runner, alternating; only "after" (or the single default build) is judged.
@@ -39,9 +50,6 @@ private let maxJumpLimit = 2.0
 private let footprintSlack: Int64 = 2 * 1_048_576
 
 private enum TabSource: String { case none = "-", floating = "F", strip = "S" }
-
-/// The scenario's App Nap exemption.
-private var napGuard: NSObjectProtocol?
 
 /// One pointer event as posted.
 private struct Posted {
@@ -103,6 +111,10 @@ private struct DragMetrics {
     var frameMs = Double.nan
     var lateFrameShare = 0.0
     var frameLatencyMs = Double.nan
+    /// Every frame, including the first two after a freeze.
+    var maxJumpAll = Double.nan
+    /// Frame intervals over 2.5 times the usual one: the whole session stalled.
+    var freezes = 0
     var lagMs = Double.nan
     var sampleP95Ms = Double.nan
     var postP95Ms = Double.nan
@@ -111,9 +123,10 @@ private struct DragMetrics {
     var realtime = false
 
     var line: String {
-        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump_frame=%.2f max_jump_120hz=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% frame_latency_ms=%.1f lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
+        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump_frame=%.2f max_jump_120hz=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% freezes=%d max_jump_frame_all=%.2f frame_latency_ms=%.1f lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
                moving, floatingShare * 100, errorMedian, errorP95, maxJump, maxJump120, maxJumpRaw, entryJump,
-               entryShift, stallShare * 100, frameMs, lateFrameShare * 100, frameLatencyMs, lagMs, sampleP95Ms, postP95Ms,
+               entryShift, stallShare * 100, frameMs, lateFrameShare * 100, freezes, maxJumpAll, frameLatencyMs, lagMs,
+               sampleP95Ms, postP95Ms,
                postLateP95Ms, postLateMaxMs, realtime ? "yes" : "no")
     }
 }
@@ -419,17 +432,24 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
         residuals.append(best?.e ?? fallback)
         if let best { latencies.append((frame.t - log[best.k].t) * 1000) }
     }
-    let frameJumps = zip(residuals, residuals.dropFirst()).map { gap($1, $0) }
-    metrics.maxJump = frameJumps.max() ?? .nan
-    metrics.frameLatencyMs = percentile(latencies, 0.5)
-    if let entry = frames.indices.first(where: { $0 > 0 && frames[$0].source == .floating }) {
-        metrics.entryJump = gap(residuals[entry], residuals[entry - 1])
-        metrics.entryShift = distance(frames[entry].tab, frames[entry - 1].tab)
-    }
     let intervals = zip(frames, frames.dropFirst()).map { ($1.t - $0.t) * 1000 }
     metrics.frameMs = percentile(intervals, 0.5)
     if !intervals.isEmpty {
         metrics.lateFrameShare = Double(intervals.filter { $0 > metrics.frameMs * 1.5 }.count) / Double(intervals.count)
+    }
+    // A freeze (no frame for 2.5 intervals) is counted on its own; the two frames
+    // after it, where the tab rejoins the pointer, are not judged as jumps.
+    let frozen = intervals.map { $0 > metrics.frameMs * 2.5 }
+    metrics.freezes = frozen.filter { $0 }.count
+    let frameJumps = zip(residuals, residuals.dropFirst()).map { gap($1, $0) }
+    metrics.maxJumpAll = frameJumps.max() ?? .nan
+    metrics.maxJump = frameJumps.indices.filter { k in
+        !frozen[k] && !(k > 0 && frozen[k - 1])
+    }.map { frameJumps[$0] }.max() ?? .nan
+    metrics.frameLatencyMs = percentile(latencies, 0.5)
+    if let entry = frames.indices.first(where: { $0 > 0 && frames[$0].source == .floating }) {
+        metrics.entryJump = gap(residuals[entry], residuals[entry - 1])
+        metrics.entryShift = distance(frames[entry].tab, frames[entry - 1].tab)
     }
 
     // The literal 120 Hz definition: every other sample, neighbour to neighbour, on
@@ -499,6 +519,7 @@ private struct VariantResult {
     var reps: [DragMetrics] = []
     var footprintLaunch: Int64 = 0
     var footprintBefore: Int64 = 0
+    var footprintMid: Int64 = 0
     var footprintAfter: Int64 = 0
     var footprintEnd: Int64 = 0
 }
@@ -536,6 +557,7 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         }
     }
     var result = VariantResult(name: name)
+    report.note("[\(name)] round \(round): launch", detail: launcher.path)
     let base = work.appendingPathComponent("\(name)-\(round)")
     let environment = Environment(work: base, dataDir: base.appendingPathComponent("data"), launcher: launcher)
     environment.reset()
@@ -557,6 +579,7 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
     result.footprintLaunch = settledFootprint(pid, series: &series)
 
     // 0. Warm-up: the first drag in a process creates the drag window.
+    report.note("[\(name)] round \(round): warm-up drag")
     if let (_, expected) = measuredDrag(window, pid: pid, label: "\(name)-round\(round)-warmup") {
         _ = waitUntil(3) { labels(window) == expected }
     } else {
@@ -566,8 +589,9 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
     result.footprintBefore = settledFootprint(pid, series: &series)
     report.info("footprint settle [\(name)] after warm-up", detail: series.joined(separator: " "))
 
-    // 1. Three measured drags.
-    for rep in 1...3 {
+    // 1. Two blocks of three measured drags, with a footprint after each.
+    for rep in 1...6 {
+        report.note("[\(name)] round \(round) rep \(rep): drag")
         guard let (metrics, expected) = measuredDrag(window, pid: pid, label: "\(name)-round\(round)-rep\(rep)") else {
             verdict(false, "rep \(rep): three tabs before the drag", detail: tabSummary(window))
             break
@@ -580,20 +604,29 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         if judged {
             report.check(metrics.maxJump <= maxJumpLimit,
                          "[\(name)] rep \(rep): largest jump between displayed frames <= \(maxJumpLimit) points",
-                         detail: String(format: "%.2f per frame (%.1f ms frames, %.0f ms from event to frame); per 120 Hz sample %.2f",
-                                        metrics.maxJump, metrics.frameMs, metrics.frameLatencyMs, metrics.maxJump120))
+                         detail: String(format: "%.2f per frame (%.1f ms frames, %.0f ms from event to frame, %d freeze(s), %.2f with the frames after them); per 120 Hz sample %.2f",
+                                        metrics.maxJump, metrics.frameMs, metrics.frameLatencyMs, metrics.freezes,
+                                        metrics.maxJumpAll, metrics.maxJump120))
         }
         sleep(seconds: 0.3)
+        if rep == 3 {
+            result.footprintMid = settledFootprint(pid, series: &series)
+            report.info("footprint settle [\(name)] after 3 drags", detail: series.joined(separator: " "))
+        }
     }
     result.footprintAfter = settledFootprint(pid, series: &series)
-    report.info("footprint settle [\(name)] after 3 drags", detail: series.joined(separator: " "))
-    let grown = result.footprintAfter - result.footprintBefore
-    verdict(abs(grown) <= footprintSlack, "footprint after the drags is within 2 MiB of before",
-            detail: String(format: "launch %.1f MiB, after warm-up %.1f MiB, after 3 drags %.1f MiB (%+.2f MiB)",
-                           Double(result.footprintLaunch) / 1_048_576, Double(result.footprintBefore) / 1_048_576,
-                           Double(result.footprintAfter) / 1_048_576, Double(grown) / 1_048_576))
+    report.info("footprint settle [\(name)] after 6 drags", detail: series.joined(separator: " "))
+    let first = result.footprintMid - result.footprintBefore
+    let second = result.footprintAfter - result.footprintMid
+    let mib = { (bytes: Int64) in String(format: "%.1f", Double(bytes) / 1_048_576) }
+    verdict(min(abs(first), abs(second)) <= footprintSlack,
+            "repeated drags do not grow the footprint (one 3-drag block within 2 MiB)",
+            detail: "launch \(mib(result.footprintLaunch)) MiB, after warm-up \(mib(result.footprintBefore)), "
+                + "after 3 drags \(mib(result.footprintMid)), after 6 drags \(mib(result.footprintAfter)) MiB "
+                + String(format: "(blocks %+.2f / %+.2f MiB)", Double(first) / 1_048_576, Double(second) / 1_048_576))
 
     // 2. Merge into a second window's strip.
+    report.note("[\(name)] round \(round): second window and merge")
     _ = shell("\(launcher.path.shellQuoted) --data-dir \(environment.dataDir.path.shellQuoted) -n \(files[3].shellQuoted)")
     _ = waitUntil(10) { velocityWindows(pid).count >= 2 }
     sleep(seconds: 0.8)
@@ -622,6 +655,7 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
         }
 
         // 3. Tear-off: release outside every window.
+        report.note("[\(name)] round \(round): tear-off")
         let before = Set(onScreenWindows(pid).map(\.id))
         if let torn = tab(main, named: (labels(main).first ?? "a") + "."), let frame = axRect(main) {
             let press = CGPoint(x: torn.frame.midX, y: torn.frame.midY)
@@ -645,10 +679,12 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
 
 func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     let report = Report("tabdrag")
-    // No App Nap or timer coalescing for the harness while it keeps 120 Hz deadlines.
-    // Held until the process exits.
-    napGuard = ProcessInfo.processInfo.beginActivity(
-        options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled], reason: "tab drag timing")
+    // The 120 Hz deadlines rely on time-constraint threads only. With a
+    // ProcessInfo.beginActivity(.latencyCritical, .idleSystemSleepDisabled) here the
+    // driver trapped before its first line in pull-request runs, where the probe has
+    // already run an app from the same path; it was the only call before that line
+    // that depends on the session.
+    report.note("start", detail: "pid \(getpid())")
     let environment = Environment.from(options)
     var variants: [(String, URL)] = []
     for pair in (ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? "").split(separator: ",") {
@@ -661,7 +697,9 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     report.info("screen", detail: NSScreen.screens.map {
         "\($0.frame.width)x\($0.frame.height)@\($0.backingScaleFactor)x \($0.maximumFramesPerSecond) Hz"
     }.joined(separator: ", "))
-    let rounds = max(1, Int(ProcessInfo.processInfo.environment["E2E_TABDRAG_ROUNDS"] ?? "") ?? 2)
+    // One round for a single build (pull requests); before/after pairs alternate twice.
+    let rounds = max(1, Int(ProcessInfo.processInfo.environment["E2E_TABDRAG_ROUNDS"] ?? "")
+        ?? (variants.count > 1 ? 2 : 1))
     var results: [VariantResult] = []
     for round in 1...rounds {
         // Alternate which build goes first.
@@ -679,17 +717,21 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
         func worst(_ key: (DragMetrics) -> Double) -> Double { reps.map(key).filter { !$0.isNaN }.max() ?? .nan }
         let mib = { (bytes: Int64) in String(format: "%.1f", Double(bytes) / 1_048_576) }
         let grown = mine.map { String(format: "%+.2f", Double($0.footprintAfter - $0.footprintBefore) / 1_048_576) }
-        report.info("COMPARE \(name)", detail: String(
+        let timing = String(
             format: "reps=%d err_med=%.2f err_p95=%.2f max_jump_frame(median)=%.2f max_jump_frame(worst)=%.2f max_jump_120hz(median)=%.2f max_jump_120hz(worst)=%.2f entry_jump(median)=%.2f entry_jump(worst)=%.2f stall_120hz=%.1f%% frame_ms=%.1f late_frames=%.1f%% frame_latency_ms=%.1f floating=%.1f%%",
             reps.count, median(\.errorMedian), median(\.errorP95), median(\.maxJump), worst(\.maxJump),
             median(\.maxJump120), worst(\.maxJump120), median(\.entryJump), worst(\.entryJump),
             median(\.stallShare) * 100, median(\.frameMs), median(\.lateFrameShare) * 100,
             median(\.frameLatencyMs), median(\.floatingShare) * 100)
-            + " footprint launch=" + mine.map { mib($0.footprintLaunch) }.joined(separator: "/")
-            + " before=" + mine.map { mib($0.footprintBefore) }.joined(separator: "/")
-            + " after=" + mine.map { mib($0.footprintAfter) }.joined(separator: "/")
-            + " grown=" + grown.joined(separator: "/")
-            + " end(2+ windows)=" + mine.map { mib($0.footprintEnd) }.joined(separator: "/") + " MiB")
+        let freezes: Int = reps.map(\.freezes).reduce(0, +)
+        var memory = " footprint launch=" + mine.map { mib($0.footprintLaunch) }.joined(separator: "/")
+        memory += " before=" + mine.map { mib($0.footprintBefore) }.joined(separator: "/")
+        memory += " after3=" + mine.map { mib($0.footprintMid) }.joined(separator: "/")
+        memory += " after6=" + mine.map { mib($0.footprintAfter) }.joined(separator: "/")
+        memory += " grown=" + grown.joined(separator: "/")
+        memory += " end(2+ windows)=" + mine.map { mib($0.footprintEnd) }.joined(separator: "/") + " MiB"
+        report.info("COMPARE \(name)", detail: timing + " freezes=\(freezes) max_jump_frame_all(worst)="
+            + String(format: "%.2f", worst(\.maxJumpAll)) + memory)
     }
     report.finish()
 }

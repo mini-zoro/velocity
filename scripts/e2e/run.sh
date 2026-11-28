@@ -89,6 +89,38 @@ probe() {
     echo "probe exit=$status"
 }
 
+# crash_report NAME MARKER LOG: after a driver killed by a signal, waits for the
+# system crash report written since MARKER, copies it into the artifacts and
+# appends the crashed thread's frames to LOG.
+crash_report() {
+    local name=$1 marker=$2 log=$3 report="" _
+    for _ in $(seq 1 30); do
+        report=$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'e2e*' -newer "$marker" 2>/dev/null | head -1)
+        [ -n "$report" ] && break
+        sleep 0.5
+    done
+    if [ -z "$report" ]; then
+        echo "no system crash report for the $name driver" | tee -a "$log"
+        return 0
+    fi
+    cp "$report" "$E2E_ARTIFACTS/crash-$name-$(basename "$report")"
+    {
+        echo "crash report: $(basename "$report")"
+        python3 -I - "$report" <<'PY' || true
+import json, sys
+text = open(sys.argv[1]).read()
+body = json.loads(text[text.index("\n") + 1:])
+print("exception:", json.dumps(body.get("exception")), json.dumps(body.get("termination", {}).get("indicator")))
+images = body.get("usedImages", [])
+for thread in body.get("threads", []):
+    if thread.get("triggered"):
+        for frame in thread.get("frames", [])[:30]:
+            image = images[frame.get("imageIndex", 0)].get("name", "?") if images else "?"
+            print("  ", image, frame.get("symbol", "?"), "+", frame.get("symbolLocation", ""))
+PY
+    } | tee -a "$log"
+}
+
 scenario() {
     local name=$1
     mkdir -p "$E2E_RESULTS" "$E2E_ARTIFACTS"
@@ -99,6 +131,8 @@ scenario() {
     rm -rf "$work"
     mkdir -p "$work" "$E2E_ARTIFACTS"
     local status=0
+    local marker="$work/.started"
+    touch "$marker"
     # The tabdrag scenario measures two builds over several rounds; the startup
     # scenario records dozens of cold launches (twice with an A/B pair).
     local limit=480
@@ -106,6 +140,9 @@ scenario() {
     [ "$name" = startup ] && limit=1800
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
         run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
+    if [ "$status" -ge 128 ]; then
+        crash_report "$name" "$marker" "$log"
+    fi
     cleanup_apps
     append_summary "Scenario $name" "$log"
     echo "$name exit=$status"
