@@ -75,6 +75,19 @@ use std::{
     time::Duration,
 };
 
+/// Delay of the second trim frame after the drawable cap drops.
+const DRAWABLE_FOLLOWUP: Duration = Duration::from_secs(1);
+
+/// `VELOCITY_LOG_DRAWABLES=1` traces drawable cap changes and trim frames to stderr
+/// (the GUI log), for checking the pool on a real window.
+fn drawable_log(message: impl FnOnce() -> String) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("VELOCITY_LOG_DRAWABLES").is_some_and(|v| v == "1"))
+    {
+        eprintln!("velocity drawables: {}", message());
+    }
+}
+
 /// A main-thread handle. Clones are inexpensive and do not keep native objects alive after close.
 #[derive(Clone)]
 pub struct WindowHandle(Rc<Host>);
@@ -784,6 +797,7 @@ impl WindowHandle {
         let mut pool = self.0.drawable_pool.get();
         let old = pool.limit();
         pool.frame(now);
+        drawable_log(|| format!("frame at cap {}", pool.limit()));
         self.0.drawable_pool.set(pool);
         if pool.limit() != old {
             self.0.set_drawable_limit(pool.limit());
@@ -931,6 +945,8 @@ struct Host {
     timer: Cell<Option<Retained<NSTimer>>>,
     drawable_pool: Cell<DrawablePool>,
     drawable_timer: Cell<Option<Retained<NSTimer>>>,
+    /// A second trim frame after the cap dropped, unless a burst came first.
+    drawable_followup: Cell<Option<Instant>>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
     title: RefCell<WindowTitle>,
@@ -978,6 +994,7 @@ impl Host {
             timer.invalidate();
         }
         self.drawable_pool.set(DrawablePool::default());
+        self.drawable_followup.set(None);
         self.pending.borrow_mut().clear();
         self.context.take();
         self.ax_elements.borrow_mut().clear();
@@ -1040,12 +1057,14 @@ impl Host {
         WindowHandle(Rc::clone(self))
     }
     fn set_drawable_limit(&self, limit: usize) {
+        drawable_log(|| format!("cap {limit}"));
         if let Some(layer) = self.layer() {
             layer.setMaximumDrawableCount(limit);
         }
     }
     fn arm_drawable_timer(&self, pool: DrawablePool, now: Instant) {
-        let (Some(due), Some(view)) = (pool.deadline(), self.view()) else {
+        let due = pool.deadline().or(self.drawable_followup.get());
+        let (Some(due), Some(view)) = (due, self.view()) else {
             return;
         };
         let current = self.drawable_timer.take();
@@ -1088,12 +1107,27 @@ impl Host {
         if pool.limit() != old {
             self.set_drawable_limit(pool.limit());
         }
-        if trimmed && self.visible.get() {
-            // The layer frees its surplus drawable only at the next nextDrawable; an idle
-            // window never asks for one, so draw the unchanged scene once at the new cap.
-            // A covered window frees it with its first frame after it becomes visible.
+        // A burst since the first trim frame makes its own trim later.
+        let followup = self
+            .drawable_followup
+            .take()
+            .filter(|_| pool.deadline().is_none());
+        let followup_due = followup.is_some_and(|due| now >= due);
+        if !followup_due {
+            self.drawable_followup.set(followup);
+        }
+        if (trimmed || followup_due) && self.visible.get() {
+            // The layer frees its surplus drawable only once it hands out a drawable at
+            // the new cap and the one on screen is replaced; an idle window never asks.
+            // Draw the unchanged scene at the new cap, and once more a second later
+            // (one frame did not always release it on the runner). A covered window
+            // frees it with its first frames after it becomes visible.
+            drawable_log(|| format!("trim frame (second: {followup_due})"));
             self.dirty.set(true);
             self.pace();
+        }
+        if trimmed {
+            self.drawable_followup.set(Some(now + DRAWABLE_FOLLOWUP));
         }
         self.arm_drawable_timer(pool, now);
     }
@@ -3148,6 +3182,7 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         timer: Cell::new(None),
         drawable_pool: Cell::new(DrawablePool::default()),
         drawable_timer: Cell::new(None),
+        drawable_followup: Cell::new(None),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
         title: RefCell::new(WindowTitle::new(options.title.clone())),
