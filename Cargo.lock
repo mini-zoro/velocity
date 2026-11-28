@@ -3102,7 +3102,7 @@ checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "vel-buffer"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "vel-build"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "globset",
  "libc",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "vel-color-scheme"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "csscolorparser",
  "fnv",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "vel-commands"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
  "vel-buffer",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "vel-complete"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "vel-config"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proptest",
  "regex",
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "vel-crash"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "tempfile",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "vel-diff"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "imara-diff",
  "proptest",
@@ -3212,7 +3212,7 @@ dependencies = [
 
 [[package]]
 name = "vel-export"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "vel-fileio"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "vel-git"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "gix",
  "notify",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "vel-highlight"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "fnv",
  "proptest",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "vel-i18n"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "objc2-foundation",
  "vel-config",
@@ -3285,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "vel-index"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bincode",
  "blake3",
@@ -3310,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "vel-largefile"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "memchr",
@@ -3324,11 +3324,11 @@ dependencies = [
 
 [[package]]
 name = "vel-mailbox"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "vel-minihtml"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "html-escape",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "vel-packages"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "semver",
  "serde",
@@ -3355,14 +3355,14 @@ dependencies = [
 
 [[package]]
 name = "vel-pathcase"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "vel-platform"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "block2",
  "libc",
@@ -3384,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "vel-regex"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aho-corasick",
  "fnv",
@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "vel-render"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -3421,7 +3421,7 @@ dependencies = [
 
 [[package]]
 name = "vel-scope"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "thiserror",
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "vel-search"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "grep-matcher",
  "grep-regex",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "vel-session"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "libc",
@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "vel-snippet"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "vel-spell"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proptest",
  "serde_json",
@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "vel-syntax"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bincode",
  "blake3",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "vel-text"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crop",
  "libc",
@@ -3540,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "vel-theme"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "fnv",
  "png",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "vel-ui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "fnv",
@@ -3575,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "vel-update"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ed25519-dalek",
  "libc",
@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "vel-vintage"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proptest",
  "regex",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "velocity"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bincode",
  "find-msvc-tools",
