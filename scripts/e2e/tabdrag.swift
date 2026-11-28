@@ -432,8 +432,9 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
         metrics.lateFrameShare = Double(intervals.filter { $0 > metrics.frameMs * 1.5 }.count) / Double(intervals.count)
     }
 
-    // The literal 120 Hz definition: every other sample, neighbour to neighbour.
-    let grid = moving.filter { ($0 - first) % 2 == 0 }
+    // The literal 120 Hz definition: every other sample, neighbour to neighbour, on
+    // the samples that also read the strip (the sampler reads AX on odd samples).
+    let grid = moving.filter { $0 % 2 == 1 }
     var jumps: [Double] = []
     var raw: [Double] = []
     var stalls = 0
