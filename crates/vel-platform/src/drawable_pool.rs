@@ -1,10 +1,10 @@
 //! Drawable count hysteresis, independent of AppKit and the display timer.
 //!
 //! Lowering CAMetalLayer's `maximumDrawableCount` does not free a drawable that is
-//! already allocated: the surplus IOSurface stays until the next `nextDrawable` at
-//! the lower cap (runner measurement, 2026-11-28: three window-sized surfaces stayed
-//! for as long as the window was idle). So the host draws one frame when the cap
-//! drops, which hands the surplus surface back.
+//! already allocated (runner measurement, 2026-11-28: three window-sized surfaces
+//! stayed for as long as the window was idle, and later frames at the lower cap freed
+//! the third only sometimes). So when the cap drops the host flushes the layer's free
+//! drawables and draws one frame, which leaves exactly two.
 use std::time::{Duration, Instant};
 
 const QUIET: Duration = Duration::from_millis(350);
@@ -74,7 +74,7 @@ mod tests {
         let deadline = pool.deadline().unwrap();
         assert!(!pool.timer(deadline - Duration::from_millis(1)));
         assert_eq!(pool.limit(), 3);
-        // The cap drops: the host redraws once so the layer frees its third surface.
+        // The cap drops: the host flushes the layer's free drawables and redraws once.
         assert!(pool.timer(deadline));
         assert_eq!(pool.limit(), 2);
         assert_eq!(pool.deadline(), None);

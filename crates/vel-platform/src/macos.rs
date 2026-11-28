@@ -75,8 +75,6 @@ use std::{
     time::Duration,
 };
 
-/// Delay of the second trim frame after the drawable cap drops.
-const DRAWABLE_FOLLOWUP: Duration = Duration::from_secs(1);
 /// How long a window that is not where the person types (not key, the app is not
 /// active, or it is covered or minimized) waits after its last frame before it
 /// releases its spare drawable and keeps only the one on screen.
@@ -955,8 +953,6 @@ struct Host {
     timer: Cell<Option<Retained<NSTimer>>>,
     drawable_pool: Cell<DrawablePool>,
     drawable_timer: Cell<Option<Retained<NSTimer>>>,
-    /// A second trim frame after the cap dropped, unless a burst came first.
-    drawable_followup: Cell<Option<Instant>>,
     /// Background release of the spare drawable (see `BACKGROUND_RELEASE`).
     release_timer: Cell<Option<Retained<NSTimer>>>,
     last_drawable_frame: Cell<Option<Instant>>,
@@ -1012,7 +1008,6 @@ impl Host {
             timer.invalidate();
         }
         self.drawable_pool.set(DrawablePool::default());
-        self.drawable_followup.set(None);
         self.pending.borrow_mut().clear();
         self.context.take();
         self.ax_elements.borrow_mut().clear();
@@ -1081,8 +1076,7 @@ impl Host {
         }
     }
     fn arm_drawable_timer(&self, pool: DrawablePool, now: Instant) {
-        let due = pool.deadline().or(self.drawable_followup.get());
-        let (Some(due), Some(view)) = (due, self.view()) else {
+        let (Some(due), Some(view)) = (pool.deadline(), self.view()) else {
             return;
         };
         let current = self.drawable_timer.take();
@@ -1139,12 +1133,10 @@ impl Host {
         unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
         self.release_timer.set(Some(timer));
     }
-    /// A window nobody types in keeps only the drawable on screen. A different
-    /// drawable size makes the layer drop the free drawables of its pool; restoring
-    /// the size at once leaves the displayed one in place (the layer keeps showing
-    /// it, exactly as during a live resize), so nothing on screen changes. The next
-    /// frame acquires a new drawable. Saves one window-sized surface per background
-    /// window (15 MB for a large Retina window), including minimized or covered ones.
+    /// A window nobody types in keeps only the drawable on screen; nothing on screen
+    /// changes, and its next frame acquires a new drawable. Saves one window-sized
+    /// surface per background window (15 MB for a large Retina window), including
+    /// minimized or covered ones.
     fn release_spare_drawables(&self) {
         self.release_timer.take();
         if self.stopped.get()
@@ -1166,20 +1158,29 @@ impl Host {
             );
             return;
         }
+        if self.flush_free_drawables() {
+            drawable_log(|| "background: released the spare drawables".into());
+            self.spare_released.set(true);
+        }
+    }
+    /// Drops the free drawables of the layer's pool and keeps the one on screen: a
+    /// different drawable size flushes the pool, and restoring the size at once leaves
+    /// the displayed drawable in place, which the layer keeps showing exactly as during
+    /// a live resize (runner: the window's pixels were identical before and after).
+    fn flush_free_drawables(&self) -> bool {
         let Some(layer) = self.layer() else {
-            return;
+            return false;
         };
         let size = layer.drawableSize();
         if size.width < 1. || size.height < 1. {
-            return;
+            return false;
         }
-        drawable_log(|| format!("release spare drawables at {}x{}", size.width, size.height));
         layer.setDrawableSize(objc2_core_foundation::CGSize::new(
             size.width,
             size.height + 1.,
         ));
         layer.setDrawableSize(size);
-        self.spare_released.set(true);
+        true
     }
     fn settle_drawable_pool(&self) {
         self.drawable_timer.take();
@@ -1200,27 +1201,16 @@ impl Host {
         if pool.limit() != old {
             self.set_drawable_limit(pool.limit());
         }
-        // A burst since the first trim frame makes its own trim later.
-        let followup = self
-            .drawable_followup
-            .take()
-            .filter(|_| pool.deadline().is_none());
-        let followup_due = followup.is_some_and(|due| now >= due);
-        if !followup_due {
-            self.drawable_followup.set(followup);
-        }
-        if (trimmed || followup_due) && self.visible.get() {
-            // The layer frees its surplus drawable only once it hands out a drawable at
-            // the new cap and the one on screen is replaced; an idle window never asks.
-            // Draw the unchanged scene at the new cap, and once more a second later
-            // (one frame did not always release it on the runner). A covered window
-            // frees it with its first frames after it becomes visible.
-            drawable_log(|| format!("trim frame (second: {followup_due})"));
+        if trimmed && self.visible.get() && self.flush_free_drawables() {
+            // Lowering the cap does not free an allocated drawable, and later frames at
+            // the lower cap released it only sometimes (runner, 2026-11-28). Flush the
+            // free drawables instead and draw the unchanged scene once: that frame
+            // allocates the one spare drawable the next input will use, so the window
+            // settles at exactly two. A covered window is handled by the background
+            // release below.
+            drawable_log(|| "trim: flushed the pool, refill frame".into());
             self.dirty.set(true);
             self.pace();
-        }
-        if trimmed {
-            self.drawable_followup.set(Some(now + DRAWABLE_FOLLOWUP));
         }
         self.arm_drawable_timer(pool, now);
     }
@@ -3282,7 +3272,6 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         timer: Cell::new(None),
         drawable_pool: Cell::new(DrawablePool::default()),
         drawable_timer: Cell::new(None),
-        drawable_followup: Cell::new(None),
         release_timer: Cell::new(None),
         last_drawable_frame: Cell::new(None),
         spare_released: Cell::new(false),
