@@ -1617,22 +1617,22 @@ third window with a smaller session each. After every step it waits until
 one window or 12 MiB for each further window (median of the sessions).
 
 Runner results (macOS 15.8, 1024×768 at 1x), median of three sessions per build, run
-`46139346602`:
+`46142080800` against `main` at `956831a`:
 
 | | `main` | branch |
 | --- | ---: | ---: |
-| One window | 122.1 MiB | 85.8 MiB |
-| Second window | +13.9 MiB | +6.5 MiB |
-| Third window | +14.4 MiB | +8.5 MiB |
-| One window: malloc / graphics / IOSurface | 92–97 / 11.6 / 5.1–7.7 | 60–64 / 8.6 / 5.1 |
+| One window | 121.1 MiB | 88.2 MiB |
+| Second window | +17.0 MiB | +7.0 MiB |
+| Third window | +11.7 MiB | +8.6 MiB |
+| One window: malloc / graphics / IOSurface | 92–96 / 11.6 / 5.1–7.7 | 62–64 / 8.6 / 5.1 |
 
-The limits sit about 7% and 2 MiB above the branch (its sessions ranged 84.5–90.5 MiB
-and 5.9–10.5 MiB over the last two runs) and far below `main`.
+The limits sit about 7% and 2 MiB above the branch (its sessions ranged 84.5–88.3 MiB
+and 6.0–9.8 MiB over the last two A/B runs) and far below `main`.
 
 Mapping to a Retina Mac: the runner's drawables are 2.6 MiB; a 2560×1440-pixel window
 (the user's 14.8 MB) holds two of 14.8 MB while it is the key window and one in the
-background. The same session there is about 85.8 − 5.1 + 29.6 + 1–2 (more R8 atlas
-pages at 2x) ≈ 112 MiB in front and ≈ 97 MiB with another application in front; the
+background. The same session there is about 88.2 − 5.1 + 29.6 + 1–2 (more R8 atlas
+pages at 2x) ≈ 114 MiB in front and ≈ 99 MiB with another application in front; the
 95 MiB gate corresponds to about 121 MiB there. The scenario is heavier than the
 user's own session: without its drawables `main` used about 115 MiB on the runner
 against 79 MB on the user's Mac. Applying the measured mechanisms to the user's 123 MB:
