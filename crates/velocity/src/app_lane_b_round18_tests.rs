@@ -1296,7 +1296,9 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
     let mut position = None;
     let mut previous = Vec::new();
     let mut stable = 0;
-    for _ in 0..1000 {
+    // Hang guard only (a fixed iteration count was a ~2 s limit in disguise).
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
+    while Instant::now() < deadline {
         a.panels.layout(a.window_size);
         if let Some(i) = a.panels.side_rows.iter().position(|r| r.path == file) {
             let base = a.panels.folder_row_base(&a.workspace);

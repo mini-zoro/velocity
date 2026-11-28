@@ -57,10 +57,13 @@ fn named(a: &mut App, name: &str, args: Value) {
     a.run_named(None, name, &args);
 }
 
-/// Lets workers publish and retire what they hold, then reads the live heap.
+/// Lets workers publish and retire what they hold, then reads the live heap. It returns
+/// as soon as two readings agree; the 30 s limit only bounds a heap that never settles
+/// (a loaded machine can keep a worker from retiring its memory for seconds).
 fn settled(a: &mut App) -> isize {
     let mut last = live_bytes();
-    for _ in 0..60 {
+    let limit = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < limit {
         a.poll_workspace_model();
         a.panels.poll(&mut a.workspace, 0..0);
         a.sync_active_view();

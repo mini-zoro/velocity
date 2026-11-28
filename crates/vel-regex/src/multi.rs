@@ -865,7 +865,9 @@ mod tests {
                 ))
                 .unwrap();
         });
-        let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+        // A search that waits for the pool would never answer while the lock is held, so
+        // the bound only has to outlast a busy machine scheduling the searching thread.
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(120));
         drop(lock);
         thread.join().unwrap();
         let (existing, registered) =

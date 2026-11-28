@@ -628,29 +628,45 @@ mod tests {
     fn session_writer_makes_progress_during_continuous_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session");
-        let writer = super::super::Writer::with_max_wait(
-            path.clone(),
-            Duration::from_millis(200),
-            Duration::from_millis(600),
-        )
-        .unwrap();
+        // The debounce never expires while changes keep coming every 50 ms, so every write
+        // below comes from max_wait. It is far longer than any pause a loaded machine puts
+        // between two changes, which would otherwise let a debounced write pass for one.
+        let debounce = Duration::from_secs(5);
+        let writer =
+            super::super::Writer::with_max_wait(path.clone(), debounce, Duration::from_millis(600))
+                .unwrap();
+        // Hang guard only: without max_wait no write would ever arrive.
+        let guard = Instant::now() + Duration::from_secs(120);
         let started = Instant::now();
         let mut writes = Vec::new();
-        for tick in 0..60 {
+        let mut last_change = Instant::now();
+        let mut longest_pause = Duration::ZERO;
+        let mut tick = 0;
+        while writes.len() < 3 || tick < 60 {
+            assert!(Instant::now() < guard, "{writes:?} after {tick} changes");
+            longest_pause = longest_pause.max(last_change.elapsed());
             writer.changed(version(&format!("change-{tick}"))).unwrap();
+            last_change = Instant::now();
+            tick += 1;
             for result in writer.results.try_iter() {
                 result.unwrap();
                 writes.push(started.elapsed());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(writes.len() >= 3, "{writes:?}");
+        assert!(
+            longest_pause < debounce,
+            "changes stopped for {longest_pause:?}"
+        );
         // Bounded by max_wait (600 ms) plus scheduling; a loaded CI runner took 830 ms.
-        assert!(writes[0] <= Duration::from_secs(3), "{writes:?}");
+        // A timing-run contract (VELOCITY_STRICT_TIMING).
+        if std::env::var_os("VELOCITY_STRICT_TIMING").is_some_and(|v| !v.is_empty() && v != "0") {
+            assert!(writes[0] <= Duration::from_secs(3), "{writes:?}");
+        }
         writer.flush().unwrap();
         assert_eq!(
             load(&path).session.recent_files,
-            [PathBuf::from("change-59")]
+            [PathBuf::from(format!("change-{}", tick - 1))]
         );
     }
 

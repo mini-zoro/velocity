@@ -22,7 +22,9 @@ sub mark {
 }
 mark("ready");
 $| = 1;
-my $deadline = time + 8;
+# Outlives every relaxed bound the tests use (30 s), so "returned before the holder let
+# go" stays a real check on a loaded machine; the lease normally ends it much sooner.
+my $deadline = time + 60;
 while (-e "$dir/lease" && time < $deadline) {
     print "DAEMON\n" if $continuous;
     sleep 0.05;
@@ -32,10 +34,12 @@ mark("done");
         )
         .unwrap();
         // A file, not inline shell: build commands expand `$name` like Sublime, so the
-        // command line itself must not contain `$`.
+        // command line itself must not contain `$`. The 120 s cap is a hang guard only;
+        // the caller relies on `ready`, so the wait must not give up early on a slow
+        // machine.
         fs::write(
             root.path().join("wait-ready.sh"),
-            "i=0\nwhile [ ! -e \"$1/ready\" ] && [ \"$i\" -lt 500 ]; do sleep 0.01; i=$((i+1)); done\n",
+            "i=0\nwhile [ ! -e \"$1/ready\" ] && [ \"$i\" -lt 12000 ]; do sleep 0.01; i=$((i+1)); done\n",
         )
         .unwrap();
         Self(root)

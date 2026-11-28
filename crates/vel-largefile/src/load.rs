@@ -296,7 +296,9 @@ mod tests {
         let guard = mailbox.lock().unwrap();
         let (sender, received) = mpsc::channel();
         let poller = thread::spawn(move || sender.send(task.try_snapshot().is_none()).unwrap());
-        let response = received.recv_timeout(Duration::from_secs(1));
+        // A poller that waits for the mailbox would never answer while the guard is held,
+        // so the bound only has to outlast a busy machine scheduling the poller thread.
+        let response = received.recv_timeout(Duration::from_secs(120));
         drop(guard);
         poller.join().unwrap();
         assert!(response.expect("polling blocked on the mailbox"));

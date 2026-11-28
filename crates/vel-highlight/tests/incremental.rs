@@ -146,8 +146,11 @@ fn one_character_edit_only_parses_one_line_and_queued_edits_do_not_skip_dirty_re
     actual
         .apply_change(text.clone(), ChangeId(1), &changes)
         .unwrap();
+    // The engine checks its budget before each line, so a 2 ms budget that a loaded
+    // machine spends descheduled parses nothing. The behaviour is that one reparsed line
+    // converges the edit; give the request room for that line.
     let visible = actual
-        .request_lines(ChangeId(1), 4950..5050, Duration::from_millis(2))
+        .request_lines(ChangeId(1), 4950..5050, HANG_GUARD)
         .unwrap();
     assert!(visible.complete);
     assert_eq!(actual.stats().parsed_lines, 1);
