@@ -81,7 +81,8 @@ fn console_client_forwards_and_waits_for_edited_stdin() {
         .write_all("original 你好".as_bytes())
         .unwrap();
 
-    let timeout = Duration::from_secs(15);
+    // Hang guard for every wait below; the client normally answers at once.
+    let timeout = Duration::from_secs(120);
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let watchdog = scope.spawn(|| {

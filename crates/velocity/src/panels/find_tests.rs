@@ -24,7 +24,7 @@ fn poll_find(a: &mut App) {
 }
 
 fn settle(a: &mut App) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         poll_find(a);
         if !a.panels.busy() {
@@ -420,7 +420,7 @@ fn cmd_f_enter_and_find_all_wait_for_the_final_progressive_snapshot() {
             poll_find(&mut a);
         }
         assert_ne!(a.workspace.editor().selection(), tail..tail + 8);
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.tabs[a.workspace.active].loading.is_some() {
             a.workspace.poll();
             poll_find(&mut a);

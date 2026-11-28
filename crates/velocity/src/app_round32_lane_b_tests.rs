@@ -39,7 +39,7 @@ fn key(a: &mut App, chord: &str) {
 
 #[track_caller]
 fn until(a: &mut App, ready: impl Fn(&mut App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.panels.poll(&mut a.workspace, 0..0);
         a.sync_active_view();

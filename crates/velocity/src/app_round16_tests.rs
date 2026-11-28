@@ -24,7 +24,7 @@ fn key(app: &mut App, key: &str) {
     );
 }
 fn wait_selection(app: &mut App, expected: std::ops::Range<usize>) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         let viewport = app.viewport();
         app.panels.poll(&mut app.workspace, viewport);

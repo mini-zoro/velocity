@@ -148,7 +148,8 @@ mod tests {
             release.recv().unwrap();
         })
         .unwrap();
-        let timeout = Duration::from_secs(5);
+        // Hang guard only: the jobs run as soon as a slot is free.
+        let timeout = Duration::from_secs(120);
         assert_eq!(finished.recv_timeout(timeout).unwrap(), 1);
         let second = done.clone();
         pool.submit(1, "second", move || second.send(2).unwrap())
@@ -174,7 +175,8 @@ mod tests {
             let _ = blocked.recv();
         })
         .unwrap();
-        running.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Hang guards only: the jobs run as soon as a slot is free.
+        running.recv_timeout(Duration::from_secs(120)).unwrap();
         let (did_run, cancelled) = mpsc::channel();
         let first = pool
             .submit(1, "closed-tab", move || did_run.send(()).unwrap())
@@ -192,6 +194,6 @@ mod tests {
         pool.submit(1, "replacement", move || finished.send(()).unwrap())
             .unwrap();
         release.send(()).unwrap();
-        done.recv_timeout(Duration::from_secs(5)).unwrap();
+        done.recv_timeout(Duration::from_secs(120)).unwrap();
     }
 }

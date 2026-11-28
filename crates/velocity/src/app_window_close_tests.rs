@@ -442,7 +442,7 @@ fn restore_queues_one_window_per_snapshot_and_routes_file_requests_before_it_ope
                 Start::Forwarded
             ));
         });
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             if let Some(incoming) = instance.drain().pop() {
                 assert!(first.route_or_queue_open(incoming).unwrap().is_none());

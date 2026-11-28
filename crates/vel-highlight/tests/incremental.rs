@@ -7,6 +7,11 @@ use vel_color_scheme::ColorScheme;
 use vel_highlight::{DocumentHighlighter, HighlightService, StyleSpan, detect_syntax};
 use vel_syntax::{SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
 use vel_text::{Edit, Text};
+
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 fn set() -> Arc<SyntaxSet> {
     let mut b = SyntaxSetBuilder::new();
     b.add_with_path(SyntaxDefinition::load_from_str("name: Fixture\nfile_extensions: [fix]\nhidden_file_extensions: [fhidden]\nfirst_line_match: '^#!fixture'\nscope: source.fixture\nversion: 2\ncontexts:\n  main:\n    - match: '/\\*'\n      push:\n        - meta_scope: comment.block.fixture\n        - match: '\\*/'\n          pop: true\n    - match: '\\b(fn|let)\\b'\n      scope: keyword.fixture\n    - match: '[0-9]+'\n      scope: constant.numeric.fixture\n",true,None).unwrap(),"Packages/Fixture/Fixture.sublime-syntax");
@@ -62,7 +67,7 @@ fn edit_and_palette_bursts_converge_to_the_latest_snapshot() {
     }
     let wanted = ChangeId(257);
     let expected = spans(&mut engine(set, text.clone(), wanted.0));
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + HANG_GUARD;
     loop {
         let batch = worker.request_lines(wanted, 0..text.len_lines()).unwrap();
         if batch.complete {
@@ -414,7 +419,7 @@ fn worker_delivers_only_current_snapshot_without_blocking_edit_submission() {
         )
         .unwrap();
     let _ = service.request_lines(ChangeId(1), 0..2).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if let Some(result) = service.try_recv() {
             let result = result.unwrap();
@@ -469,7 +474,7 @@ fn worker_discards_previous_scheme_results_and_keeps_initial_generation() {
         .set_color_scheme(Arc::new(ColorScheme::velocity_dark()))
         .unwrap();
     let _ = service.request_lines(ChangeId(0), 0..1).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if let Some(batch) = service.try_recv() {
             let batch = batch.unwrap();
@@ -507,7 +512,7 @@ fn background_rewind_republishes_an_already_completed_viewport() {
     );
     let service = HighlightService::new(engine).unwrap();
     service.request_lines(ChangeId(1), 0..1).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if let Some(batch) = service.try_recv() {
             let batch = batch.unwrap();

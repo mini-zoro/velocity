@@ -148,6 +148,9 @@ impl Remote {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     fn pixel(id: u64) -> Arc<Image> {
         Arc::new(Image {
@@ -203,7 +206,7 @@ mod tests {
         assert!(!remote.resolve("overflow", true).0);
         let mut running = HashSet::new();
         for _ in 0..MAX_ACTIVE {
-            running.insert(events.recv_timeout(Duration::from_secs(30)).unwrap());
+            running.insert(events.recv_timeout(HANG_GUARD).unwrap());
         }
         assert_eq!(running.len(), MAX_ACTIVE);
         assert_eq!(remote.active.len(), MAX_ACTIVE);
@@ -211,7 +214,7 @@ mod tests {
         let (released, condvar) = &*gate;
         *released.lock().unwrap() = true;
         condvar.notify_all();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + HANG_GUARD;
         while !remote.active.is_empty() {
             remote.poll();
             assert!(remote.active.len() <= MAX_ACTIVE);

@@ -18,7 +18,7 @@ fn forward(a: &mut App) {
     key(a, "ctrl+shift+-");
 }
 fn drive_until(a: &mut App, condition: impl Fn(&App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         let viewport = a.viewport();

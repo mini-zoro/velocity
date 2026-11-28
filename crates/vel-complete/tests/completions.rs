@@ -12,6 +12,11 @@ use vel_index::{FileAnalysis, Index, WordStatistics};
 use vel_scope::Scope;
 use vel_snippet::SnippetFile;
 use vel_text::Text;
+
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 struct Scopes {
     version: ChangeId,
     scopes: Vec<Scope>,
@@ -198,7 +203,7 @@ fn async_latest_wins_and_cancel_rejects_already_queued_output() {
         service.query(view("c"), vec![1], scopes(7));
     }
     let generation = service.query(view("ca"), vec![2], scopes(7));
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if let Some(result) = service.poll() {
             assert_eq!(result.generation, generation);

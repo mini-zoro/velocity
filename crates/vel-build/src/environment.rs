@@ -15,6 +15,9 @@ type Environment = BTreeMap<String, String>;
 #[cfg(all(test, unix))]
 #[path = "../tests/support/detached.rs"]
 mod detached_fixture;
+#[cfg(all(test, unix))]
+#[path = "../tests/support/timing.rs"]
+mod test_timing;
 #[cfg(unix)]
 #[derive(Debug)]
 struct Capture {
@@ -468,10 +471,11 @@ fn collect_login(
 }
 #[cfg(all(test, unix))]
 mod tests {
+    use super::test_timing::HANG_GUARD;
     use super::*;
     fn await_login(cache: &Mutex<Cache>, env: &Environment) {
         cache.lock().unwrap().prepare(cache_key(env), env);
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             let mut state = cache.lock().unwrap();
             state.refresh();
@@ -487,7 +491,7 @@ mod tests {
         }
     }
     fn await_started(path: &std::path::Path) {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + HANG_GUARD;
         while std::fs::read_to_string(path).unwrap_or_default().is_empty() {
             assert!(
                 Instant::now() < deadline,

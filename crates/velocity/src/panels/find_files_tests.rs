@@ -5,7 +5,7 @@ use vel_render::scene::Scene;
 use vel_search::files::Row;
 
 fn wait_for(a: &mut App, ready: impl Fn(&App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.poll_workspace_model();
         a.panels.poll(&mut a.workspace, 0..0);
@@ -203,7 +203,7 @@ fn disk_search_streams_cross_line_regex_and_skips_binary_without_feedback() {
         ("one$", 2),
     ] {
         begin(&mut a, query);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.panels.busy() {
             let viewport = a.viewport();
             a.panels.poll(&mut a.workspace, viewport);
@@ -1043,7 +1043,7 @@ fn r35_syntax_tests_menu_palette_output_legacy_and_result_links() {
         serde_json::from_str(&menu.args).unwrap(),
     );
     let finish = |a: &mut App| {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !a.builds.poll(&mut a.panels) {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
@@ -1174,7 +1174,7 @@ fn find_results_tab_streams_while_typing_within_frame_budget() {
     add(&mut a, &root);
     begin(&mut a, "needle");
     a.workspace.select(a.workspace.sheet_index(draft).unwrap());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     let mut samples = Vec::new();
     let mut streamed = false;
     while !a.panels.file_complete {

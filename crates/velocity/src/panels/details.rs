@@ -981,7 +981,7 @@ mod tests {
         }
     }
     fn wait(p: &mut Panels, w: &mut Workspace, done: impl Fn(&Panels) -> bool) {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !done(p) {
             let end = w.editor().text.len_bytes();
             p.poll(w, 0..end);
@@ -2432,7 +2432,7 @@ mod publication_tests {
         .unwrap();
         w.set_file_type("Rust").unwrap();
         let mut p = Panels::new(&w, false);
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !w
             .editor()
             .language

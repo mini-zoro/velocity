@@ -7,6 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 use vel_git::{Badge, DiffTarget, GitService, Head, Repository};
+
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 fn git(path: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -172,7 +177,7 @@ fn unmerged_index_unborn_detached_worktrees_and_cheap_ahead_behind() {
     );
 }
 fn wait_for(service: &GitService, condition: impl Fn(&vel_git::StatusSnapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if let Some(error) = service.try_error() {
             panic!("worker: {error}");

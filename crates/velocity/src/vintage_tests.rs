@@ -260,7 +260,7 @@ fn reindent_host_completion_is_one_vi_undo_and_restores_command_carets() {
     w.editor_mut().sync();
     w.editor_mut().set_caret(12, false);
     text(&mut w, &mut p, &mut v, "==");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
     while w.editor().reindent_job.is_some() {
         w.editor_mut().poll_language();
         assert!(std::time::Instant::now() < deadline);

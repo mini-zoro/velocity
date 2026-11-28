@@ -4687,7 +4687,7 @@ mod tests {
             Arc::new(scheme),
         )
         .unwrap();
-        let until = Instant::now() + std::time::Duration::from_secs(20);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !e.language.borrow().as_ref().unwrap().ready() {
             e.poll_language();
             assert!(Instant::now() < until);
@@ -5071,7 +5071,7 @@ mod tests {
         )
         .unwrap();
         w.set_file_type("Rust").unwrap();
-        let until = Instant::now() + std::time::Duration::from_secs(20);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !w.editor().language.borrow().as_ref().unwrap().ready()
             || w.themes.ui.borrow().metrics.images_pending()
         {
@@ -5145,7 +5145,7 @@ mod tests {
         )
         .unwrap();
         w.set_file_type("Rust").unwrap();
-        let until = Instant::now() + std::time::Duration::from_secs(20);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !w.editor().language.borrow().as_ref().unwrap().ready()
             || w.themes.ui.borrow().metrics.images_pending()
         {

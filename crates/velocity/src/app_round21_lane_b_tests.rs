@@ -29,7 +29,7 @@ fn location(path: &Path) -> FileLocation {
 }
 #[track_caller]
 fn spin(mut finish: impl FnMut() -> bool) {
-    let until = Instant::now() + Duration::from_secs(30);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while !finish() {
         assert!(Instant::now() < until, "fixture did not finish");
         std::thread::sleep(Duration::from_millis(2));

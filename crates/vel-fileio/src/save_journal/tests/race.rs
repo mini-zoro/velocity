@@ -2,6 +2,10 @@ use super::*;
 use crate::save_report_with_expected;
 use std::{cell::RefCell, sync::mpsc};
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 thread_local! {
     static WRITER: RefCell<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>> = const { RefCell::new(None) };
     static WAITER: RefCell<Option<mpsc::SyncSender<()>>> = const { RefCell::new(None) };
@@ -35,7 +39,7 @@ pub(super) fn simultaneous_saves(target: &Path, simulated: bool) {
                         (Phase::BeforeWrite, || {
                             let (ready, proceed) = WRITER.take().unwrap();
                             ready.send(()).unwrap();
-                            proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                            proceed.recv_timeout(HANG_GUARD).unwrap();
                             Ok(())
                         }),
                         (Phase::AfterSync, || {
@@ -47,7 +51,7 @@ pub(super) fn simultaneous_saves(target: &Path, simulated: bool) {
                 )
                 .unwrap();
             });
-            at_write_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            at_write_rx.recv_timeout(HANG_GUARD).unwrap();
             WAITER.set(Some(continue_write));
             COARSE_VERSION_PROBE.set(simulated);
             let result = use_faults(

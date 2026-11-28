@@ -17,6 +17,10 @@ use vel_platform::Rect;
 use vel_render::scene::{Scene, Surface};
 use vel_ui::minihtml::{Html, Metrics, enable_remote_images};
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 fn png(width: u32, height: u32) -> Vec<u8> {
     let mut data = Vec::new();
     let pixels = [26u8, 51, 77, 255].repeat((width * height) as usize);
@@ -50,7 +54,7 @@ fn placeholder(scene: &Scene) -> bool {
 }
 
 fn finish_requests(metrics: &Metrics) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + HANG_GUARD;
     while metrics.images_pending() {
         metrics.poll_images();
         assert!(Instant::now() < deadline, "image worker did not finish");

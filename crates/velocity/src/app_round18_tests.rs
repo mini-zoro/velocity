@@ -79,7 +79,7 @@ fn input(a: &mut App, text: &str) {
     }
 }
 fn until(a: &mut App, predicate: impl Fn(&App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !predicate(a) {
         a.workspace.editor_mut().poll_language();
         a.workspace.editor_mut().poll_completion();
@@ -394,7 +394,7 @@ fn suffix_trigger_longest_and_duplicate_choice_through_key_dispatch() {
     key(&mut a, "tab");
     assert_eq!(a.panels.overlay, Some(crate::panels::Overlay::Choices));
     assert_eq!(a.workspace.editor().text.to_string(), "t.");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.len() != 2 {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -460,7 +460,7 @@ fn focus_lost_saving_is_opt_in_and_skips_conflicts_readonly_and_untitled() {
                 column: 1,
             })
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.tabs[a.workspace.active].loading.is_some() {
             a.workspace.poll();
             assert!(Instant::now() < deadline);
@@ -569,7 +569,7 @@ fn scoped_snippets_are_filtered_in_the_real_palette() {
         "show_overlay",
         json!({"overlay":"command_palette","text":"R18"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.is_empty() {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -673,7 +673,7 @@ fn focus_loss_tab_transition_saves_the_previous_document() {
             column: 1,
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.tabs[a.workspace.active].loading.is_some() {
         a.workspace.poll();
         assert!(Instant::now() < deadline);
@@ -813,7 +813,7 @@ fn focus_save_failure_is_status_only_and_preserves_disk_contents() {
             column: 1,
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.tabs[a.workspace.active].loading.is_some() {
         a.workspace.poll();
         assert!(Instant::now() < deadline);
@@ -1216,7 +1216,7 @@ fn palette_snippets_use_caret_after_comment_and_skip_unneeded_scope_work() {
         "show_overlay",
         json!({"overlay":"command_palette","text":"AfterComment"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.is_empty() {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -1246,7 +1246,7 @@ fn open_ready(a: &mut App, path: &Path) {
             column: 1,
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.tabs[a.workspace.active].loading.is_some() {
         a.workspace.poll();
         assert!(Instant::now() < deadline);
@@ -1462,7 +1462,7 @@ fn scopes_ready(a: &App) -> bool {
 }
 
 fn palette_ready(a: &mut App) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -1721,7 +1721,7 @@ fn leaving_view_finishes_or_cancels_tags_before_focus_save() {
             input(&mut a, "/");
             assert!(a.workspace.editor().pending_closing_tag.is_some());
             if publish {
-                let deadline = Instant::now() + Duration::from_secs(20);
+                let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
                 while !scopes_ready(&a) {
                     a.workspace
                         .editor()

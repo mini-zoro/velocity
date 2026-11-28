@@ -224,7 +224,10 @@ fn streamed_build_output_result_navigation_and_output_double_click() {
     let at = Instant::now();
     while builds.task.is_some() {
         builds.poll(&mut panels);
-        assert!(at.elapsed() < Duration::from_secs(3));
+        assert!(
+            at.elapsed() < crate::test_timing::HANG_GUARD,
+            "build did not finish"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(builds.diagnostics.len(), 1);

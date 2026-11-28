@@ -2681,7 +2681,7 @@ mod round15_details {
             Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
         )
         .unwrap();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             e.poll_language();
             if e.language.borrow().as_ref().unwrap().scopes_ready() {

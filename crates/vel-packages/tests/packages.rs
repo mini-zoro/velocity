@@ -5,6 +5,10 @@ use vel_packages::{
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn archive(path: &Path, version: &str, entries: &[(&str, &[u8])]) {
     let mut zip = ZipWriter::new(fs::File::create(path).unwrap());
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -370,9 +374,7 @@ fn a_briefly_held_store_lock_is_waited_for_instead_of_failing() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     drop(held);
     assert!(
-        receive
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap(),
+        receive.recv_timeout(HANG_GUARD).unwrap(),
         "the wait should finish once the short lock holder is done"
     );
     caller.join().unwrap();

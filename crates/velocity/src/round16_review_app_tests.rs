@@ -550,7 +550,7 @@ fn fold_app(source: &str, syntax: &str, width: usize) -> App {
     e.settings.set(Layer::View, "word_wrap", json!(width != 0));
     e.settings.set(Layer::View, "wrap_width", json!(width));
     e.sync();
-    let until = Instant::now() + std::time::Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while !e.language.borrow().as_ref().unwrap().ready()
         || e.language.borrow().as_ref().unwrap().analysis.is_none()
     {

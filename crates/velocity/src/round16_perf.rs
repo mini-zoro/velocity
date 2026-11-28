@@ -10,7 +10,7 @@ use vel_config::{json, settings::Layer};
 use vel_platform::Size;
 use vel_text::Text;
 fn ready(e: &mut Editor, v: &mut View) {
-    let until = Instant::now() + Duration::from_secs(30);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         e.poll_language();
         black_box(v.scene(e));

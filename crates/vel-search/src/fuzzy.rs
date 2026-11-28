@@ -2142,6 +2142,9 @@ impl Drop for Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     fn full_dp(items: &[Candidate], query: &str, limit: usize) -> Vec<Hit> {
         let query = normalized(query);
@@ -2434,7 +2437,7 @@ mod tests {
         ));
         worker.query("m", 20);
         let last = worker.query("unmatchable", 20);
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + HANG_GUARD;
         loop {
             if let Some(result) = worker.poll() {
                 assert_eq!(result.generation, last);

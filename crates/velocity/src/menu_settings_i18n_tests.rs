@@ -492,7 +492,7 @@ fn print_exports_current_selection_or_document_and_reaps_the_browser_file() {
             app.workspace.editor_mut().set_caret(0, false);
         }
         app.start_print().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             if let Some(result) = app.print_jobs.poll(&browser, Instant::now()) {
                 result.unwrap();
@@ -719,7 +719,7 @@ fn open_palette(app: &mut App, query: &str) {
 }
 
 fn wait_language(app: &mut App, language: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.workspace.ui_language_setting() != language {
         app.poll_workspace_model();
         assert!(
@@ -850,7 +850,7 @@ fn r25_find_results_and_replacement_messages_keep_their_arguments() {
         })
         .unwrap();
     app.run_named(None, "find_in_files_start", &json!({}));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.panels.message != "2 matches in 1 file" {
         let viewport = app.viewport();
         app.panels.poll(&mut app.workspace, viewport);
@@ -1003,7 +1003,7 @@ fn r25_open_appearance_and_symbol_rows_preserve_their_identity() {
         "show_overlay",
         &json!({"overlay":"goto","text":"@task"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !app
         .panels
         .quick
@@ -1099,7 +1099,7 @@ fn r25_build_headers_relabel_in_the_output_view_without_touching_tool_text() {
     let data = tempfile::tempdir().unwrap();
     let mut app = fixture(Some(data.path()));
     app.run_named(None, "exec", &json!({"cmd":["/bin/echo","[Cancelled]"]}));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.builds.task.is_some() {
         app.builds.poll(&mut app.panels);
         assert!(Instant::now() < deadline, "build did not finish");
@@ -1121,7 +1121,7 @@ fn r25_build_headers_relabel_in_the_output_view_without_touching_tool_text() {
 }
 
 fn palette_row<'a>(app: &'a mut App, caption: &str) -> &'a vel_ui::Item {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.panels.ranking_pending() {
         let viewport = app.viewport();
         app.panels.poll(&mut app.workspace, viewport);
@@ -1302,7 +1302,7 @@ fn user_catalog_reloads_menus_palette_panels_status_and_accessibility() {
             .collect()
     }
     fn wait_for_catalog(app: &mut App, available: bool) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while app.workspace.translations.catalog("x-test").is_some() != available {
             assert!(Instant::now() < deadline, "catalog reload did not publish");
             app.poll_workspace_model();

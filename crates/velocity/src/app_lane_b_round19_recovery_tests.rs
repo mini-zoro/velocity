@@ -117,7 +117,7 @@ fn r19_recovery_hidden_view_panic_is_contained_on_tab_dispatch() {
     validate_all(&mut a);
 }
 fn loaded(a: &mut App) {
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while a
         .workspace
         .tabs
@@ -520,7 +520,7 @@ fn r19_recovery_save_as_symlink_has_one_identity_and_receives_external_changes()
     );
     assert_eq!(std::fs::read_to_string(&canonical).unwrap(), "original");
     std::fs::write(&canonical, "external contents changed on the real path").unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.editor().text != "external contents changed on the real path" {
         a.workspace.poll();
         assert!(Instant::now() < until, "external change missed");

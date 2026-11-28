@@ -495,9 +495,11 @@ fn nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
 mod input_tests {
     use super::*;
 
-    // Login capture alone can take two seconds before exec. These deadlines
-    // detect hangs; event ordering tests restart independently of scheduling.
-    const WATCHDOG: Duration = Duration::from_secs(30);
+    // Hang guard. Login capture alone can take two seconds before exec, and the whole
+    // workspace runs beside this test, so the deadlines only detect hangs; event
+    // ordering tests restart independently of scheduling. The old child must outlive
+    // WATCHDOG, or a restart that waited for it to exit would pass.
+    const WATCHDOG: Duration = Duration::from_secs(120);
 
     #[track_caller]
     fn next_event(task: &Task, by: Instant, phase: &str) -> Event {
@@ -541,7 +543,7 @@ mod input_tests {
         let mut task = Task::spawn(&exec(serde_json::json!([
             "/bin/sh",
             "-c",
-            "printf 'ready\\n'; exec /bin/sleep 60"
+            "printf 'ready\\n'; exec /bin/sleep 300"
         ])))
         .unwrap();
         // A full channel before the child starts only tests the Rust queue.

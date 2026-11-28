@@ -9,7 +9,7 @@ fn bounded(body: impl FnOnce() + Send + 'static) {
         let _ = tx.send(result);
     });
     match rx
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(crate::test_timing::HANG_GUARD)
         .expect("document operation hung")
     {
         Ok(()) => {}
@@ -404,7 +404,7 @@ fn r19_special_open_and_external_reload_reject_nonregular_files_nonmodally() {
                 }
                 let text = a.workspace.editor().text.to_string();
                 let _socket = special(&path, kind);
-                let until = Instant::now() + Duration::from_secs(5);
+                let until = Instant::now() + crate::test_timing::HANG_GUARD;
                 loop {
                     a.workspace.poll();
                     a.publish_resource_reports();

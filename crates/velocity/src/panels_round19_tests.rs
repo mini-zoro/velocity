@@ -2,7 +2,7 @@ use super::*;
 use std::time::Duration;
 
 fn wait(w: &mut Workspace, p: &mut Panels, condition: impl Fn(&Workspace, &Panels) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         w.poll();
         p.poll(w, 0..100);

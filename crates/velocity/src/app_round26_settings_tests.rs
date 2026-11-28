@@ -450,7 +450,7 @@ fn settings_user_tab_save_updates_existing_window_and_preserves_explicit_toggles
         )
         .unwrap();
     child.save(child.active, None).unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.workspace.editor().preferences.font_size != 19. {
         app.poll_workspace_model();
         assert!(Instant::now() < until, "{:?}", app.workspace.messages);
@@ -470,7 +470,7 @@ fn settings_user_tab_save_updates_existing_window_and_preserves_explicit_toggles
         data.path(),
         &json!({"show_side_bar":true, "show_status_bar":true}),
     );
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while !app.panels.chrome {
         app.poll_workspace_model();
         assert!(Instant::now() < until, "{:?}", app.workspace.messages);

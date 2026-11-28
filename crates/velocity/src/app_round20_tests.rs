@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn drive(a: &mut App, ready: impl Fn(&App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         let viewport = a.viewport();

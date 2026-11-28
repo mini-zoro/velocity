@@ -1396,7 +1396,7 @@ mod tests {
     fn ready(e: &mut Editor, completion: bool) {
         // Syntax loading competes with every parallel test on 2-4 core CI runners
         // (two Windows runs saw the list ready but the language not yet after 10 s).
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             e.poll_language();
             e.poll_completion();
@@ -1549,7 +1549,7 @@ mod tests {
         e.run("insert", &json!({"characters":"p"})).unwrap();
         e.run("commit_completion", &json!({})).unwrap();
         assert_eq!(e.text.to_string(), "alp");
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while e.text != "alpha" {
             e.poll_language();
             e.poll_completion();
@@ -1561,7 +1561,7 @@ mod tests {
             .set(Layer::View, "translate_tabs_to_spaces", json!(true));
         e.sync();
         e.run("insert_best_completion", &json!({})).unwrap();
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while e.completion.busy() {
             e.poll_language();
             e.poll_completion();
@@ -1643,7 +1643,7 @@ mod tests {
             .set(Layer::View, "auto_complete_selector", json!("comment"));
         e.sync();
         e.run("insert", &json!({"characters":"l"})).unwrap();
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while e.completion.busy() {
             e.poll_language();
             e.poll_completion();

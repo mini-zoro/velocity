@@ -1675,6 +1675,9 @@ fn highlight_ranges(
 mod tests {
     use super::*;
     use vel_theme::Element;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     /// A command caption too long for its row keeps its last segment and shortens the part
     /// before it, with the match colour on the right characters of both parts; one that fits
@@ -1813,7 +1816,7 @@ mod tests {
         {
             use vel_render::font::Fonts;
             let mut fonts = Fonts::load().unwrap();
-            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = Instant::now() + HANG_GUARD;
             for scale in [1., 2.] {
                 let shape = |fonts: &mut Fonts, run: &TextRun| {
                     fonts.shape_ui(

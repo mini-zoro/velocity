@@ -199,7 +199,8 @@ fn loopback_latest_etag_schedule_skip_and_stage() {
     let thread = std::thread::spawn(move || {
         server.set_nonblocking(true).unwrap();
         for (path, etag, status, bytes) in requests {
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            // Hang guard only: the client connects as soon as it is scheduled.
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
             let mut client = loop {
                 match server.accept() {
                     Ok((client, _)) => break client,

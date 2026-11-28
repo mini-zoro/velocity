@@ -11,6 +11,10 @@ use crate::{
 };
 use vel_platform::Rect;
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Gpu {
     buffers: isize,
@@ -110,7 +114,7 @@ fn two_offscreen_renderers_allocate_cjk_pages_once() {
     let mut fonts = Fonts::load_shared().unwrap();
     let mut other_fonts = Fonts::load_shared().unwrap();
     fonts.shape("网关", 12.);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + HANG_GUARD;
     loop {
         fonts.poll_fallbacks();
         if !fonts.fallback_pending() {

@@ -110,7 +110,7 @@ fn key(a: &mut App, key: &str) {
 }
 
 fn wait_choices(a: &mut App, count: usize) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.len() != count {
         a.panels.poll(&mut a.workspace, 0..0);
         assert!(
@@ -379,7 +379,10 @@ fn r35_remote_minihtml_placeholder_then_pixels_on_all_three_surfaces() {
     });
     a.run_named(None, "show_popup", &json!({"content":markup}));
     let loading = a.scene();
-    assert_eq!(work.recv_timeout(Duration::from_secs(30)).unwrap(), url);
+    assert_eq!(
+        work.recv_timeout(crate::test_timing::HANG_GUARD).unwrap(),
+        url
+    );
     assert!(!fixture_pixels(&loading));
     assert!(
         loading
@@ -389,7 +392,7 @@ fn r35_remote_minihtml_placeholder_then_pixels_on_all_three_surfaces() {
             .any(|r| r.color == [0.5, 0.5, 0.5, 0.2])
     );
     release.send(()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         if a.workspace.themes.ui.borrow().metrics.poll_images() {
             break;

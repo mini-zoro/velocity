@@ -1453,7 +1453,7 @@ mod tests {
             let mut drained = primary.drain();
             assert!(matches!(
                 result
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(crate::test_timing::HANG_GUARD)
                     .unwrap()
                     .unwrap(),
                 Forward::Submitted(Ok(()))
@@ -1500,7 +1500,7 @@ mod tests {
     /// be seen. Wait until the endpoint really refuses connections, which is
     /// what these tests mean by a stale socket.
     fn wait_until_stale(path: &Path) {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while UnixStream::connect(path).is_ok() {
             assert!(
                 Instant::now() < until,
@@ -1511,7 +1511,7 @@ mod tests {
         }
     }
     fn wait_until(mut ready: impl FnMut() -> bool) {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !ready() {
             assert!(Instant::now() < until, "process fixture timed out");
             std::thread::sleep(Duration::from_millis(2));
@@ -1732,7 +1732,7 @@ mod round15_tests {
             stream.read_exact(&mut bytes).unwrap();
             let request: Request = serde_json::from_slice(&bytes).unwrap();
             delivered.send(request).unwrap();
-            resume.recv_timeout(Duration::from_secs(10)).unwrap();
+            resume.recv_timeout(crate::test_timing::HANG_GUARD).unwrap();
             // The primary may still apply this queued request after the client returns.
         });
         let mut request = Request::new(&Options::default(), None).unwrap();
@@ -1743,7 +1743,7 @@ mod round15_tests {
         ));
         assert!(
             received
-                .recv_timeout(Duration::from_secs(10))
+                .recv_timeout(crate::test_timing::HANG_GUARD)
                 .unwrap()
                 .native_open
         );
@@ -1806,7 +1806,10 @@ mod round15_tests {
             client.join().unwrap().unwrap(),
             Forward::Submitted(Ok(()))
         ));
-        let incoming = instance.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let incoming = instance
+            .rx
+            .recv_timeout(crate::test_timing::HANG_GUARD)
+            .unwrap();
         assert!(incoming.request.native_open);
         let mut w = Workspace::new(Text::new(), None, None, false).unwrap();
         assert!(

@@ -79,6 +79,8 @@ mod test_keys;
 #[cfg(test)]
 #[path = "../../vel-build/tests/support/mod.rs"]
 mod test_login;
+#[cfg(test)]
+mod test_timing;
 mod theme_bench;
 #[cfg(test)]
 mod theme_tests;

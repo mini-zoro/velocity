@@ -49,7 +49,7 @@ fn key(a: &mut App, name: &str) -> bool {
 fn finish(a: &mut App) {
     // This waits for process output and EOF, not launch performance. A cold
     // build can spend two seconds on login capture before exec is scheduled.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.builds.task.is_some() {
         a.builds.poll(&mut a.panels);
         assert!(Instant::now() < deadline, "build timeout");
@@ -416,7 +416,7 @@ fn round18_build_with_choices_filter_and_remember_variants() {
     a.panels.quick_input.set("Run");
     let viewport = a.viewport();
     a.panels.edited(&mut a.workspace, viewport);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.is_empty() {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -662,7 +662,7 @@ fn round18_accepting_a_status_bar_syntax_row_preserves_the_parked_scroll() {
     a.panels.quick_input.set("Rust");
     let viewport = a.viewport();
     a.panels.edited(&mut a.workspace, viewport);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.quick.items.is_empty() {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -902,7 +902,7 @@ fn choose_build(a: &mut App, query: &str) {
     a.panels.quick_input.set(query);
     let viewport = a.viewport();
     a.panels.edited(&mut a.workspace, viewport);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -985,7 +985,7 @@ fn round18_review_find_enter_reveals_the_same_match_after_wheel_scroll() {
         "show_panel",
         json!({"panel":"find","text":"needle"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
@@ -1190,7 +1190,7 @@ fn round18_review_signal_output_and_retention_hysteresis() {
     // Stall the UI until the worker has drained its pipes. Normal streaming
     // can trim the mirror's prefix without resetting it.
     let task = a.builds.task.as_ref().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !task.finished() {
         assert!(Instant::now() < deadline, "build producer did not finish");
         std::thread::sleep(Duration::from_millis(1));
@@ -1234,7 +1234,7 @@ exec /bin/sleep 20
             "quiet":true,
         }),
     );
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.build_results.len() < 323 {
         a.builds.poll(&mut a.panels);
         assert!(
@@ -1284,7 +1284,7 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
     let mut a = app("", None);
     a.panels.add_folder(&mut a.workspace, root).unwrap();
     a.panels.side_visible = true;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.panels.side_rows.len() < 3 {
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);

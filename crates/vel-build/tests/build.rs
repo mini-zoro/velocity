@@ -9,6 +9,11 @@ use vel_build::{Event, Task};
 #[cfg(unix)]
 #[path = "support/detached.rs"]
 mod detached_fixture;
+#[cfg(unix)]
+#[path = "support/timing.rs"]
+mod timing;
+#[cfg(unix)]
+use timing::HANG_GUARD;
 #[test]
 fn variables_nested_defaults_regex_unicode_and_literal_dollars() {
     let vars = Variables::new(
@@ -88,7 +93,7 @@ fn streams_both_pipes_and_preserves_split_utf8() {
     let mut output = String::new();
     let mut stderr = false;
     loop {
-        match task.events.recv_timeout(Duration::from_secs(3)).unwrap() {
+        match task.events.recv_timeout(HANG_GUARD).unwrap() {
             Event::Output { stream, text } => {
                 stderr |= stream == vel_build::Stream::Stderr;
                 output.push_str(&text);
@@ -122,7 +127,7 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
     let task = Task::spawn(&exec).unwrap();
     // Login fallback may report a warning before the process produces output.
     // Cancel only once the real child has started, not after an environment event.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     let mut output = String::new();
     loop {
         match task
@@ -272,8 +277,10 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
     let dir = tempfile::tempdir().unwrap();
     let child_path = dir.path().join("child");
     let grandchild_path = dir.path().join("grandchild");
+    // The descendants must outlive every wait below, or one that was never killed would
+    // pass by exiting on its own.
     let source = format!(
-        "/bin/sh -c 'sleep 30 & echo $! > {}; wait' & echo $! > {}; echo ready; wait",
+        "/bin/sh -c 'sleep 300 & echo $! > {}; wait' & echo $! > {}; echo ready; wait",
         grandchild_path.display(),
         child_path.display()
     );
@@ -283,14 +290,14 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
         .unwrap();
     support::install();
     let old = Task::spawn(&exec).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_GUARD;
     while !grandchild_path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
     // `echo $! > path` creates the file and then writes it, so a reader can see it
     // empty; wait for the digits rather than racing the shell.
     let pid_in = |path: &std::path::Path| {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Ok(text) = std::fs::read_to_string(path)
                 && let Ok(pid) = text.trim().parse::<i32>()
@@ -339,7 +346,7 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
     }
     assert_eq!(output, "replacement\n");
     for pid in [child, grandchild] {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             // SAFETY: signal zero probes only this fixture's known child PID.
             if unsafe { libc::kill(pid, 0) } != 0 {
@@ -450,7 +457,7 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
     let old = Task::spawn(&old_exec).unwrap();
     loop {
         if matches!(
-            old.events.recv_timeout(Duration::from_secs(3)).unwrap(),
+            old.events.recv_timeout(HANG_GUARD).unwrap(),
             Event::Output { .. }
         ) {
             break;
@@ -484,7 +491,7 @@ fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
     let task = Task::spawn(&exec).unwrap();
     let mut output = String::new();
     loop {
-        match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+        match task.events.recv_timeout(HANG_GUARD).unwrap() {
             Event::Output { text, .. } => output.push_str(&text),
             Event::Finished { .. } => break,
             Event::Error(e) => panic!("{e}"),
@@ -525,7 +532,7 @@ fn round19_sustained_output_keeps_ui_polling_progress_with_regex() {
     .resolve(&Variables::default())
     .unwrap();
     let task = Task::spawn(&exec).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     let mut started = None;
     let mut last = Instant::now();
     let mut polls = 0;

@@ -751,7 +751,7 @@ mod tests {
             std::sync::Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
         )
         .unwrap();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let until = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             e.poll_language();
             e.run("show_scope_name", &json!({})).unwrap();

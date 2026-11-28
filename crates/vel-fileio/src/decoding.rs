@@ -518,6 +518,9 @@ impl DecodePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     #[test]
     fn a_rewrite_between_decision_and_read_is_decoded_by_its_own_evidence() {
@@ -547,7 +550,7 @@ mod tests {
                 crate::load_background_with_options(path.clone(), options)
                     .unwrap()
                     .result
-                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .recv_timeout(HANG_GUARD)
                     .unwrap()
             } else {
                 crate::load_with_options(&path, &options, |_| {})

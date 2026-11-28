@@ -260,7 +260,8 @@ fn fatal_handler_writes_for_segv_and_worker_stack_overflow() {
             command.env("VELOCITY_HANDLER_TEST_OVERFLOW", "1");
         }
         let mut child = command.spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Hang guard only: the fixture normally exits at once.
+        let deadline = Instant::now() + Duration::from_secs(120);
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;

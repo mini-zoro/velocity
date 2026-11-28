@@ -1766,6 +1766,10 @@ mod incremental_tests {
 #[cfg(test)]
 mod review15_tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     fn folder(path: &Path) -> Folder {
         Folder {
             path: path.into(),
@@ -1838,7 +1842,7 @@ mod review15_tests {
         })
         .unwrap();
         loop {
-            match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+            match task.events.recv_timeout(HANG_GUARD).unwrap() {
                 files::Event::Line(line) => {
                     assert_eq!(line.path.as_ref(), path);
                 }

@@ -762,7 +762,7 @@ fn rename_rearms_file_watcher_and_delete_leaves_other_tabs_untouched() {
     fs::rename(&old, &new).unwrap();
     apply_rename(&mut workspace, &old, &new).unwrap();
     fs::write(&new, "external content now longer").unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while workspace.tabs[0].editor.text != "external content now longer" {
         workspace.poll();
         assert!(

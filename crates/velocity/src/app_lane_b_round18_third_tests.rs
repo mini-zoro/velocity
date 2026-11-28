@@ -285,7 +285,7 @@ fn round18_third_diagnostics_arrive_before_completion_without_replay() {
         "exec",
         json!({"shell_cmd":source,"file_regex":"^([^:]+):([0-9]+):([0-9]+): (.*)$"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.builds.diagnostics.last().is_none_or(|d| d.line != 40000) {
         assert!(a.builds.task.is_some());
         a.builds.poll(&mut a.panels);

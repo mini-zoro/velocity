@@ -186,7 +186,7 @@ fn round18_final_long_line_paint_anchors_remote_edits() {
 }
 fn fold_above(a: &mut App) {
     // Even an explicit selection fold waits for the normal syntax publication.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.editor_mut().poll_language();
         if a.workspace
@@ -292,7 +292,7 @@ fn round18_final_continuous_daemon_finishes_and_cancels_promptly() {
         let script = fixture.script(true, "sleep .05; echo ROOT_EXIT");
         let mut a = app("", None);
         named(&mut a, "exec", json!({"cmd":["/bin/sh","-c",script]}));
-        let limit = Instant::now() + Duration::from_secs(10);
+        let limit = Instant::now() + crate::test_timing::HANG_GUARD;
         while !a.panels.output.contains("ROOT_EXIT") {
             a.builds.poll(&mut a.panels);
             assert!(Instant::now() < limit);
@@ -350,7 +350,7 @@ fn round18_final_oversized_output_line_discards_its_continuation() {
     );
     let mut a = app("", None);
     named(&mut a, "exec", json!({"cmd":["/bin/sh","-c",program]}));
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !a.panels.output.starts_with("[output truncated]") {
         a.builds.poll(&mut a.panels);
         assert!(Instant::now() < deadline);
@@ -431,7 +431,7 @@ fn round18_final_login_double_build_keeps_shared_capture() {
             // Selection prewarms the same cache; the fixture holds startup at a
             // barrier so both actual Cmd+B requests happen during that capture.
             named(&mut a, "set_build_system", json!({"name":"fixture"}));
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             while std::fs::read_to_string(root.join("calls"))
                 .unwrap_or_default()
                 .is_empty()
@@ -481,7 +481,7 @@ fn round18_final_login_alternating_builds_share_base() {
                 assert!(key(&mut a, "super+b"));
                 finish(&mut a);
             }
-            let deadline = Instant::now() + Duration::from_secs(30);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             loop {
                 assert!(key(&mut a, "super+b"));
                 finish(&mut a);

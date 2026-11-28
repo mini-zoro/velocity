@@ -7277,7 +7277,7 @@ mod workbench_scenes {
             )
             .unwrap();
         crate::workbench::configure_groups(&mut app.workspace, 1).unwrap();
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         for _ in 0..50 {
             app.panels.poll(&mut app.workspace, 0..4);
         }

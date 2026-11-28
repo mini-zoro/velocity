@@ -179,7 +179,7 @@ fn fixture_document_opened<T>(
     let queued = app.workspace.tabs[index].loading.is_some();
     app.workspace.prepare_sheet(index).unwrap();
     let sheet = app.workspace.tabs[index].sheet;
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.workspace.tabs[index].loading.is_some()
         || app.workspace.tabs[index].binary_loading.is_some()
     {
@@ -259,7 +259,7 @@ fn build_probe(app: &mut App, key: &str, root: &Path) -> String {
             &args,
         )
         .unwrap();
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while app.builds.task.is_some() {
             app.builds.poll(&mut app.panels);
             assert!(Instant::now() < until, "build timed out");
@@ -396,7 +396,7 @@ fn session_probe(app: &mut App, key: &str, root: &Path) -> String {
 /// the active document's highlighting; a setting must not appear to have an effect
 /// (or lose one) because a worker delivered between two baselines.
 fn scene_digest(app: &mut App) -> u64 {
-    let until = Instant::now() + Duration::from_secs(30);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     let mut previous = None;
     loop {
         let scene = app.scene();
@@ -574,7 +574,7 @@ fn round35_find_probe(app: &mut App, key: &str) -> String {
             &json!({"panel":"find", "pattern":"call"}),
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.panels.busy() {
         app.panels.poll(&mut app.workspace, 0..0);
         assert!(Instant::now() < deadline, "{key} Find did not settle");
@@ -608,7 +608,7 @@ fn round35_find_files_probe(app: &mut App, key: &str, root: &Path) -> String {
     );
     app.panels.where_input.set(where_.to_str().unwrap());
     app.run_named(None, "find_in_files_start", &json!({}));
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !app.panels.file_complete {
         app.panels.poll(&mut app.workspace, 0..0);
         assert!(
@@ -656,7 +656,7 @@ fn observe_ui(app: &mut App, key: &str, root: &Path) -> String {
                 "show_overlay",
                 &json!({"overlay":"goto","text":"goto-setting-probe"}),
             );
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             let seen = loop {
                 let viewport = app.viewport();
                 app.panels.poll(&mut app.workspace, viewport);
@@ -771,7 +771,7 @@ fn observe_ui(app: &mut App, key: &str, root: &Path) -> String {
         }
         "index_files" => {
             app.panels.intel.poll(&mut app.workspace);
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             while app.panels.intel.busy() {
                 app.panels.intel.poll(&mut app.workspace);
                 assert!(Instant::now() < deadline, "fixture index did not settle");
@@ -998,7 +998,7 @@ fn sidebar_probe(app: &mut App, key: &str) -> String {
         panels
             .open_sidebar_directory(&mut app.workspace, path.to_owned())
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(3);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !panels.sidebar_has_row(child) {
             panels.poll(&mut app.workspace, 0..20);
             assert!(
@@ -1142,7 +1142,7 @@ fn shaped_scene_probe(app: &mut App, key: &str) -> String {
             16.,
         );
         if syntax != "Plain Text" {
-            let until = Instant::now() + Duration::from_secs(3);
+            let until = Instant::now() + crate::test_timing::HANG_GUARD;
             while e
                 .language
                 .borrow()
@@ -1182,7 +1182,7 @@ fn watched_file_probe(app: &mut App, key: &str, root: &Path) -> String {
             app.workspace.close(untitled).unwrap();
             return text;
         }
-        let until = Instant::now() + Duration::from_secs(4);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             app.workspace.poll();
             let Some(i) = app.workspace.sheet_index(sheet) else {

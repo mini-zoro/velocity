@@ -646,7 +646,7 @@ fn r19_appearance_commit_persists_exact_pairs_after_inflight_reload() {
     );
     release_tx.send(()).unwrap();
     blocker
-        .recv_timeout(Duration::from_secs(20))
+        .recv_timeout(crate::test_timing::HANG_GUARD)
         .unwrap()
         .unwrap();
     a.workspace.wait_resources();

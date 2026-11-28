@@ -363,7 +363,7 @@ fn cjk_brackets_and_minimap_use_measured_columns() {
         e.sync();
         let open = prefix.len() + 1;
         e.set_caret(open, false);
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             e.poll_language();
             if e.language
@@ -471,7 +471,7 @@ fn cjk_native_ink_gaps_and_caret_match_natural_advance() {
         let px = 13. * scale;
         let mut measured = fonts.shape_editor(source, px, FontStyle::default(), advances);
         let mut natural = fonts.shape_ui(source, "Menlo", px, FontStyle::default());
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while fonts.fallback_pending() {
             assert!(Instant::now() < deadline);
             if fonts.poll_fallbacks() {

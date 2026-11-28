@@ -627,7 +627,7 @@ fn shell_cases_reindent_through_named_command_without_consuming_function_braces(
             json!({"setting":"translate_tabs_to_spaces","value":true}),
         );
         named(&mut a, "reindent", json!({}));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.editor().reindent_job.is_some() {
             a.workspace.poll();
             assert!(Instant::now() < deadline, "reindent did not finish");
@@ -673,7 +673,7 @@ fn indentation_commands_keep_find_focus_and_skip_heredoc_content() {
         "set_file_type",
         json!({"syntax":"Packages/ShellScript/Bash.sublime-syntax"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         if a.workspace
@@ -694,7 +694,7 @@ fn indentation_commands_keep_find_focus_and_skip_heredoc_content() {
         source.replacen("\tcat", "    cat", 1)
     );
     // Publish scopes for the new version before converting in the other direction.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         if a.workspace
@@ -749,7 +749,7 @@ fn tab_indented_load_and_guess_respect_live_user_and_syntax_width() {
                 column: 1,
             })
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.tabs[a.workspace.active].loading.is_some() {
             a.poll_workspace_model();
             assert!(Instant::now() < deadline);
@@ -767,7 +767,7 @@ fn tab_indented_load_and_guess_respect_live_user_and_syntax_width() {
         )
         .unwrap();
         a.workspace.request_resource_reload();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.editor().preferences.tab_size != 7 {
             a.poll_workspace_model();
             assert!(Instant::now() < deadline, "tab width did not reload");
@@ -828,7 +828,7 @@ fn minimal_user_scheme_keeps_fold_ellipsis_visible_through_named_fold() {
     )
     .unwrap();
     let mut a = app("visible hidden tail\n", Some(profile.path()));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         if a.workspace
@@ -902,7 +902,7 @@ fn legacy_scalar_syntax_files_survive_real_package_loader_and_named_selection() 
                     .any(|w| w.contains(&path))
             );
             named(&mut a, "set_file_type", json!({"syntax":path}));
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             loop {
                 a.workspace.poll();
                 let e = a.workspace.editor();
@@ -972,7 +972,7 @@ fn vintage_noop_dot_target_reaches_real_key_dispatch_without_phantom_undo() {
 }
 
 fn wait_scopes(a: &mut App) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         if a.workspace
@@ -1095,7 +1095,7 @@ fn reindent_keeps_literal_prefix_bytes_and_treats_shell_parameters_as_atomic() {
                 json!({"setting":"translate_tabs_to_spaces","value":true}),
             );
             named(&mut a, "reindent", json!({}));
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             while a.workspace.editor().reindent_job.is_some() {
                 a.workspace.poll();
                 assert!(Instant::now() < deadline);
@@ -1139,7 +1139,7 @@ fn reindent_keeps_multiline_string_whitespace_bytes_through_named_command() {
             json!({"setting":"translate_tabs_to_spaces","value":true}),
         );
         named(&mut a, "reindent", json!({}));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.editor().reindent_job.is_some() {
             a.workspace.poll();
             assert!(Instant::now() < deadline);
@@ -1287,7 +1287,7 @@ fn resource_warnings_persist_to_log_and_corrupt_packages_never_enter_modal_queue
         column: 1,
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while w.tabs[w.active].loading.is_some() {
         w.poll();
         assert!(Instant::now() < deadline);

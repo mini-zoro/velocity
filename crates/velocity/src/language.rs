@@ -2004,7 +2004,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .request_visible(std::iter::once(0..3).collect());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         while !editor.language.borrow().as_ref().unwrap().ready() {
             editor.poll_language();
             assert!(std::time::Instant::now() < deadline);
@@ -2051,7 +2051,7 @@ mod tests {
             )
             .unwrap();
         let wait_ready = |editor: &mut crate::editor::Editor| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
             loop {
                 editor.poll_language();
                 if let Some(language) = editor.language.borrow().as_ref() {
@@ -2103,7 +2103,7 @@ mod tests {
                 Arc::new(ColorScheme::velocity_dark()),
             )
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         while !editor.language.borrow().as_ref().unwrap().ready() {
             editor.poll_language();
             assert!(std::time::Instant::now() < deadline);
@@ -2121,7 +2121,7 @@ mod tests {
             12.,
         );
         view.scene(&editor);
-        let styled_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let styled_deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         while !view.exact(&editor) {
             view.scene(&editor);
             assert!(std::time::Instant::now() < styled_deadline);

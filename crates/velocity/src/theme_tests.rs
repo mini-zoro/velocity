@@ -388,7 +388,7 @@ fn key_screens_match_structural_goldens() {
         // rather than letting worker scheduling decide whether the diff gutter is drawn.
         view.scene(editor);
         editor.annotations.borrow_mut().flush();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             let mut annotations = editor.annotations.borrow_mut();
             annotations.poll();

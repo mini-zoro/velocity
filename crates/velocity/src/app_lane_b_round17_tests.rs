@@ -326,7 +326,7 @@ fn real_scheme_loader_drives_bracket_glyphs_glow_and_connected_selection_corners
         Some(dir.path()),
     );
     named(&mut app, "set_file_type", json!({"syntax":"Rust"}));
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         app.workspace.poll();
         app.view.scene(app.workspace.editor());
@@ -886,7 +886,7 @@ fn minimap_border_draws_four_viewport_edges_without_hover_through_dispatch() {
     );
     // Wait for the actual highlighting/minimap publication, rather than comparing
     // a scene before sampling with one after the worker's first result arrives.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         app.workspace.poll();
         let language = app.workspace.editor().language.borrow();
@@ -1222,7 +1222,7 @@ fn restored_scroll_waits_for_background_file_loading_before_clamping() {
         install_test_metrics(&mut restored, 1.);
         restored.sync_active_view();
         assert!((restored.view.scroll_position().visual_row - 2500.25).abs() < 1e-6);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while restored.workspace.tabs[restored.workspace.active]
             .loading
             .is_some()

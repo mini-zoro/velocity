@@ -10,7 +10,7 @@ fn fixture(root: &Path) -> (Workspace, Panels) {
         .set(SettingLayer::View, "tree_animation_enabled", json!(false));
     let mut p = Panels::new(&w, false);
     p.add_folder(&mut w, root.into()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while p.side_rows.len() < 3 {
         p.poll(&mut w, 0..1);
         assert!(Instant::now() < deadline);
@@ -146,7 +146,7 @@ fn round18_tree_motion_expand_collapse_repetition_disabled_and_reduce_motion() {
         for _ in 0..4 {
             p.side_selected = p.side_rows.iter().position(|r| r.path == folder).unwrap();
             p.activate_side(&mut w, false).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             while p.loading.contains(&folder) {
                 p.poll(&mut w, 0..1);
                 assert!(Instant::now() < deadline);
@@ -183,7 +183,7 @@ fn round18_index_files_toggle_leaves_searchable_file_lists_including_gitignored_
     )
     .unwrap();
     let (mut w, mut p) = fixture(dir.path());
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !p
         .file_paths
         .iter()

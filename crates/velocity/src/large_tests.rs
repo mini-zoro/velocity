@@ -22,7 +22,7 @@ fn workspace() -> Workspace {
     Workspace::new(Text::new(), None, None, false).unwrap()
 }
 fn until(w: &mut Workspace, ready: impl Fn(&Workspace) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !ready(w) {
         w.poll();
         assert!(Instant::now() < deadline, "{:?}", w.messages);
@@ -373,7 +373,7 @@ fn sparse_highlighting_repairs_following_lines_without_parsing_on_the_scene_thre
     )
     .unwrap();
     let mut v = view();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         v.scene(&e);
         if e.language

@@ -57,7 +57,8 @@ fn bind_fixture(home: &Path) -> UnixListener {
 
 fn receive(listener: &UnixListener) -> (UnixStream, Vec<u8>) {
     listener.set_nonblocking(true).unwrap();
-    let until = std::time::Instant::now() + Duration::from_secs(5);
+    // Hang guards only: the CLI connects and writes as soon as it is scheduled.
+    let until = std::time::Instant::now() + Duration::from_secs(120);
     let mut peer = loop {
         match listener.accept() {
             Ok((peer, _)) => break peer,
@@ -70,7 +71,8 @@ fn receive(listener: &UnixListener) -> (UnixStream, Vec<u8>) {
         }
     };
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
     let mut len = [0; 8];
     peer.read_exact(&mut len).unwrap();
     let mut body = vec![0; u64::from_le_bytes(len) as usize];

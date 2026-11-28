@@ -9,6 +9,11 @@ use vel_index::{
 };
 use vel_syntax::{MetadataSet, SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
 use vel_text::Text;
+
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 fn set() -> Arc<SyntaxSet> {
     let mut builder = SyntaxSetBuilder::new();
     builder.add_with_path(SyntaxDefinition::load_from_str("name: Fixture\nfile_extensions: [fix]\nscope: source.fixture\ncontexts:\n  main:\n    - match: '(?<=fn )[\\p{L}_]+'\n      scope: entity.name.function.fixture\n    - match: '[\\p{L}_]+(?=\\()'\n      scope: variable.function.fixture\n",true,None).unwrap(),"Fixture.sublime-syntax");
@@ -241,7 +246,7 @@ fn background_ignore_size_binary_persistence_overlay_staleness_and_deletion() {
     index.flush().unwrap();
     assert!(index.lookup_definition("update").is_empty());
     index.cancel();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + HANG_GUARD;
     while !index.status().cancelled {
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
@@ -413,7 +418,7 @@ fn notify_changes_or_reported_watcher_fallback_update_the_index() {
         ProjectIndex::open(root.path(), set(), Arc::new(MetadataSet::new()), settings).unwrap();
     index.flush().unwrap();
     std::fs::write(root.path().join("hot.fix"), "fn notified\n").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG_GUARD;
     while index.lookup_definition("notified").is_empty() {
         assert!(
             Instant::now() < deadline,

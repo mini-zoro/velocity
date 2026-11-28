@@ -558,7 +558,7 @@ fn r19_review_settings_errors_retain_each_file_and_other_valid_changes_apply() {
     std::fs::write(&syntax, "{\n  \"tab_size\": ?\n}").unwrap();
     std::fs::write(&prefs, r#"{"font_size":21}"#).unwrap();
     a.workspace.request_resource_reload();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.editor().preferences.font_size != 21.
         || a.workspace.resource_reports.is_empty()
     {

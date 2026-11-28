@@ -9,6 +9,10 @@ use unicode_width::UnicodeWidthStr;
 use vel_largefile::*;
 use vel_text::Text;
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 struct Short<'a> {
     bytes: &'a [u8],
     limit: usize,
@@ -164,11 +168,7 @@ fn task_mailbox_coalesces_and_hex_maps_sparse_files() {
         file.write_all(&b"text\n".repeat(10000)).unwrap();
     }
     let task = load_utf8(&path, options()).unwrap();
-    let loaded = task
-        .result
-        .recv_timeout(Duration::from_secs(10))
-        .unwrap()
-        .unwrap();
+    let loaded = task.result.recv_timeout(HANG_GUARD).unwrap().unwrap();
     let last = task.try_snapshot().unwrap();
     assert_eq!(last.text, loaded.text);
     assert!(task.try_snapshot().is_none());

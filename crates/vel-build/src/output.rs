@@ -540,6 +540,10 @@ pub(crate) fn channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     #[test]
     fn cancelling_a_stalled_receiver_delivers_pending_truncation() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -608,7 +612,7 @@ mod tests {
             drop(output);
             let mut actual = Vec::new();
             loop {
-                match events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                match events.recv_timeout(HANG_GUARD).unwrap() {
                     Event::Output { stream, text } => actual.push((stream, text)),
                     Event::OutputBatch(chunks) => actual.extend(chunks),
                     Event::Finished { .. } => break,

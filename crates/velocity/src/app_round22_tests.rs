@@ -359,7 +359,7 @@ fn first_scoped_completion_and_tab_load_only_eligible_bodies() {
                 assert!(a.workspace.syntax_settings.loaded(syntax));
             }
             assert_eq!(loaded_snippets(&a), 0);
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
             while !a
                 .workspace
                 .editor()
@@ -537,7 +537,7 @@ fn repaired_keymap_applies_by_polling_the_invalid_origin() {
         r#"[{"keys":["super+alt+j"],"command":"insert","args":{"characters":"repaired"}}]"#,
     )
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         a.workspace.poll();
         if key(&mut a, "super+alt+j") {
@@ -570,7 +570,7 @@ fn python_enter_uses_the_shipped_dedent_macro_and_raise_keeps_normal_enter() {
         fs::write(&file, &text).unwrap();
         a.workspace.open(location(&file)).unwrap();
         a.workspace.editor_mut().set_caret(text.len(), false);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !a
             .workspace
             .editor()
@@ -721,7 +721,7 @@ fn object_chain_dispatches_user_keys_and_shipped_python_triple_quotes() {
         a.open_received_paths(&[file]).unwrap();
         let caret = 7;
         a.workspace.editor_mut().set_caret(caret, false);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             let editor = a.workspace.editor_mut();
             editor.poll_language();

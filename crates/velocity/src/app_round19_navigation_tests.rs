@@ -697,7 +697,7 @@ fn r19_failed_appearance_write_revokes_reload_override_before_error_frame() {
         key(&mut a, "enter");
         // Let the real zoom finish before denying atomic writes. A second barrier
         // on the queue is unnecessary: reading the file observes that first write.
-        let until = Instant::now() + Duration::from_secs(20);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !std::fs::read_to_string(&file)
             .unwrap()
             .contains("font_size")
@@ -718,7 +718,7 @@ fn r19_failed_appearance_write_revokes_reload_override_before_error_frame() {
         // The zoom or the scheme choice may have started a load that is still on the
         // worker. Its completion bumps the revision on the next poll, but it is not a
         // load started while the writer is blocked, which is what this checks.
-        let settled = Instant::now() + Duration::from_secs(30);
+        let settled = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.resource_load_in_flight() {
             assert!(
                 Instant::now() < settled,
@@ -735,7 +735,7 @@ fn r19_failed_appearance_write_revokes_reload_override_before_error_frame() {
             "resource load starts while the writer is blocked"
         );
         drop(blocked);
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         let mut errors = 0;
         loop {
             a.workspace.poll();

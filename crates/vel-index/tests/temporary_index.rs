@@ -13,6 +13,10 @@ use vel_index::{IndexOptions, ProjectIndex, sweep_stale};
 use vel_search::project::Folder;
 use vel_syntax::{MetadataSet, SyntaxSetBuilder};
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 fn caches(root: &Path) -> Vec<PathBuf> {
     fs::read_dir(root)
         .unwrap()
@@ -59,7 +63,7 @@ fn temporary_index_child() {
         std::process::exit(0);
     }
     index.cancel();
-    let limit = Instant::now() + Duration::from_secs(5);
+    let limit = Instant::now() + HANG_GUARD;
     while dirs[0].exists() {
         assert!(Instant::now() < limit, "cache remained after cancellation");
         thread::sleep(Duration::from_millis(10));

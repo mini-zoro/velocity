@@ -5396,7 +5396,7 @@ mod round15_tests {
             .set(Layer::User, "large_file.load_bytes", json!(1));
         w.open(location(path.clone())).unwrap();
         let settle = |w: &mut Workspace, done: &dyn Fn(&Workspace) -> bool| {
-            let until = Instant::now() + Duration::from_secs(10);
+            let until = Instant::now() + crate::test_timing::HANG_GUARD;
             while !done(w) {
                 w.poll();
                 assert!(Instant::now() < until, "load did not settle");
@@ -5422,7 +5422,7 @@ mod round15_tests {
         let (read, total) = (task.read.clone(), task.total);
         // The worker has read every byte of the older revision; only then does the file
         // change again (same length, so the worker's final EOF read is unaffected).
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while read.load(Ordering::Relaxed) < total {
             assert!(Instant::now() < until, "reload did not read");
             std::thread::sleep(Duration::from_millis(1));
@@ -5636,7 +5636,7 @@ mod round15_tests {
             .set(Layer::User, "close_deleted_files", json!(true));
         w.open(location(path.clone())).unwrap();
         std::fs::remove_file(path).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !w.is_empty() {
             w.poll();
             assert!(Instant::now() < deadline);
@@ -5791,7 +5791,7 @@ mod round15_tests {
         w.wait_resources();
         assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
         std::fs::write(&file, "fn main() {\n    changed();\n    again();\n}\n").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !w.editor().text.to_string().contains("changed") {
             w.poll();
             assert!(Instant::now() < deadline, "{:?}", w.messages);
@@ -5985,7 +5985,7 @@ mod review15_tests {
         }
     }
     fn until(w: &mut Workspace, condition: impl Fn(&Workspace) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !condition(w) {
             w.poll();
             assert!(Instant::now() < deadline, "{:?}", w.messages);

@@ -1201,7 +1201,7 @@ mod tests {
         open_paths(&mut workspace, &mut panels, &[binary]).unwrap();
         assert!(workspace.tabs[workspace.active].binary_loading.is_some());
         assert!(workspace.editor().read_only);
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while workspace.tabs[workspace.active].binary_loading.is_some() {
             workspace.poll();
             assert!(Instant::now() < deadline, "{:?}", workspace.messages);

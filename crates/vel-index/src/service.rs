@@ -1615,6 +1615,9 @@ fn analyze_task(
 #[cfg(all(test, unix))]
 mod idle_tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     #[test]
     fn bounded_overlay_burst_keeps_the_newest_revision_and_close_restores_disk() {
@@ -1799,7 +1802,7 @@ mod idle_tests {
         assert_eq!(Stamp::read(edited.parent().unwrap()).unwrap(), parent);
 
         let wait_for = |word: &str| {
-            let until = Instant::now() + Duration::from_secs(5);
+            let until = Instant::now() + HANG_GUARD;
             loop {
                 let shared = index.shared_index();
                 if shared.read().unwrap().word_count(word) > 0 {

@@ -1317,6 +1317,10 @@ fn window_fonts_share_storage_but_keep_primary_and_size_distinct() {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     #[test]
     fn bold_italic_use_distinct_real_faces_without_changing_grid_advance() {
         let mut fonts = super::Fonts::load().unwrap();
@@ -1383,7 +1387,7 @@ mod tests {
             bold: true,
             italic: false,
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             let _ = fonts.shape_ui("打开", "system", 22., Default::default());
             let _ = fonts.shape_ui("打开", "system", 22., bold);
@@ -1475,7 +1479,7 @@ mod tests {
         assert_eq!(ascii.len(), 3);
         assert!((ascii[1].x - fonts.cell * 2.).abs() < 0.001);
         let _ = fonts.shape("a你好🦀é", 26.);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while fonts.fallback_pending() {
             assert!(std::time::Instant::now() < deadline);
             fonts.poll_fallbacks();
@@ -1635,6 +1639,10 @@ mod round17_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod fallback_mock_tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     #[test]
     fn missing_scripts_resolve_lazily_once_per_scalar_and_load_one_mapped_file() {
         use std::sync::{
@@ -1671,7 +1679,7 @@ mod fallback_mock_tests {
         assert_eq!(fonts.store.borrow().faces.len(), 1);
         let scripts = "한ไअאع𝒜⠿\u{e000}";
         fonts.shape(scripts, 13.);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while fonts.fallback_pending() {
             assert!(std::time::Instant::now() < deadline);
             fonts.poll_fallbacks();
@@ -1716,6 +1724,10 @@ pub(crate) fn emoji_presentation(cluster: &str) -> bool {
 #[cfg(all(test, target_os = "macos"))]
 mod review_regressions {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     #[test]
     fn replacing_user_font_in_place_keeps_shaping_the_loaded_snapshot() {
         let path = std::env::temp_dir().join(format!(
@@ -1799,7 +1811,7 @@ mod review_regressions {
             assert_eq!(emoji_presentation(cluster), emoji, "{cluster}");
             fonts.shape(cluster, 13.);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while fonts.fallback_pending() {
             assert!(std::time::Instant::now() < deadline);
             fonts.poll_fallbacks();
@@ -1837,7 +1849,7 @@ mod review_regressions {
             }
         }
         fn drain(fonts: &mut Fonts) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + HANG_GUARD;
             while fonts.fallback_pending() {
                 assert!(std::time::Instant::now() < deadline);
                 fonts.poll_fallbacks();
@@ -1974,7 +1986,7 @@ mod review_regressions {
             fonts.shape(text, 13.);
             // Match the user's shape/wait/poll path. Fixture resolution performs no
             // native IO; at most two worker publications may change this frame.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + HANG_GUARD;
             let mut invalidations = 0;
             while fonts.fallback_pending() {
                 assert!(std::time::Instant::now() < deadline, "{text}");
@@ -2000,7 +2012,7 @@ mod review_regressions {
     }
     fn settled_glyphs(fonts: &mut Fonts, text: &str) -> Vec<ShapedGlyph> {
         fonts.shape(text, 13.);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         let mut invalidations = 0;
         while fonts.fallback_pending() {
             assert!(std::time::Instant::now() < deadline, "{text}");
@@ -2134,7 +2146,7 @@ mod review_regressions {
         let mut fonts = Fonts::load().unwrap();
         for text in ["⌚\u{fe0e}", "🌡\u{fe0e}", "🖥\u{fe0e}", "a⌚\u{fe0e}b"] {
             fonts.shape(text, 13.);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + HANG_GUARD;
             let mut publications = 0;
             while fonts.fallback_pending() {
                 assert!(

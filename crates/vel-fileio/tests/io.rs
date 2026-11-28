@@ -4,6 +4,10 @@ use vel_config::settings::EditorSettings;
 use vel_fileio::*;
 use vel_text::Text;
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[test]
 fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallbacks() {
     let dir = tempfile::tempdir().unwrap();
@@ -24,11 +28,7 @@ fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallba
         };
         save(&path, &text, &format, true).unwrap();
         let task = load_background(path.clone(), "windows-1252".into()).unwrap();
-        let loaded = task
-            .result
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap()
-            .unwrap();
+        let loaded = task.result.recv_timeout(HANG_GUARD).unwrap().unwrap();
         assert_eq!(loaded.text, text, "{format:?}");
         assert_eq!(loaded.format, format);
         assert_eq!(
@@ -40,7 +40,7 @@ fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallba
     let loaded = load_background(path, "windows-1252".into())
         .unwrap()
         .result
-        .recv_timeout(std::time::Duration::from_secs(10))
+        .recv_timeout(HANG_GUARD)
         .unwrap()
         .unwrap();
     // Fallback interprets every original byte, including the invalid BOM prefix.
@@ -158,11 +158,7 @@ fn streaming_seams_and_background_loading() {
     };
     save(&path, &Text::from(text.as_str()), &format, true).unwrap();
     let task = load_background(path, "windows-1252".into()).unwrap();
-    let loaded = task
-        .result
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap()
-        .unwrap();
+    let loaded = task.result.recv_timeout(HANG_GUARD).unwrap().unwrap();
     assert_eq!(loaded.text.to_string(), text);
     assert_eq!(loaded.format, format);
 }
@@ -194,7 +190,7 @@ fn watcher_observes_atomic_replacement_with_metadata_fallback() {
     let mut watcher = Watcher::new().unwrap();
     watcher.watch(&path).unwrap();
     save(&path, &Text::from("changed"), &Format::default(), true).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + HANG_GUARD;
     while std::time::Instant::now() < deadline {
         if watcher.changed().into_iter().any(|event| {
             event

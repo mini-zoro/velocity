@@ -573,7 +573,7 @@ mod tests {
             .editor_mut()
             .run("auto_complete", &json!({}))
             .expect("complete");
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !a.workspace.editor().completion.visible() {
             a.workspace.editor_mut().poll_language();
             a.workspace.editor_mut().poll_completion();
@@ -618,7 +618,7 @@ mod tests {
         a.run_named(None, "add_folder", &json!({"dir": root}));
         a.panels.side_visible = true;
         let deep = root.join("src/render/deep/ab");
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             let _ = a.panels.reveal_sidebar_path(&mut a.workspace, deep.clone());
             let viewport = a.viewport();
@@ -735,7 +735,7 @@ mod tests {
     }
     /// Frames until the visible tabs finished loading and decoding.
     fn settle_images(a: &mut App) {
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             a.workspace.poll();
             a.scene();
@@ -893,7 +893,7 @@ mod tests {
         for path in [&first, &broken, &second] {
             open_path(&mut a, path);
         }
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.workspace.tabs.iter().any(|t| t.binary_loading.is_some()) {
             a.workspace.poll();
             assert!(Instant::now() < deadline);
@@ -996,7 +996,7 @@ mod tests {
             .unwrap()
             .set_modified(stamp + std::time::Duration::from_secs(2))
             .unwrap();
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.panels.message != "9 × 3" {
             assert!(Instant::now() < deadline, "{}", a.panels.message);
             a.workspace.poll();
@@ -1316,7 +1316,7 @@ mod overlay_first_frames {
             Instant::now(),
             viewport,
         ));
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         let mut frames_with_rows = 0;
         let mut settled = 0;
         while settled < 5 {

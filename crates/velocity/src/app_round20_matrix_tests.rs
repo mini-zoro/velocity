@@ -481,7 +481,7 @@ fn frame(a: &mut App) {
     a.sync_active_view();
 }
 fn pump(a: &mut App, obs: &mut Obs, ready: impl Fn(&App) -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         frame(a);
         let t = &a.workspace.tabs[a.workspace.active];

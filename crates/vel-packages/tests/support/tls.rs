@@ -8,6 +8,10 @@ use std::{
 };
 use vel_packages::https::HttpsClient;
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 #[derive(Debug)]
 pub struct Server {
     pub root: tempfile::TempDir,
@@ -58,7 +62,7 @@ impl Server {
             .stderr(fs::File::create(&server_log).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + HANG_GUARD;
         // The fixture creates the ready file before it writes the port, so wait until
         // the content parses instead of only until the file exists.
         let port: u16 = loop {

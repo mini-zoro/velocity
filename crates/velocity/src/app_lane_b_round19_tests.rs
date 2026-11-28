@@ -328,7 +328,7 @@ fn r19_edit_settings_key_path_groups_readonly_creation_and_live_reload() {
         .run("insert", &json!({"characters":"{\"font_size\":19}"}))
         .unwrap();
     settings.save(right, None).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.editor().preferences.font_size != 19. {
         a.workspace.poll();
         assert!(Instant::now() < deadline, "{:?}", a.workspace.messages);
@@ -543,7 +543,7 @@ fn r19_bad_user_json_reports_file_and_line_without_modal() {
             .unwrap();
         w.save(index, None).unwrap();
         let revision = a.workspace.resource_revision;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         loop {
             a.workspace.poll();
             assert!(
@@ -601,7 +601,7 @@ fn r19_group_moves_preserve_selection_folds_dirty_and_scroll_anchor() {
     editor.set_selection(vel_buffer::Selection::from_regions([
         vel_buffer::Region::new(4, 12),
     ]));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.editor_mut().run("fold", &json!({})).is_err() {
         assert!(Instant::now() < deadline);
         a.workspace.poll();
@@ -635,7 +635,7 @@ fn r19_app_sustained_build_output_has_steady_progress_and_lossless_tail() {
         "exec",
         json!({"cmd":["/usr/bin/perl","-e",source.replace('$',r"\$")],"file_regex":"^([^:]+):([0-9]+):([0-9]+): (.*)$"}),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     let mut active = false;
     let mut polls = 0;
     let mut updates = 0;

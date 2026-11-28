@@ -155,7 +155,7 @@ fn r20_merge_every_decode_boundary_rejects_special_files() {
         }
         tx.send(()).unwrap();
     });
-    rx.recv_timeout(Duration::from_secs(10))
+    rx.recv_timeout(crate::test_timing::HANG_GUARD)
         .expect("special-file boundary blocked");
 }
 

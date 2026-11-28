@@ -124,7 +124,7 @@ fn b19_restored_lazy_clone_attaches_rebased_selection_and_folds() {
         .set_selection(vel_buffer::Selection::from_regions([
             vel_buffer::Region::new(4, 12),
         ]));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a.workspace.editor().folded().is_empty() {
         named(&mut a, "fold", json!({}));
         a.workspace.poll();

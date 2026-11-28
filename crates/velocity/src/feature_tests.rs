@@ -22,7 +22,7 @@ fn editor(source: &str, syntax: &str) -> Editor {
     e
 }
 fn ready(e: &mut Editor) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         e.poll_language();
         if e.language.borrow().as_ref().is_some_and(|l| l.ready()) {
@@ -144,7 +144,7 @@ fn metadata_autoindent_reindent_and_stale_reindent_preserve_edits() {
         .set(Layer::View, "translate_tabs_to_spaces", json!(true));
     e.sync();
     e.run("reindent", &json!({})).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while e.reindent_job.is_some() {
         e.poll_language();
         assert!(Instant::now() < deadline);
@@ -195,7 +195,7 @@ fn transformed_symbols_populate_goto_and_preview_cancellation() {
             viewport.clone(),
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while panels.quick.items.is_empty() {
         panels.poll(&mut workspace, viewport.clone());
         assert!(Instant::now() < deadline);
@@ -346,7 +346,7 @@ fn scheme_decorations_and_font_options_reach_scene_and_minimap() {
         .recolor(scheme.clone(), e.text.clone(), 4);
     ready(&mut e);
     let mut v = view();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     let scene = loop {
         let scene = v.scene(&e);
         if scene.layers[0].text.iter().any(|r| r.style.bold) {

@@ -2,6 +2,10 @@
 use encoding_rs::{UTF_8, UTF_16BE, UTF_16LE};
 use vel_fileio::{self as io, DecodeOptions, PrefixFacts};
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[path = "support/decoding.rs"]
 mod model;
 use model::{expected, samples};
@@ -58,9 +62,7 @@ fn decode_policy_exhaustive_inputs_and_streaming_table() {
                             let task =
                                 io::load_background_with_options(path.clone(), options.clone())
                                     .unwrap();
-                            task.result
-                                .recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap()
+                            task.result.recv_timeout(HANG_GUARD).unwrap()
                         } else {
                             io::load_with_options(&path, &options, |_| {})
                         };

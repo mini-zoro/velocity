@@ -122,7 +122,7 @@ fn palette_settings(app: &mut App, caption: &str) {
         "show_overlay",
         &json!({"overlay": "command_palette", "text": caption}),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while app.panels.ranking_pending() {
         let viewport = app.viewport();
         app.panels.poll(&mut app.workspace, viewport);

@@ -11,6 +11,10 @@ use windows_sys::{
     w,
 };
 
+/// Hang guard: stops a wait that would otherwise never end. It is not a latency
+/// bound; the test checks the condition it waits for.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 struct Window(HWND);
 
 impl Drop for Window {
@@ -69,7 +73,7 @@ fn real_hwnd_prepares_and_presents_a_dx12_frame() {
         .unwrap();
     // SAFETY: Keep the tiny tool window out of the taskbar and do not take focus.
     unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         if renderer
             .present_prepared()

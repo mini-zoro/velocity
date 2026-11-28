@@ -9,7 +9,7 @@ fn wait(
     view: &mut View,
     ready: impl Fn(&Workspace, &Panels) -> bool,
 ) {
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         std::hint::black_box(view.scene(workspace.editor()));
         workspace.poll();
@@ -528,7 +528,7 @@ fn cloned_viewports_keep_independent_spelling_requests_without_an_idle_work_loop
         12.,
     );
     second.scroll_y = 100. * second.line_height;
-    let until = Instant::now() + Duration::from_secs(15);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         w.prepare_sheet(0).unwrap();
         std::hint::black_box(v.scene(&w.tabs[0].editor));

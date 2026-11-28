@@ -20,7 +20,7 @@ fn editor(source: &str, syntax: &str) -> Editor {
     e
 }
 fn ready(e: &mut Editor) {
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while !e.language.borrow().as_ref().unwrap().ready()
         || e.language.borrow().as_ref().unwrap().analysis.is_none()
     {

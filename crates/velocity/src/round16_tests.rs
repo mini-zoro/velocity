@@ -20,7 +20,7 @@ fn editor(source: &str, syntax: &str) -> Editor {
         Arc::new(ColorScheme::velocity_dark()),
     )
     .unwrap();
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while !e.language.borrow().as_ref().unwrap().ready() {
         e.poll_language();
         assert!(Instant::now() < until);
@@ -401,7 +401,7 @@ fn spelling_navigation_does_not_enable_spell_check() {
     assert!(!w.editor().settings.bool("spell_check", false));
     p.review_action(&mut w, "navigate_misspelling", &json!({"forward":true}))
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while w.editor().selection().is_empty() {
         v.scene(w.editor());
         w.poll();
@@ -571,7 +571,7 @@ fn vintage_insert_pair_deletion_arrows_and_indent_match_ordinary_editing() {
         .unwrap();
     e.completion.set_engine(Arc::new(engine));
     e.run("auto_complete", &json!({})).unwrap();
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + crate::test_timing::HANG_GUARD;
     while e.completion.busy() || !e.completion.visible() {
         e.poll_language();
         e.poll_completion();

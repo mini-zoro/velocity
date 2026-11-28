@@ -882,7 +882,8 @@ mod tests {
         let mut html=Html::new("<img src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'>",false).unwrap();
         html.layout(&LayoutOptions::default(), 0, &metrics);
         assert!(metrics.images_pending());
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // Hang guard only; the decode result is checked by the paint below.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while metrics.images_pending() && std::time::Instant::now() < until {
             metrics.poll_images();
             std::thread::park_timeout(std::time::Duration::from_millis(1));

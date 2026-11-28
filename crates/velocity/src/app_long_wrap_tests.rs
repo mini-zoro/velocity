@@ -22,7 +22,7 @@ fn ordinary_fold_button_repaints_use_the_existing_line_text() {
     named(&mut a, "fold_by_level", json!({"level":1}));
     assert!(!a.workspace.editor().folded().is_empty());
     key(&mut a, "super+right");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         let gutter = a.view.gutter(a.workspace.editor());
         let scene = a.scene();

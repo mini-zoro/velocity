@@ -32,7 +32,7 @@ fn type_text(e: &mut Editor, value: &str) {
 }
 
 fn ready(e: &mut Editor, condition: impl Fn(&Editor) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !condition(e) {
         e.poll_language();
         e.poll_completion();

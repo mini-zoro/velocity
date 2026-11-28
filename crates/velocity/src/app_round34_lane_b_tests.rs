@@ -151,7 +151,7 @@ fn r34_sidebar_cross_group_and_right_geometry() {
         let width = a.panels.side_bounds.width;
         assert_eq!(a.workbench_bounds.x, width);
         pref(&mut a, "sidebar_on_right", json!(true));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while !a.panels.sidebar_has_row(&target) {
             a.panels.poll(&mut a.workspace, 0..0);
             assert!(Instant::now() < deadline, "sidebar did not publish");
@@ -400,7 +400,7 @@ fn r34_fold_style_and_trailing_newline() {
     let text = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
     let mut a = app(text, None, None);
     a.workspace.set_file_type("Rust").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while !a
         .workspace
         .editor()
@@ -554,7 +554,7 @@ fn r34_goto_file_preview_off_still_accepts_target() {
             &json!({"overlay":"goto","text":"target.txt:2"}),
         );
         assert_eq!(a.panels.overlay, Some(Overlay::Goto));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
         while a.panels.ranking_pending() || a.panels.quick.items.is_empty() {
             a.panels.poll(&mut a.workspace, 0..0);
             assert!(Instant::now() < deadline, "Goto results did not publish");

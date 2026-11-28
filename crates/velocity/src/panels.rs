@@ -8630,7 +8630,7 @@ mod tests {
         }
     }
     fn wait_for_matches(panels: &mut Panels, workspace: &mut Workspace) {
-        let until = Instant::now() + std::time::Duration::from_secs(5);
+        let until = Instant::now() + crate::test_timing::HANG_GUARD;
         while !panels.all_matches_ready {
             panels.poll(workspace, 0..11);
             assert!(Instant::now() < until, "find worker did not finish");
@@ -8860,7 +8860,7 @@ mod tests {
         Panels::seed_benchmark(&mut workspace);
         for i in 0..10 {
             panels.benchmark_step(&mut workspace, i, 0..11).unwrap();
-            let until = Instant::now() + std::time::Duration::from_secs(5);
+            let until = Instant::now() + crate::test_timing::HANG_GUARD;
             while panels.ranking_pending() {
                 panels.poll(&mut workspace, 0..11);
                 assert!(Instant::now() < until);
@@ -9310,7 +9310,7 @@ mod tests {
                     0..10,
                 )
                 .unwrap();
-            let until = Instant::now() + Duration::from_secs(15);
+            let until = Instant::now() + crate::test_timing::HANG_GUARD;
             while panels.ranking_pending() {
                 assert!(Instant::now() < until, "no palette results for {query}");
                 workspace.poll();

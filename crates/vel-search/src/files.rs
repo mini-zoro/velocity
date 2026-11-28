@@ -1030,6 +1030,9 @@ impl FileChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hang guard: stops a wait that would otherwise never end. It is not a latency
+    /// bound; the test checks the condition it waits for.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
     #[test]
     fn memory_trim_preserves_find_result_rows_and_navigation() {
@@ -1200,7 +1203,7 @@ mod tests {
                 context: 0,
             })
             .unwrap();
-            let timeout = Duration::from_secs(10);
+            let timeout = HANG_GUARD;
             assert!(matches!(
                 task.events.recv_timeout(timeout),
                 Ok(Event::Line(_))
@@ -1393,7 +1396,7 @@ mod tests {
             context: 0,
         })
         .unwrap();
-        let timeout = Duration::from_secs(10);
+        let timeout = HANG_GUARD;
         let Event::Line(hit) = task.events.recv_timeout(timeout).unwrap() else {
             panic!("expected one result");
         };
@@ -1520,7 +1523,7 @@ mod tests {
         .unwrap();
         let mut lines = BTreeSet::new();
         loop {
-            match task.events.recv_timeout(Duration::from_secs(30)).unwrap() {
+            match task.events.recv_timeout(HANG_GUARD).unwrap() {
                 Event::Line(line) => assert!(lines.insert((line.path.to_path_buf(), line.text))),
                 Event::Error(error) => panic!("{error}"),
                 Event::Done { matches, files } => {
@@ -1569,7 +1572,7 @@ mod tests {
         .unwrap();
         let mut lines = Vec::new();
         loop {
-            match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            match task.events.recv_timeout(HANG_GUARD).unwrap() {
                 Event::Line(line) => lines.push(line),
                 Event::Error(e) => panic!("{e}"),
                 Event::Done { matches, files } => {
@@ -1691,7 +1694,7 @@ mod tests {
         .unwrap();
         let mut found = 0;
         loop {
-            match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            match task.events.recv_timeout(HANG_GUARD).unwrap() {
                 Event::Line(line) => {
                     assert_eq!(line.path.as_ref(), Path::new("unsaved.rs"));
                     found += 1;
@@ -1791,7 +1794,7 @@ mod tests {
             .unwrap();
             let mut found = Vec::new();
             loop {
-                match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                match task.events.recv_timeout(HANG_GUARD).unwrap() {
                     Event::Line(line) => found.push(line.path),
                     Event::Error(e) => panic!("{e}"),
                     Event::Done { matches, files } => {
@@ -1882,7 +1885,7 @@ mod tests {
             .unwrap();
             let mut found = 0;
             loop {
-                match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                match task.events.recv_timeout(HANG_GUARD).unwrap() {
                     Event::Line(_) => found += 1,
                     Event::Error(error) => panic!("{error}"),
                     Event::Done { matches, files } => {

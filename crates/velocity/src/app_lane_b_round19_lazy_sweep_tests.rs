@@ -183,7 +183,7 @@ fn click_tab(a: &mut App, sheet: u64, button: usize, modifiers: u64) -> bool {
     true
 }
 fn wait_loaded(a: &mut App) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_timing::HANG_GUARD;
     while a
         .workspace
         .tabs

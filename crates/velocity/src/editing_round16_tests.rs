@@ -20,7 +20,7 @@ fn editor(source: &str, syntax: &str) -> Editor {
     e
 }
 fn ready(e: &mut Editor) {
-    let end = Instant::now() + Duration::from_secs(15);
+    let end = Instant::now() + crate::test_timing::HANG_GUARD;
     loop {
         e.poll_language();
         if e.language.borrow().as_ref().is_some_and(|l| l.ready()) {
