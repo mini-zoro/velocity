@@ -184,17 +184,18 @@ final class MemorySession {
 
     func footprint() -> UInt64 { footprintBytes(pid) ?? 0 }
 
-    /// Samples until three consecutive readings 0.5 s apart stay within 256 KiB, after
-    /// at least `minimum` seconds (the drawable pool trims 350 ms after the last frame).
-    func settle(minimum: Double = 2.5, timeout: Double = 30) -> UInt64 {
+    /// Samples until six consecutive readings 0.5 s apart stay within 512 KiB, after at
+    /// least `minimum` seconds: the drawable pool trims 350 ms after the last frame, and
+    /// index, highlight and allocator work settle within a few seconds.
+    func settle(minimum: Double = 4, timeout: Double = 45) -> UInt64 {
         sleep(seconds: minimum)
         var readings: [UInt64] = [footprint()]
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             sleep(seconds: 0.5)
             readings.append(footprint())
-            let last = readings.suffix(3)
-            if last.count == 3, let low = last.min(), let high = last.max(), high - low <= 256 * 1024 {
+            let last = readings.suffix(6)
+            if last.count == 6, let low = last.min(), let high = last.max(), high - low <= 512 * 1024 {
                 return last.last!
             }
         }
@@ -275,10 +276,17 @@ final class MemorySession {
     /// Drawables and window-sized textures in each visibility state (diagnostic only).
     func drawableStates() {
         report.note("\(build.label) drawables idle", detail: surfaces())
-        for _ in 0..<15 { command("move", #"{"by":"lines","forward":true}"#) }
-        report.note("\(build.label) drawables right after a burst", detail: surfaces())
+        // Opening and closing a tab animates the tab strip: a burst of display-link
+        // frames, which raises the pool to three drawables.
+        for _ in 0..<2 {
+            command("new_file")
+            command("close")
+        }
+        report.note("\(build.label) drawables right after a tab-strip burst", detail: surfaces())
+        sleep(seconds: 1)
+        report.note("\(build.label) drawables 1 s after the burst", detail: surfaces())
         sleep(seconds: 3)
-        report.note("\(build.label) drawables 3 s after the burst", detail: surfaces())
+        report.note("\(build.label) drawables 4 s after the burst", detail: surfaces())
         command("move", #"{"by":"lines","forward":true}"#)
         sleep(seconds: 2)
         report.note("\(build.label) drawables after one isolated frame", detail: surfaces())
@@ -369,7 +377,7 @@ func scenarioMemory(_ options: ArraySlice<String>) -> Never {
         // Minimizing a window goes through AX; the probe normally grants this.
         report.info("AX grant", detail: grantAccessibility(to: CommandLine.arguments[0]))
     }
-    let rounds = max(1, Int(env["E2E_MEMORY_ROUNDS"] ?? "") ?? 2)
+    let explicitRounds = Int(env["E2E_MEMORY_ROUNDS"] ?? "")
     var singleLimit = defaultSingleLimitMiB
     var windowLimit = defaultWindowLimitMiB
     for pair in (env["E2E_MEMORY_LIMITS"] ?? "").split(separator: ",") {
@@ -379,6 +387,8 @@ func scenarioMemory(_ options: ArraySlice<String>) -> Never {
         if parts[0] == "window" { windowLimit = value }
     }
     let builds = memoryBuilds(env, root: root)
+    // An A/B comparison takes the median of three sessions per build.
+    let rounds = max(1, explicitRounds ?? (builds.count > 1 ? 3 : 2))
     report.info("screens", detail: NSScreen.screens.map { "\($0.frame.width)x\($0.frame.height)@\($0.backingScaleFactor)x" }.joined(separator: ", "))
     report.info("builds", detail: "\(builds.count): " + builds.map { "\($0.label)=\($0.launcher.path)" }.joined(separator: " ")
         + " (E2E_MEMORY_LAUNCHERS=\(env["E2E_MEMORY_LAUNCHERS"] ?? "unset") E2E_VELOCITY=\(env["E2E_VELOCITY"] ?? "unset") rounds=\(rounds))")
