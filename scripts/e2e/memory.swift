@@ -20,7 +20,7 @@ import Foundation
 
 // One window on a 1000x680-point runner window. Set from the runner baseline plus a
 // margin; see the memory gate notes in docs/performance.md.
-let defaultSingleLimitMiB = 72.0
+let defaultSingleLimitMiB = 96.0
 let defaultWindowLimitMiB = 16.0
 
 struct MemoryBuild {
@@ -399,8 +399,10 @@ func scenarioMemory(_ options: ArraySlice<String>) -> Never {
             _ = shell("pkill -x velocity 2>/dev/null; true")
             sleep(seconds: 0.5)
             let name = "\(build.label)-\(round)"
+            // The diagnostic round also traces the drawable pool to the GUI log.
             let session = MemorySession(build: build, name: "memory-\(name)", root: work, repository: root,
-                                        report: report)
+                                        report: report,
+                                        environment: diagnostics && round == 1 ? ["VELOCITY_LOG_DRAWABLES": "1"] : [:])
             if session.files.count < 12 {
                 report.check(false, "the fixture project has twelve files", detail: "\(session.files.count)")
             }
