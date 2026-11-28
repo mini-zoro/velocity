@@ -2253,11 +2253,21 @@ impl Workspace {
         preferred_languages: crate::ui_language::PreferredLanguages,
         phases: &mut crate::report::StartupPhases,
     ) -> Result<Self, String> {
+        // Another interactive window shares the syntax set and preference metadata the
+        // first one decoded from the binary (the same corpus as the legacy loader),
+        // with their compiled contexts, regex machines and caches. Loading the legacy
+        // copy instead cost each later window's process a second syntax set (4.6 MB)
+        // and a second set of caches (2026-11-28 runner call trees).
+        let kind = if watch && crate::language::Assets::packed_ready() {
+            ConfigKind::InteractiveReload
+        } else {
+            ConfigKind::Eager
+        };
         Self::new_with_configuration(
             text,
             data_dir,
             project,
-            (watch, ConfigKind::Eager),
+            (watch, kind),
             window_overrides,
             preferred_languages,
             phases,
