@@ -83,8 +83,13 @@ impl TabDrag {
         self.started = at;
     }
 
-    fn catching_up(&self, now: Instant) -> bool {
-        self.floating && self.lead != Point::default() && self.progress(now) < 1.
+    /// Advances the anchor to `now`; once the lead is closed it is dropped for good.
+    fn settle(&mut self, now: Instant) -> Point {
+        let anchor = self.anchor(now);
+        if self.progress(now) >= 1. {
+            self.lead = Point::default();
+        }
+        anchor
     }
 }
 
@@ -304,6 +309,10 @@ impl App {
         }
         if let Some(window) = window {
             window.request_frame();
+            // Pointer moves close the lead; this frame closes it if the pointer stops.
+            if floating {
+                window.request_frame_at(Instant::now() + CATCH_UP);
+            }
         }
         true
     }
@@ -365,7 +374,7 @@ impl App {
         if drag.floating
             && let Some(window) = window
         {
-            window.move_drag_image(drag.anchor(Instant::now()));
+            window.move_drag_image(drag.settle(Instant::now()));
         }
         if let Some(press) = &mut self.tab_press {
             press.drag = Some(drag);
@@ -472,18 +481,23 @@ impl App {
     }
 
     /// Closes the threshold lead between pointer events, from the frame loop.
-    pub(super) fn catch_up_tab_drag(&self, window: Option<&WindowHandle>, now: Instant) {
-        let Some(drag) = self.tab_press.as_ref().and_then(|press| press.drag) else {
+    /// Closes the rest of the threshold lead when the pointer stopped during it.
+    pub(super) fn catch_up_tab_drag(&mut self, window: Option<&WindowHandle>, now: Instant) {
+        let Some(drag) = self
+            .tab_press
+            .as_mut()
+            .and_then(|press| press.drag.as_mut())
+            .filter(|drag| drag.floating && drag.lead != Point::default())
+        else {
             return;
         };
-        if let Some(window) = window
-            && drag.floating
-            && drag.lead != Point::default()
-            && drag.started + CATCH_UP + CATCH_UP / 2 > now
-        {
-            window.move_drag_image(drag.anchor(now));
-            if drag.catching_up(now) {
-                window.request_frame();
+        let anchor = drag.settle(now);
+        let pending = drag.lead != Point::default();
+        let due = drag.started + CATCH_UP;
+        if let Some(window) = window {
+            window.move_drag_image(anchor);
+            if pending {
+                window.request_frame_at(due);
             }
         }
     }
