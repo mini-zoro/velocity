@@ -18,10 +18,12 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-// One window on a 1000x680-point runner window. Set from the runner baseline plus a
-// margin; see the memory gate notes in docs/performance.md.
-let defaultSingleLimitMiB = 96.0
-let defaultWindowLimitMiB = 16.0
+// Runner baseline (2026-11-28, macOS 15, 1024x768 at 1x): 87-91 MiB for one window
+// (main was 122-127 MiB) and 6-11 MiB for each further window; the limits leave about
+// 7% and 2 MiB of room. See "Memory gate" in docs/performance.md for how they map
+// to a Retina Mac.
+let defaultSingleLimitMiB = 95.0
+let defaultWindowLimitMiB = 12.0
 
 struct MemoryBuild {
     let label: String
