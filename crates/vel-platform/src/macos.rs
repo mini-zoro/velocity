@@ -118,17 +118,22 @@ pub(super) fn queue_memory_pressure(level: MemoryPressure) {
     }
 }
 impl WindowHandle {
-    /// Displays a floating drag image without activating or capturing input.
-    pub fn show_drag_image(&self, image: &DragImage, point: Point, grab: Point) {
-        drag_image::show(self.0.mtm, image, point, grab);
+    /// Uploads a floating drag image without showing it. `grab` is the pointer's
+    /// offset inside the image; the next `move_drag_image` shows it there.
+    pub fn load_drag_image(&self, image: &DragImage, grab: Point) {
+        drag_image::load(self.0.mtm, image, grab);
     }
-    /// Moves an existing drag image, showing it again if paused.
+    /// Moves the loaded drag image, showing it without activating or capturing input.
     pub fn move_drag_image(&self, point: Point) {
         drag_image::follow(point);
     }
-    /// Hides the drag image but retains its pixels until the gesture ends.
-    pub fn pause_drag_image(&self) {
-        drag_image::hide(false);
+    /// The pointer's current screen location (as `screen_point` returns it), read
+    /// without waiting for queued events, and when it was read, in the units of
+    /// `MouseEvent::timestamp`.
+    pub fn pointer_screen_location(&self) -> Option<(Point, f64)> {
+        let p = NSEvent::mouseLocation();
+        let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+        Some((Point { x: p.x, y: p.y }, now))
     }
     /// Hides the drag image and releases its pixels.
     pub fn hide_drag_image(&self) {

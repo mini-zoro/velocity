@@ -73,6 +73,27 @@ final class Report: @unchecked Sendable {
     }
 }
 
+// MARK: - Crash diagnostics
+
+private let crashFrames = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: 128)
+private let crashBanner = Array("CRASH: fatal signal in the e2e driver; backtrace (the last line above is the last checkpoint):\n".utf8)
+
+/// On a fatal signal, writes a symbolized backtrace to stderr (only async-signal-safe
+/// calls on preallocated storage), then re-raises it so the default action and the
+/// system crash report still happen.
+func installCrashReporter() {
+    _ = crashFrames
+    _ = crashBanner
+    for sig in [SIGTRAP, SIGILL, SIGSEGV, SIGBUS, SIGABRT, SIGFPE] {
+        signal(sig) { code in
+            crashBanner.withUnsafeBufferPointer { _ = write(2, $0.baseAddress, $0.count) }
+            backtrace_symbols_fd(crashFrames, backtrace(crashFrames, 128), 2)
+            signal(code, SIG_DFL)
+            raise(code)
+        }
+    }
+}
+
 func fail(_ message: String) -> Never {
     print("ERROR \(message)")
     fflush(stdout)

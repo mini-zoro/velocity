@@ -248,8 +248,8 @@ pub struct App {
     tab_painted: Vec<(u64, usize, f64)>,
     tab_press: Option<tab_drag::TabPress>,
     tab_slides: Option<tab_drag::TabSlides>,
-    /// The platform-owned popup is fed once per detached gesture and hidden over a target strip.
-    drag_image: Option<vel_platform::DragImage>,
+    /// A released tab easing into its slot before the order changes.
+    tab_landing: Option<tab_drag::TabLanding>,
     shared_drag_slot: Option<crate::session::DragSlot>,
     tear_off_anchor: Option<Point>,
     #[cfg(test)]
@@ -519,7 +519,7 @@ impl App {
             tab_painted: Vec::new(),
             tab_press: None,
             tab_slides: None,
-            drag_image: None,
+            tab_landing: None,
             shared_drag_slot: None,
             tear_off_anchor: None,
             #[cfg(test)]
@@ -1850,7 +1850,7 @@ impl App {
         viewport: std::ops::Range<usize>,
     ) -> bool {
         self.ensure_startup_services();
-        if key.name == "escape" && self.cancel_tab_drag(window) {
+        if key.name == "escape" && self.return_tab_drag(window) {
             return true;
         }
         if self.tab_rename.is_some() {
@@ -4717,30 +4717,21 @@ impl App {
                         width: (tab_width - 1.).max(tab_width * 0.5),
                         height: bar.height,
                     };
-                    let lifted = self.lifted_tab_x(shared_tab.as_ref(), *sheet, bar, rect.width);
-                    if let Some(x) = lifted {
-                        rect.x = x;
-                        rect.width = rect.width.min(bar.width);
-                        if let Some(shared) =
-                            shared_tab.as_ref().filter(|drag| drag.tab.sheet == *sheet)
-                        {
+                    if let Some(shared) =
+                        shared_tab.as_ref().filter(|drag| drag.tab.sheet == *sheet)
+                    {
+                        // The floating image is the tab; the strip only keeps its gap.
+                        if !shared.floating {
+                            rect.width = rect.width.min(bar.width);
                             self.paint_lifted_tab(&mut lifted_tab, &shared.tab, rect, bar);
-                        } else if let Some(index) = self.workspace.sheet_index(*sheet) {
-                            self.paint_lifted_tab(
-                                &mut lifted_tab,
-                                &self.drag_tab_presentation(index),
-                                rect,
-                                bar,
-                            );
                         }
                         if self.workspace.sheet_index(*sheet).is_some() {
                             self.tab_hits.push((*sheet, rect));
                             self.tab_painted.push((*sheet, group_index, rect.x));
                         }
                         continue;
-                    } else {
-                        rect.x = self.sliding_tab_x(*sheet, group_index, rect.x, now);
                     }
+                    rect.x = self.sliding_tab_x(*sheet, group_index, rect.x, now);
                     let Some(index) = self.workspace.sheet_index(*sheet) else {
                         continue;
                     };
@@ -6121,7 +6112,7 @@ impl AppHandler for App {
         if self.ime_command(Some(w), command) {
             return;
         }
-        if command == Command::Cancel && self.cancel_tab_drag(Some(w)) {
+        if command == Command::Cancel && self.return_tab_drag(Some(w)) {
             return;
         }
         self.cancel_context(w);
@@ -6725,6 +6716,9 @@ impl AppHandler for App {
                 query = Some(b.completed as u32);
             }
         }
+        self.follow_live_pointer(Some(w));
+        self.catch_up_tab_drag(Some(w), Instant::now());
+        self.advance_tab_landing(Some(w), Instant::now());
         let scene = self.render_scene();
         self.publish_tab_strips(Some(w));
         if self.tab_slides_active(Instant::now()) {
@@ -6743,6 +6737,10 @@ impl AppHandler for App {
             w.scale_factor() as f32,
             query,
         )?;
+        self.follow_live_pointer(Some(w));
+        // A pressed tab's floating image renders after the frame showing the press.
+        self.prepare_tab_image(Some(w));
+        self.release_landed_tab_image(Some(w), Instant::now(), result.is_some());
         if let Some(times) = result {
             self.record(w, times, ctx.received)?;
         } else {

@@ -11,6 +11,12 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+// Line-buffered output and a backtrace on a fatal signal: run.sh pipes stdout into
+// tee, so a crash must not lose the lines before it, and an optimized Swift trap
+// prints no message of its own.
+setvbuf(stdout, nil, _IOLBF, 0)
+installCrashReporter()
+
 _ = NSApplication.shared
 NSApp.setActivationPolicy(.prohibited)
 
@@ -434,6 +440,7 @@ case "scenario":
     case "activate": scenarioActivate(options.dropFirst())
     case "background": scenarioBackground(options.dropFirst())
     case "footprint": scenarioFootprint(options.dropFirst())
+    case "tabdrag": scenarioTabDrag(options.dropFirst())
     case "startup": scenarioStartup(options.dropFirst())
     default: fail("unknown scenario \(name)")
     }

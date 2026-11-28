@@ -91,7 +91,9 @@ impl Drop for Popup {
     }
 }
 
-pub(super) fn show(image: &DragImage, screen: Point, grab: Point) {
+/// Uploads the image into the hidden popup; the next `follow` moves and shows it,
+/// so the first visible frame does no pixel work.
+pub(super) fn load(image: &DragImage, grab: Point) {
     let Some(size) = i32::try_from(image.width)
         .ok()
         .zip(i32::try_from(image.height).ok())
@@ -116,17 +118,17 @@ pub(super) fn show(image: &DragImage, screen: Point, grab: Point) {
             *slot = Popup::new();
         }
         let Some(popup) = slot.as_mut() else { return };
+        if popup.visible {
+            // SAFETY: This GUI thread owns the HWND.
+            unsafe { ShowWindow(popup.hwnd, SW_HIDE) };
+            popup.visible = false;
+        }
         popup.grab = Point {
             x: grab.x * image.scale,
             y: grab.y * image.scale,
         };
-        let origin = popup.origin(screen);
-        if upload(popup.hwnd, size, origin, &image.rgba) {
-            popup.loaded = true;
-            // SAFETY: Show the newly uploaded popup without activating it.
-            unsafe { ShowWindow(popup.hwnd, SW_SHOWNOACTIVATE) };
-            popup.visible = true;
-        }
+        // A hidden layered window keeps the uploaded bitmap until it is shown.
+        popup.loaded = upload(popup.hwnd, size, POINT::default(), &image.rgba);
     });
 }
 

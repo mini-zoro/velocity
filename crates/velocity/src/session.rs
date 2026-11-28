@@ -89,10 +89,10 @@ pub struct Policy {
 pub(crate) struct ScreenTabStrip {
     pub group: usize,
     pub bounds: Rect,
+    /// Screen y of the strip's top edge, in the window system's own direction.
+    pub top_y: f64,
     pub origin: f64,
     pub step: f64,
-    pub view_x: f64,
-    pub x_scale: f64,
     pub sheets: Vec<u64>,
 }
 
@@ -118,8 +118,17 @@ pub(crate) struct SharedTabDrag {
     pub source: u64,
     pub tab: std::rc::Rc<DragTab>,
     pub slot: Option<DragSlot>,
-    pub pointer_x: f64,
-    pub grab_x: f64,
+    /// The source window's floating image shows the tab, so strips only leave a gap.
+    pub floating: bool,
+}
+
+/// A landed tab's floating image waits until the window that now paints the tab
+/// has presented a frame, so the hand-off never shows an empty slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DragImageHide {
+    pub window: u64,
+    pub after: std::time::Instant,
+    pub rendered: bool,
 }
 
 type TabTransfer = (usize, Option<usize>, crate::workspace::Tab);
@@ -172,6 +181,7 @@ pub struct Sessions {
     pub(crate) tab_strips: BTreeMap<u64, Vec<ScreenTabStrip>>,
     /// One process-wide tab drag. The native pointer remains captured by its source view.
     pub(crate) tab_drag: Option<SharedTabDrag>,
+    pub(crate) drag_image_hide: Option<DragImageHide>,
     pub(crate) menu_merges: BTreeMap<u64, u64>,
     pub(crate) persist_project_workspaces: bool,
     /// The one Settings window, by its window ID. It has no session state of its own and is
@@ -262,6 +272,7 @@ impl Sessions {
             handles: BTreeMap::new(),
             tab_strips: BTreeMap::new(),
             tab_drag: None,
+            drag_image_hide: None,
             menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
             settings_window: None,
@@ -419,6 +430,15 @@ impl Sessions {
     }
 
     pub(crate) fn cancel_window_tab_drag(&mut self, window: u64) {
+        if self
+            .drag_image_hide
+            .is_some_and(|hide| hide.window == window)
+        {
+            self.drag_image_hide = None;
+            if let Some(handle) = self.handles.get(&window) {
+                handle.hide_drag_image();
+            }
+        }
         if let Some(drag) = &self.tab_drag
             && (drag.source == window || drag.slot.is_some_and(|slot| slot.window == window))
         {
@@ -1540,10 +1560,9 @@ mod tab_drag_tests {
                 width: 240.,
                 height: 32.,
             },
+            top_y: 50.,
             origin: x,
             step: 80.,
-            view_x: 0.,
-            x_scale: 1.,
             sheets: vec![41, 42],
         };
         sessions.tab_strips.insert(first, vec![strip(100.)]);

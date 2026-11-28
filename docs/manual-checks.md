@@ -260,17 +260,22 @@ Compare side by side with Typora's Preferences window.
       window, and return. On macOS, enable Reduce Motion and try `smooth`, then enable Prefer
       Non-Blinking Cursor (where available). On Windows, change the keyboard cursor blink rate
       and set it to None; check that Velocity follows both.
-- [ ] Click and slightly wiggle a tab without moving it. Drag past a neighbouring tab's edge
-      and then midpoint: the order should change only at the midpoint. Pause or reverse near
-      that point with partially scrolled tabs. The lifted card should follow within the strip;
-      neighbours should slide briefly, or jump with Reduce Motion. Repeat in light and dark.
+- [ ] Click and slightly wiggle a tab without moving it. Then drag it diagonally: from the
+      first move the tab floats in place without a jump or flicker and follows the pointer up,
+      down and sideways; its strip keeps a gap. Drag past a neighbouring tab's edge and then
+      midpoint: the gap moves only at the midpoint. Pause or reverse near that point with
+      partially scrolled tabs. Release over the strip: the tab eases into the gap (about
+      120 ms) without a flash; neighbours slide briefly, or everything snaps with Reduce
+      Motion. Repeat in light and dark, and on a 120 Hz (ProMotion) display.
 - [ ] Drag across a second group's editor and then over its strip. Only the strip is a group
-      target. Press Escape after the preview moves and check that both groups are unchanged;
-      repeat and release to commit. Double-click and inline rename should still work.
+      target. Press Escape after the gap moves: the tab eases back and both groups are
+      unchanged; repeat and release to commit. Release just below the strip (within one tab
+      height): the tab eases home. Double-click and inline rename should still work.
 - [ ] Tear off a dirty tab by releasing over the editor and again outside the window. Check
-      the new window is placed near the pointer, has the original selection and undo history,
-      and the old window has no copy. Repeat with the last tab and both values of
-      `close_windows_when_empty`.
+      the new window is placed where the floating tab was, has the original selection and undo
+      history, and the old window has no copy. Repeat with the last tab and both values of
+      `close_windows_when_empty`. Drag between windows on two displays and with one window in
+      a full-screen Space.
 - [ ] On macOS and Windows, hover the editor, Find/Replace, command palette, inline rename, and
       Settings search/text fields for I-beams; test tabs, buttons, status bar, gutter, minimap,
       scrollbars, and menus for arrows. Drag the sidebar edge and each orientation of pane

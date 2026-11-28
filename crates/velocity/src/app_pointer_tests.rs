@@ -124,10 +124,26 @@ fn inactive_occluded_and_system_disabled_carets_have_no_deadline() {
     assert!(a.view.show_inactive_caret);
 }
 
+/// Runs a released tab's landing to its end and lets the image hand-off expire.
+fn land(app: &mut App) {
+    let end = Instant::now() + Duration::from_secs(1);
+    app.advance_tab_landing(None, end);
+    app.release_landed_tab_image(None, end + Duration::from_secs(1), true);
+}
+
+fn dragged(app: &App) -> super::tab_drag::TabDrag {
+    app.tab_press.as_ref().unwrap().drag.unwrap()
+}
+
+fn shared_slot(app: &App) -> Option<crate::session::DragSlot> {
+    app.sessions.borrow().tab_drag.as_ref().unwrap().slot
+}
+
 #[test]
-fn tab_press_threshold_lift_and_escape_restore_the_original_strip() {
+fn tab_press_threshold_floats_the_tab_and_escape_eases_it_home() {
     let mut a = app();
     a.workspace.new_file().unwrap();
+    a.window_frame = Some([600., 300., a.window_size.width, a.window_size.height]);
     a.scene();
     let order = a.workspace.workbench.groups[0].sheets.clone();
     let original = tab(&a, order[0]);
@@ -138,12 +154,110 @@ fn tab_press_threshold_lift_and_escape_restore_the_original_strip() {
     };
     mouse(&mut a, MouseKind::Down, start);
     mouse(&mut a, MouseKind::Drag, near);
-    assert!(a.tab_press.as_ref().unwrap().drag.is_none());
+    let press = a.tab_press.as_ref().unwrap();
+    assert!(press.drag.is_none());
+    // The image is ready before the threshold, so the first drag event only moves it.
+    assert_eq!(press.image, Some(true));
     mouse(&mut a, MouseKind::Up, near);
     assert!(a.tab_press.is_none() && a.torn_off_windows.is_empty());
+    assert!(a.sessions.borrow().tab_drag.is_none());
     assert_eq!(a.workspace.tabs[a.workspace.active].sheet, order[0]);
 
     mouse(&mut a, MouseKind::Down, start);
+    let lifted = Point {
+        x: start.x + 4.,
+        ..start
+    };
+    mouse(&mut a, MouseKind::Drag, lifted);
+    let drag = dragged(&a);
+    assert!(drag.floating && !drag.detached);
+    let on_screen = |p: Point| Point {
+        x: p.x + 600.,
+        y: p.y + 300.,
+    };
+    assert_eq!(drag.pointer, on_screen(lifted));
+    // At the threshold the floating tab covers the strip tab exactly (the image's
+    // grab offset puts the pointer back where it was pressed) ...
+    let began = Instant::now() - Duration::from_secs(5);
+    let fresh = |drag: super::tab_drag::TabDrag, at: Duration| {
+        let mut drag = drag;
+        drag.started_at(began);
+        drag.anchor(began + at)
+    };
+    assert_eq!(fresh(drag, Duration::ZERO), on_screen(start));
+    // ... then closes the threshold's lead on the pointer smoothly, at most half a
+    // point ahead of a still pointer per 60 Hz frame, and keeps the press-time grab
+    // offset from then on.
+    let mut last = on_screen(start);
+    for frame in 1..=13 {
+        let at = fresh(drag, Duration::from_micros(16_667 * frame));
+        assert!(
+            (at.x - last.x).abs() < 0.5,
+            "frame {frame}: {last:?} -> {at:?}"
+        );
+        assert_eq!(at.y, last.y);
+        last = at;
+    }
+    assert_eq!(last, on_screen(lifted));
+    // The tab leaves a gap exactly where it was; the floating image replaces it.
+    assert_eq!(
+        shared_slot(&a),
+        Some(crate::session::DragSlot {
+            window: a.session_id,
+            group: 0,
+            index: 0
+        })
+    );
+    let label = a
+        .sessions
+        .borrow()
+        .tab_drag
+        .as_ref()
+        .unwrap()
+        .tab
+        .label
+        .clone();
+    let label_runs = |scene: &vel_render::scene::Scene| {
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            // A tab narrower than its label paints it truncated ("first docum…").
+            .filter(|run| {
+                run.text == label
+                    || run
+                        .text
+                        .strip_suffix('…')
+                        .is_some_and(|prefix| !prefix.is_empty() && label.starts_with(prefix))
+            })
+            .count()
+    };
+    let scene = a.scene();
+    assert_eq!(tab(&a, order[0]), original);
+    assert!(scene.layers.iter().all(|layer| layer.shadows.is_empty()));
+    let painted = label_runs(&scene);
+    let shared = a.sessions.borrow_mut().tab_drag.take();
+    // Without the floating drag the label is painted once more: the gap is real.
+    let scene = a.scene();
+    assert_eq!(label_runs(&scene), painted + 1);
+    a.sessions.borrow_mut().tab_drag = shared;
+    a.scene();
+
+    // Both axes follow the pointer, including far below the strip.
+    for (dx, dy) in [(9., 7.), (31., 45.), (55., 160.), (70., 12.)] {
+        let point = Point {
+            x: start.x + dx,
+            y: start.y + dy,
+        };
+        mouse(&mut a, MouseKind::Drag, point);
+        assert_eq!(
+            dragged(&a).anchor(Instant::now() + Duration::from_secs(1)),
+            Point {
+                x: point.x + 600.,
+                y: point.y + 300.
+            }
+        );
+    }
     let passed = Point {
         x: center(tab(&a, order[1])).x + 4.,
         ..start
@@ -154,12 +268,15 @@ fn tab_press_threshold_lift_and_escape_restore_the_original_strip() {
         [order[1], order[0]]
     );
     assert_eq!(a.workspace.workbench.groups[0].sheets, order);
-    let scene = a.scene();
-    let lifted = tab(&a, order[0]);
-    assert!((lifted.x - (original.x + passed.x - start.x)).abs() < 0.01);
-    assert_eq!(lifted.y, original.y);
-    assert!(scene.layers.iter().any(|layer| !layer.shadows.is_empty()));
     key(&mut a, "escape");
+    assert!(a.tab_press.is_none());
+    // On its way home the gap is back in its original slot and the order never changed.
+    assert_eq!(shared_slot(&a).unwrap().index, 0);
+    assert!(a.tab_landing.is_some());
+    land(&mut a);
+    assert!(a.tab_landing.is_none());
+    assert!(a.sessions.borrow().tab_drag.is_none());
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
     mouse(
         &mut a,
         MouseKind::Up,
@@ -170,6 +287,94 @@ fn tab_press_threshold_lift_and_escape_restore_the_original_strip() {
     );
     assert!(a.tab_press.is_none() && a.torn_off_windows.is_empty());
     assert_eq!(a.workspace.workbench.groups[0].sheets, order);
+}
+
+#[test]
+fn an_event_older_than_the_shown_pointer_never_pulls_the_floating_tab_back() {
+    let mut a = app();
+    a.workspace.new_file().unwrap();
+    a.scene();
+    let start = center(tab(&a, a.workspace.tabs[0].sheet));
+    let at = |x: f64, y: f64, timestamp: f64| MouseEvent {
+        button: 0,
+        kind: MouseKind::Drag,
+        position: Point {
+            x: start.x + x,
+            y: start.y + y,
+        },
+        click_count: 1,
+        modifiers: Modifiers::default(),
+        timestamp,
+    };
+    mouse(&mut a, MouseKind::Down, start);
+    a.handle_mouse_event(None, at(10., 20., 5.));
+    let shown = dragged(&a).pointer;
+    // Queued behind a newer read: the slot logic still sees it, the tab does not move.
+    a.handle_mouse_event(None, at(6., 12., 4.));
+    assert_eq!(dragged(&a).pointer, shown);
+    a.handle_mouse_event(None, at(30., 40., 6.));
+    assert_eq!(
+        dragged(&a).pointer,
+        Point {
+            x: start.x + 30.,
+            y: start.y + 40.
+        }
+    );
+    mouse(&mut a, MouseKind::Up, start);
+}
+
+#[test]
+fn drop_on_the_strip_eases_into_the_gap_before_the_order_changes() {
+    let mut a = app();
+    a.workspace.new_file().unwrap();
+    a.workspace.new_file().unwrap();
+    a.window_frame = Some([600., 300., a.window_size.width, a.window_size.height]);
+    a.scene();
+    let order = a.workspace.workbench.groups[0].sheets.clone();
+    let start = center(tab(&a, order[1]));
+    let end = Point {
+        x: center(tab(&a, order[2])).x + 4.,
+        ..start
+    };
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(
+        &mut a,
+        MouseKind::Drag,
+        Point {
+            x: start.x + 40.,
+            y: start.y + 60.,
+        },
+    );
+    mouse(&mut a, MouseKind::Drag, end);
+    mouse(&mut a, MouseKind::Up, end);
+    // Released over slot 2: the order still waits for the landing.
+    assert_eq!(a.workspace.workbench.groups[0].sheets, order);
+    assert_eq!(shared_slot(&a).unwrap().index, 2);
+    let landing = a.tab_landing.unwrap();
+    assert_eq!(
+        landing.action,
+        super::tab_drag::Landing::Insert(shared_slot(&a).unwrap())
+    );
+    a.scene();
+    let slot = tab(&a, order[1]);
+    a.advance_tab_landing(None, Instant::now());
+    assert_eq!(a.workspace.workbench.groups[0].sheets, order);
+    a.advance_tab_landing(None, Instant::now() + Duration::from_millis(121));
+    assert_eq!(
+        a.workspace.workbench.groups[0].sheets,
+        [order[0], order[2], order[1]]
+    );
+    assert!(a.sessions.borrow().tab_drag.is_none());
+    // The image lands on the slot's pixels and waits for this window's next frame.
+    let hide = a.sessions.borrow().drag_image_hide.unwrap();
+    assert_eq!(hide.window, a.session_id);
+    a.scene();
+    assert_eq!(tab(&a, order[1]), slot);
+    a.release_landed_tab_image(None, hide.after, true);
+    assert!(a.sessions.borrow().drag_image_hide.unwrap().rendered);
+    a.release_landed_tab_image(None, hide.after, true);
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
+    assert!(a.torn_off_windows.is_empty());
 }
 
 #[test]
@@ -184,9 +389,10 @@ fn dropping_only_targets_other_strips_and_reduce_motion_skips_slides() {
     let right_strip = center(a.tab_strips[1].bounds);
     mouse(&mut a, MouseKind::Down, start);
     mouse(&mut a, MouseKind::Drag, right_editor);
-    assert_eq!(a.tab_press.as_ref().unwrap().drag.unwrap().group, 0);
+    assert!(dragged(&a).detached);
+    assert_eq!(shared_slot(&a), None);
     mouse(&mut a, MouseKind::Drag, right_strip);
-    assert_eq!(a.tab_press.as_ref().unwrap().drag.unwrap().group, 1);
+    assert_eq!(shared_slot(&a).unwrap().group, 1);
     assert!(a.tab_slides.is_none());
     a.scene();
     assert!(vel_ui::contains(
@@ -194,9 +400,82 @@ fn dropping_only_targets_other_strips_and_reduce_motion_skips_slides() {
         center(tab(&a, sheet))
     ));
     mouse(&mut a, MouseKind::Up, right_strip);
+    // Reduce Motion lands at once.
+    assert!(a.tab_landing.is_none());
     assert_eq!(a.workspace.workbench.group_of(sheet), Some(1));
     assert_eq!(a.workspace.workbench.groups[1].focused, Some(sheet));
     assert!(a.torn_off_windows.is_empty());
+}
+
+#[test]
+fn an_off_strip_drop_inside_the_detach_band_eases_home_and_clicks_stay_clicks() {
+    let mut a = app();
+    a.workspace.new_file().unwrap();
+    a.scene();
+    let order = a.workspace.workbench.groups[0].sheets.clone();
+    let strip = a.tab_strips[0];
+    let start = center(tab(&a, order[0]));
+    let over = Point {
+        x: center(tab(&a, order[1])).x + 4.,
+        ..start
+    };
+    // Just below the strip but within one strip height of it.
+    let band = Point {
+        x: over.x,
+        y: strip.bounds.y + strip.bounds.height * 1.5,
+    };
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, over);
+    mouse(&mut a, MouseKind::Drag, band);
+    assert!(!dragged(&a).detached);
+    // The last gap stays, as the lifted tab's did, but a drop here changes nothing.
+    assert_eq!(shared_slot(&a).unwrap().index, 1);
+    mouse(&mut a, MouseKind::Up, band);
+    assert_eq!(shared_slot(&a).unwrap().index, 0);
+    assert_eq!(
+        a.tab_landing.unwrap().action,
+        super::tab_drag::Landing::Return
+    );
+    land(&mut a);
+    assert_eq!(a.workspace.workbench.groups[0].sheets, order);
+    assert!(a.torn_off_windows.is_empty());
+
+    // A new press mid-landing completes the previous drop first.
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, over);
+    mouse(&mut a, MouseKind::Up, over);
+    assert!(a.tab_landing.is_some());
+    let content = center(a.content);
+    mouse(&mut a, MouseKind::Down, content);
+    assert!(a.tab_landing.is_none());
+    assert_eq!(a.workspace.workbench.groups[0].sheets, [order[1], order[0]]);
+    mouse(&mut a, MouseKind::Up, content);
+    // The image still waits for a presented frame; a frame that was not presented
+    // only keeps the deadline, and the deadline ends the hand-off regardless.
+    let hide = a.sessions.borrow().drag_image_hide.unwrap();
+    a.release_landed_tab_image(None, hide.after, false);
+    assert!(!a.sessions.borrow().drag_image_hide.unwrap().rendered);
+    a.release_landed_tab_image(None, hide.after + Duration::from_millis(250), false);
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
+
+    // A press on a tab retires a pending image before it loads its own.
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, over);
+    mouse(&mut a, MouseKind::Up, over);
+    a.advance_tab_landing(None, Instant::now() + Duration::from_secs(1));
+    assert!(a.sessions.borrow().drag_image_hide.is_some());
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(
+        &mut a,
+        MouseKind::Drag,
+        Point {
+            x: start.x + 1.,
+            ..start
+        },
+    );
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
+    assert_eq!(a.tab_press.as_ref().unwrap().image, Some(true));
+    mouse(&mut a, MouseKind::Up, start);
 }
 
 #[test]
@@ -304,8 +583,7 @@ fn detached_tab_hits_another_headless_window_and_inserts_at_the_published_index(
             y: start.y,
         },
     );
-    assert!(a.tab_press.as_ref().unwrap().drag.unwrap().detached);
-    assert!(a.drag_image.is_some());
+    assert!(dragged(&a).detached && dragged(&a).floating);
     a.scene();
     assert!(a.tab_hits.is_empty());
     a.view.scroll_y = 64.;
@@ -324,12 +602,17 @@ fn detached_tab_hits_another_headless_window_and_inserts_at_the_published_index(
         [original_target[0], sheet, original_target[1]]
     );
     let preview = b.scene();
+    // The floating image stays visible over the target; its strip only opens a gap.
     assert!(
-        preview
+        !preview
             .layers
             .iter()
             .flat_map(|layer| &layer.text)
             .any(|run| run.text.contains("unsaved"))
+    );
+    assert_eq!(
+        b.tab_preview_order(0, &original_target).unwrap(),
+        [original_target[0], sheet, original_target[1]]
     );
     assert!(b.tab_slides.is_some());
     assert!(b.workspace.sheet_index(sheet).is_none());
@@ -354,8 +637,19 @@ fn detached_tab_hits_another_headless_window_and_inserts_at_the_published_index(
     mouse(&mut a, MouseKind::Drag, target_point);
     mouse(&mut a, MouseKind::Up, target_point);
     assert!(a.tab_press.is_none());
-    assert!(a.drag_image.is_none());
+    // The gap stays open in the target until the tab has eased into it.
+    assert!(b.shared_tab_preview().is_some());
+    assert!(b.workspace.sheet_index(sheet).is_none() && !b.receive_tabs());
+    a.advance_tab_landing(None, Instant::now() + Duration::from_secs(1));
     assert!(a.sessions.borrow().tab_drag.is_none());
+    // The target window, which now paints the tab, retires the image after a frame.
+    let hide = a.sessions.borrow().drag_image_hide.unwrap();
+    assert_eq!(hide.window, b.session_id);
+    a.release_landed_tab_image(None, hide.after, true);
+    assert!(!a.sessions.borrow().drag_image_hide.unwrap().rendered);
+    b.release_landed_tab_image(None, hide.after, true);
+    b.release_landed_tab_image(None, hide.after, true);
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
     assert!(b.receive_tabs());
     assert_eq!(b.workspace.workbench.groups[0].sheets[1], sheet);
     assert_eq!(b.workspace.workbench.groups[0].focused, Some(sheet));
@@ -388,10 +682,10 @@ fn detached_tab_preview_obeys_animation_disabled_in_both_windows() {
     mouse(&mut a, MouseKind::Drag, end);
     b.scene();
     assert!(a.tab_slides.is_none() && b.tab_slides.is_none());
-    assert!(a.drag_image.is_some() && b.shared_tab_preview().is_some());
+    assert!(dragged(&a).floating && b.shared_tab_preview().is_some());
     // The native deactivation and capture-loss callbacks use the same cancellation.
     assert!(a.cancel_tab_drag(None));
-    assert!(a.drag_image.is_none() && b.shared_tab_preview().is_none());
+    assert!(a.tab_landing.is_none() && b.shared_tab_preview().is_none());
     mouse(&mut a, MouseKind::Up, end);
     assert!(a.torn_off_windows.is_empty());
     assert_eq!(a.workspace.tabs[0].sheet, sheet);
@@ -413,11 +707,14 @@ fn detached_drag_escape_releases_image_and_shared_state_for_repeated_cycles() {
                 y: start.y,
             },
         );
-        assert!(a.drag_image.is_some());
+        assert!(dragged(&a).floating);
         key(&mut a, "escape");
-        assert!(a.tab_press.is_none());
-        assert!(a.drag_image.is_none());
+        assert!(a.tab_press.is_none() && a.tab_landing.is_some());
+        a.scene();
+        land(&mut a);
+        assert!(a.tab_landing.is_none());
         assert!(a.sessions.borrow().tab_drag.is_none());
+        assert!(a.sessions.borrow().drag_image_hide.is_none());
         a.scene();
     }
 }
@@ -469,7 +766,7 @@ fn closing_either_drag_window_cancels_without_dropping_on_mouse_up() {
         });
         assert!(a.sessions.borrow().tab_drag.is_none());
         mouse(&mut a, MouseKind::Up, end);
-        assert!(a.drag_image.is_none() && a.tab_press.is_none());
+        assert!(a.tab_landing.is_none() && a.tab_press.is_none());
         assert!(a.torn_off_windows.is_empty());
         assert_eq!(a.workspace.workbench.group_of(sheet), Some(0));
         assert!(
@@ -477,6 +774,24 @@ fn closing_either_drag_window_cancels_without_dropping_on_mouse_up() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn target_closing_mid_landing_keeps_the_tab_in_its_window() {
+    let (mut a, mut b) = tab_drag_windows();
+    let sheet = a.workspace.tabs[0].sheet;
+    let start = center(tab(&a, sheet));
+    let end = second_window_insertion_point(&a, &b);
+    mouse(&mut a, MouseKind::Down, start);
+    mouse(&mut a, MouseKind::Drag, end);
+    mouse(&mut a, MouseKind::Up, end);
+    assert!(a.tab_landing.is_some());
+    a.sessions.borrow_mut().release_route(b.session_id);
+    a.advance_tab_landing(None, Instant::now());
+    assert!(a.tab_landing.is_none());
+    assert!(a.sessions.borrow().drag_image_hide.is_none());
+    assert_eq!(a.workspace.workbench.group_of(sheet), Some(0));
+    assert!(!b.receive_tabs() && a.torn_off_windows.is_empty());
 }
 
 #[test]
