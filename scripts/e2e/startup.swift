@@ -347,10 +347,12 @@ struct SeenWindow {
     var onscreen: Double?
     var alpha: Double
     var ownImages: [ScreenFrame] = []
+    /// Title changes (host time, kCGWindowName), first one when the window is listed.
+    var titles: [(Double, String)] = []
 }
 
 /// Velocity's layer-0 windows, on screen or not, from one window-list read.
-func velocityWindowRows(owner: String) -> [(id: Int, pid: pid_t, bounds: CGRect, onscreen: Bool, alpha: Double)] {
+func velocityWindowRows(owner: String) -> [(id: Int, pid: pid_t, bounds: CGRect, onscreen: Bool, alpha: Double, title: String)] {
     let raw = (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]) ?? []
     return raw.compactMap { entry in
         guard (entry[kCGWindowOwnerName as String] as? String) == owner,
@@ -362,7 +364,7 @@ func velocityWindowRows(owner: String) -> [(id: Int, pid: pid_t, bounds: CGRect,
                             width: box["Width"] as? Double ?? 0, height: box["Height"] as? Double ?? 0)
         guard bounds.width > 100, bounds.height > 100 else { return nil }
         return (id, pid, bounds, (entry[kCGWindowIsOnscreen as String] as? Bool) ?? false,
-                entry[kCGWindowAlpha as String] as? Double ?? 1)
+                entry[kCGWindowAlpha as String] as? Double ?? 1, entry[kCGWindowName as String] as? String ?? "")
     }
 }
 
@@ -549,6 +551,7 @@ struct LaunchResult {
     let luminance: Double
     let appMilestones: [(String, Double)] // phase, process ms
     let ownImageNotes: [String]
+    var titleNotes: [String] = []
     let failure: String?
 
     /// Milliseconds from the GUI process start (or the CLI spawn when unknown).
@@ -692,6 +695,9 @@ struct StartupHarness {
                                               onscreen: nil, alpha: row.alpha)
                 }
                 seen[row.id]!.bounds = row.bounds
+                if seen[row.id]!.titles.last?.1 != row.title {
+                    seen[row.id]!.titles.append((now, row.title))
+                }
                 if row.onscreen && seen[row.id]!.onscreen == nil {
                     seen[row.id]!.onscreen = now
                     seen[row.id]!.alpha = row.alpha
@@ -809,6 +815,9 @@ struct StartupHarness {
         }
         let firstPixels = judgements.first { $0.changed > 0.02 }?.time
         let firstContent = judgements.first { $0.matching >= contentMatch }?.time
+        // The final frame itself: highlighted text where the build has syntax packages,
+        // not the grey plain-text frame that matched as content first.
+        let firstExact = judgements.first { $0.matching >= stableMatch }?.time
         var stable: Double?
         for judgement in judgements.reversed() {
             if judgement.matching >= stableMatch { stable = judgement.time } else { break }
@@ -817,10 +826,17 @@ struct StartupHarness {
         for (index, window) in windows.enumerated() {
             timeline.append(("window\(index + 1)_listed", window.created))
             if let shown = window.onscreen { timeline.append(("window\(index + 1)_onscreen", shown)) }
+            // When the native title first read what it reads at the end ("untitled"
+            // until the forwarded file was opened, before the fix).
+            if let last = window.titles.last?.1, !last.isEmpty,
+               let titled = window.titles.first(where: { $0.1 == last })?.0 {
+                timeline.append(("window\(index + 1)_titled", titled))
+            }
         }
         if let firstPixels { timeline.append(("screen_first_window_pixels", firstPixels)) }
         if let maxAlienAt, maxAlien > flashFrameShare { timeline.append(("screen_max_alien", maxAlienAt)) }
         if let firstContent { timeline.append(("screen_first_content", firstContent)) }
+        if let firstExact { timeline.append(("screen_first_exact", firstExact)) }
         if let stable { timeline.append(("screen_stable", stable)) }
 
         // The window's own backing images: what the window server held before the
@@ -871,13 +887,17 @@ struct StartupHarness {
                             maxForeign: maxForeign, incompleteMs: incompleteMs,
                             firstContent: firstContent, stable: stable,
                             luminance: luminance, appMilestones: milestones, ownImageNotes: ownNotes,
+                            titleNotes: windows.map { window in
+                                window.titles.map { "+\(fmt(($0.0 - (birth ?? spawn)) * 1000))ms '\($0.1)'" }
+                                    .joined(separator: " | ")
+                            },
                             failure: failure)
     }
 
     func describe(_ result: LaunchResult) {
         if let failure = result.failure { report.note("\(result.label) problem", detail: failure) }
         let origin = result.birth != nil ? "GUI process start" : "CLI spawn"
-        report.note("\(result.label) summary", detail: "windows=\(result.windows) frames=\(result.frames) dropped=\(result.dropped) max_alien=\(pct(result.maxAlien)) flash_frames=\(result.flashFrames) flash_ms=\(fmt(result.flashMs)) flash_colors=[\(result.flashColors)] max_foreign=\(pct(result.maxForeign)) incomplete_ms=\(fmt(result.incompleteMs)) first_content=\(fmt(result.ms(result.firstContent)))ms stable=\(fmt(result.ms(result.stable)))ms luminance=\(Int(result.luminance)) (times from \(origin))")
+        report.note("\(result.label) summary", detail: "windows=\(result.windows) frames=\(result.frames) dropped=\(result.dropped) max_alien=\(pct(result.maxAlien)) flash_frames=\(result.flashFrames) flash_ms=\(fmt(result.flashMs)) flash_colors=[\(result.flashColors)] max_foreign=\(pct(result.maxForeign)) incomplete_ms=\(fmt(result.incompleteMs)) first_content=\(fmt(result.ms(result.firstContent)))ms first_exact=\(fmt(result.event("screen_first_exact")))ms titled=\(fmt(result.event("window1_titled")))ms stable=\(fmt(result.ms(result.stable)))ms luminance=\(Int(result.luminance)) (times from \(origin))")
         let events = result.timeline.map { "\($0.0)=\(fmt(result.ms($0.1)))" }.joined(separator: " ")
         report.note("\(result.label) timeline ms", detail: events)
         let app = result.appMilestones.map { "\($0.0)=\(fmt($0.1))" }.joined(separator: " ")
@@ -888,6 +908,9 @@ struct StartupHarness {
         }
         report.note("\(result.label) frames", detail: "\n    " + frames.joined(separator: "\n    "))
         for note in result.ownImageNotes { report.note("\(result.label) own", detail: note) }
+        for (index, window) in result.titleNotes.enumerated() {
+            report.note("\(result.label) window\(index + 1) titles", detail: window)
+        }
         // One machine-readable line per launch, for before/after comparisons.
         var json: [String: Any] = ["label": result.label, "windows": result.windows,
                                    "max_alien": result.maxAlien, "flash_ms": result.flashMs,
@@ -1130,6 +1153,22 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
             compare("first submit after the prepared frame", judged: false) { $0.sincePrepared($0.milestone("first_submit")) }
             compare("first content after the prepared frame", judged: false) { $0.sincePrepared($0.ms($0.firstContent)) }
             compare("stable after the prepared frame", judged: false) { $0.sincePrepared($0.ms($0.stable)) }
+            // Startup speed (2026-11-29): the forwarded file, its highlighting and its
+            // title in the first frame, and no one-second wait for a scanout record.
+            compare("first exact frame (final content, highlighted with packages) from process start",
+                    judged: false) { $0.event("screen_first_exact") }
+            compare("title correct from process start", judged: false) { $0.event("window1_titled") }
+            compare("content shown but not yet final (grey text, empty document, wrong title)", judged: false) {
+                guard let exact = $0.event("screen_first_exact"), let content = $0.ms($0.firstContent) else { return nil }
+                return exact - content
+            }
+            compare("first window pixels to first content", judged: false) {
+                guard let pixels = $0.event("screen_first_window_pixels"), let content = $0.ms($0.firstContent)
+                else { return nil }
+                return content - pixels
+            }
+            compare("startup wait end (services, CLI commands, restored windows) from process start",
+                    judged: false) { $0.milestone("startup_without_scanout") ?? $0.milestone("first_real_scanout") }
         }
     }
     report.info("first content medians", detail: medians.sorted { $0.key < $1.key }

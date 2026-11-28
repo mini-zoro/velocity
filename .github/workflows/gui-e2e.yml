@@ -30,6 +30,10 @@ on:
         description: "startup scenario: pre-fix first-content medians, e.g. light=700,dark=720 (empty = report only)"
         type: string
         default: ""
+      startup_packages:
+        description: "startup scenario: build with the syntax packages (highlighted first frame); both builds of a comparison get them"
+        type: boolean
+        default: false
       tabdrag_compare_ref:
         description: "tabdrag: also build this ref (e.g. main) and measure both builds on this runner"
         type: string
@@ -71,6 +75,13 @@ jobs:
         with:
           shared-key: gui-e2e
           cache-on-failure: true
+      # The packages are compiled in (build-time syntax index), so they must be present
+      # before the first build; the comparison build below reuses this checkout.
+      - name: Syntax packages for the startup scenario
+        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'startup' && inputs.startup_packages
+        run: |
+          git submodule update --init --depth 1 third_party/sublime-packages \
+            || git submodule update --init third_party/sublime-packages
       - name: Build Velocity (release)
         run: cargo build --release -p velocity --locked
       - name: Build the e2e driver
