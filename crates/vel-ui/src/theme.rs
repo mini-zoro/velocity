@@ -93,6 +93,9 @@ struct PaintLayer {
     modifier: Option<[u8; 4]>,
     scheme_tint: Option<Color>,
     sequence: Option<Arc<vel_theme::Texture>>,
+    /// Velocity extension `layerN.surface_inset`, already UI-scaled: this layer is placed
+    /// inside the element's bounds by these margins instead of by `surface_inset`.
+    inset: Option<Insets>,
 }
 #[derive(Clone, Debug)]
 struct Texture {
@@ -263,24 +266,25 @@ impl Prepared {
         }
     }
 }
+/// `bounds` shrunk by `m` on each side, never narrower or shorter than zero.
+fn inset(bounds: Rect, m: Insets) -> Rect {
+    let (left, top, right, bottom) = (
+        f64::from(m.left),
+        f64::from(m.top),
+        f64::from(m.right),
+        f64::from(m.bottom),
+    );
+    Rect {
+        x: bounds.x + left,
+        y: bounds.y + top,
+        width: (bounds.width - left - right).max(0.),
+        height: (bounds.height - top - bottom).max(0.),
+    }
+}
 impl StyleData {
     /// The painted rectangle within an element's bounds: `surface_inset` applied.
     pub fn painted(&self, bounds: Rect) -> Rect {
-        let Some(m) = self.inset else {
-            return bounds;
-        };
-        let (left, top, right, bottom) = (
-            f64::from(m.left),
-            f64::from(m.top),
-            f64::from(m.right),
-            f64::from(m.bottom),
-        );
-        Rect {
-            x: bounds.x + left,
-            y: bounds.y + top,
-            width: (bounds.width - left - right).max(0.),
-            height: (bounds.height - top - bottom).max(0.),
-        }
+        self.inset.map_or(bounds, |m| inset(bounds, m))
     }
     /// The corner radius of a painted rectangle: half its shorter side for a pill.
     pub fn radius_for(&self, painted: Rect) -> f32 {
@@ -835,7 +839,8 @@ impl ThemeUi {
                 });
             }
         }
-        let rect = style.painted(rect);
+        let bounds = rect;
+        let rect = style.painted(bounds);
         let radius = style.radius_for(rect);
         if let Some(color) = style.shadow {
             paint_shadow(layer, style, rect, radius, color, clip);
@@ -845,7 +850,7 @@ impl ThemeUi {
                 rect,
                 clip,
                 color,
-                radius,
+                radius: style.radius_for(rect),
             }))
         };
         if let Some(color) = style.background {
@@ -855,6 +860,9 @@ impl ThemeUi {
             if paint.color[3] <= 0. {
                 continue;
             }
+            // A layer with its own `surface_inset` is placed from the bounds, so a divider
+            // can sit at a tab's edge while the card beside it keeps the element inset.
+            let rect = paint.inset.map_or(rect, |m| inset(bounds, m));
             if let Some(resource) = &paint.texture {
                 if let Some(texture) = self.texture(resource) {
                     nine_slice::paint(
@@ -1355,6 +1363,12 @@ fn prepare_style(
                 None
             },
             sequence,
+            inset: style.insets(&P::Layer(i, L::SurfaceInset)).map(|m| Insets {
+                left: m.left * scale,
+                top: m.top * scale,
+                right: m.right * scale,
+                bottom: m.bottom * scale,
+            }),
         };
         layer.color = rgba(
             layer
@@ -1967,6 +1981,53 @@ mod tests {
                 assert!(layer.shadows.is_empty(), "{class}");
             }
         }
+    }
+    /// `layerN.surface_inset` places one layer from the element's bounds, so a short divider
+    /// can sit on a tab's edge beside its inset card; other layers keep `surface_inset`.
+    #[test]
+    fn layer_surface_inset_overrides_the_element_inset() {
+        let palette = Palette::default();
+        let source = r##"{"rules":[
+            {"class":"tab_control","radius":8,"surface_inset":[3,4],
+             "layer0.tint":"#202020","layer0.opacity":1.0,
+             "layer1.tint":"#808080","layer1.opacity":1.0,"layer1.surface_inset":[0,8]}
+        ]}"##;
+        let mut theme = ThemeUi::new(Arc::new(Theme::parse(source, &palette).unwrap()), palette);
+        let bounds = Rect {
+            x: 10.,
+            y: 20.,
+            width: 180.,
+            height: 32.,
+        };
+        let tab = theme.style(
+            1,
+            &ElementPath(&[Element::new("tab_control", &[])]),
+            &Settings::default(),
+        );
+        let mut layer = Layer::default();
+        theme.surface(&mut layer, &tab, bounds, bounds);
+        let fills: Vec<Rect> = layer
+            .surfaces
+            .iter()
+            .filter_map(|surface| match surface {
+                Surface::Fill(fill) => Some(fill.rect),
+                _ => None,
+            })
+            .collect();
+        let card = Rect {
+            x: 13.,
+            y: 24.,
+            width: 174.,
+            height: 24.,
+        };
+        let divider = Rect {
+            x: 10.,
+            y: 28.,
+            width: 180.,
+            height: 16.,
+        };
+        assert_eq!(fills, [card, divider]);
+        assert_eq!(tab.painted(bounds), card, "the element inset is unchanged");
     }
     /// Velocity's own theme insets cards and row pills, softens shadows, draws focus rings in
     /// order with the surfaces, and rounds capsules at any size.

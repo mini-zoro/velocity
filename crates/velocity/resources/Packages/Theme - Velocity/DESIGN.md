@@ -15,12 +15,22 @@ and the editor, under the tab strip, above the status bar and above panels. The 
 (`file_tab_style: "rounded"`) is a floating card, as in Safari and Xcode: the selected tab is a
 rounded card inset in the strip, in the editor's colour with a half-point hairline, and the focused
 group's card casts a soft shadow (other groups' selected cards are half-filled, so the focused group
-reads without an accent); there are no dividers or accent bar, hover is a rounded wash and
-close buttons are circular. `square` and `angled` keep the earlier strip: a short divider between
-inactive tabs, the selected tab joining the sheet below and a two-DIP accent bar on the focused
-group's tab. Inactive tab labels are muted. Close buttons appear on the selected and hovered tab;
-a dirty tab shows a dot in their place until hovered. Group and Split View dividers use
-`grid_layout_control`.
+reads without an accent); there is no accent bar, hover is a rounded wash and close buttons are
+circular. Between plain rounded tabs a short `divider` line (one DIP wide, 16 of the 32 DIPs,
+centred) marks where each tab ends, so a dirty dot at a wide tab's far right still reads as its
+own: the line sits on the tab's right edge, outside the card inset (`layer1.surface_inset`),
+midway between that dot and the next tab's icon. `divider` is the text colour over the chrome at
+about 1.7:1 against `surface` in both themes, measured on rendered pixels; `line` (1.3:1 light,
+1.1:1 dark) was too faint. A card needs no line beside it, so the selected and hovered tabs drop
+theirs and so do their left neighbours (`left_of_selected`, `left_of_hover`).
+Tabs are 140 DIPs wide (`tab_width`), which keeps a dirty dot near its own name while typical
+names still fit. `square` and `angled` keep the earlier strip: a short divider between inactive
+tabs (`tab_rule`: `line` in the light theme, the rounded tabs' `divider` in the dark theme, where
+`line` all but disappeared), the selected tab joining the sheet below and a two-DIP accent bar on
+the focused group's tab. Inactive
+tab labels are muted. Close buttons appear on the selected and hovered tab; a dirty tab shows a
+dot in their place until hovered. Group and Split View dividers use `grid_layout_control`.
+Comparison renders: `docs/design/tab-dividers.md`.
 
 Shapes follow one set of tokens in `generate.py` (`RADIUS`): 6-point controls (buttons, inputs,
 dropdowns, toggles, row pills), 8-point tab cards, 10-point popups (completion, hover, tool tips)

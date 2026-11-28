@@ -25,7 +25,9 @@
     "card_line": "#0000001f",
     "card_shadow": "#00000033",
     "popup_shadow": "#00000038",
-    "wash": "#000000"
+    "wash": "#000000",
+    "divider": "#adb2b0",
+    "tab_rule": "#cdcbc5"
   },
   "rules": [
     {
