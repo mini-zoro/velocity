@@ -331,18 +331,32 @@ final class MemorySession {
         sleep(seconds: 4.5)
         _ = shell("screencapture -x -R \(rect) '\(late)'")
         report.note("\(build.label) drawables inactive 5.3 s", detail: surfaces())
-        let same = pixels(early).flatMap { a in pixels(late).map { a == $0 } }
-        report.note("\(build.label) window pixels across the release", detail: same.map { $0 ? "identical" : "DIFFER" } ?? "unreadable")
+        // The window server blends the frame's rounded corners with whatever is behind
+        // them (one level of difference seen there); compare the window inside them.
+        let differing = differingPixels(early, late, inset: 12)
+        report.note("\(build.label) window pixels across the release",
+                    detail: differing.map { $0 == 0 ? "identical" : "\($0) pixels DIFFER" } ?? "unreadable")
         _ = activate(pid)
         sleep(seconds: 1.5)
         report.note("\(build.label) drawables active again", detail: "front=\(frontmostName()) \(surfaces())")
     }
 
-    func pixels(_ path: String) -> Data? {
-        guard let image = NSImage(contentsOfFile: path),
-              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: cg)
-        return rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) }
+    /// Pixels that differ between two same-sized screenshots, `inset` pixels in from the edges.
+    func differingPixels(_ a: String, _ b: String, inset: Int) -> Int? {
+        func bitmap(_ path: String) -> NSBitmapImageRep? {
+            NSImage(contentsOfFile: path)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                .map { NSBitmapImageRep(cgImage: $0) }
+        }
+        guard let x = bitmap(a), let y = bitmap(b), x.pixelsWide == y.pixelsWide, x.pixelsHigh == y.pixelsHigh
+        else { return nil }
+        var count = 0
+        for row in inset..<max(inset, x.pixelsHigh - inset) {
+            for column in inset..<max(inset, x.pixelsWide - inset)
+            where x.colorAt(x: column, y: row) != y.colorAt(x: column, y: row) {
+                count += 1
+            }
+        }
+        return count
     }
 
     func dump(_ name: String, extra: Bool) {
