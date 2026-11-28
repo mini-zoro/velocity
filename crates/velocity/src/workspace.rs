@@ -2192,11 +2192,20 @@ impl Workspace {
     /// preference as this one, no document watcher and no window overrides. Built only
     /// when the window opens and dropped with it.
     pub(crate) fn for_settings_window(&self) -> Result<Self, String> {
-        let mut workspace = Self::new_configured(
+        // It shares this window's syntax assets too: the legacy copy would stay
+        // loaded for the rest of the process after the Settings window closed.
+        let mut workspace = Self::new_with_configuration(
             None,
             self.data_dir.clone(),
             None,
-            false,
+            (
+                false,
+                if self.packed_syntaxes {
+                    ConfigKind::InteractiveReload
+                } else {
+                    ConfigKind::Eager
+                },
+            ),
             Some(Default::default()),
             self.preferred_languages,
             &mut Default::default(),

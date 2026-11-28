@@ -241,6 +241,11 @@ fn a_later_interactive_window_shares_the_first_windows_syntax_assets() {
     let second = Workspace::new_window(Some(dir.path().to_owned()), true).unwrap();
     assert!(Arc::ptr_eq(&first.assets.syntaxes, &second.assets.syntaxes));
     assert!(Arc::ptr_eq(&first.assets.metadata, &second.assets.metadata));
+    let settings = first.for_settings_window().unwrap();
+    assert!(Arc::ptr_eq(
+        &first.assets.syntaxes,
+        &settings.assets.syntaxes
+    ));
     // Headless and test workspaces keep the eager loader.
     let unwatched = Workspace::new_window(Some(dir.path().to_owned()), false).unwrap();
     assert!(!Arc::ptr_eq(
