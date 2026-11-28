@@ -163,7 +163,8 @@ fn two_offscreen_renderers_allocate_cjk_pages_once() {
     assert!(second.trim_memory(true).0 > 0);
     assert_eq!(first.memory_cache_bytes().0, 0);
     assert_eq!(first.trim_memory(true).0, 0);
-    assert_eq!(gpu(&first).textures, usage.textures - 1);
+    // The R8 mask page array and the (placeholder) RGBA array.
+    assert_eq!(gpu(&first).textures, usage.textures - 2);
     assert_eq!(first.render_rgba(&scene, &mut fonts, 1.).unwrap(), pixels);
 }
 
@@ -364,7 +365,7 @@ fn memory_trim_right_sizes_instances_and_rebuilds_the_atlas_on_draw() {
     assert_eq!(renderer.capacity, MIN_INSTANCE_BYTES);
     assert!(renderer.data.capacity() <= MIN_INSTANCE_BYTES as usize / size_of::<super::Instance>());
     assert_eq!(renderer.memory_cache_bytes().0, 0);
-    assert!(renderer.gpu.atlas.borrow().atlas.is_empty());
+    assert!(renderer.gpu.atlas.borrow().is_empty());
     assert_eq!(
         renderer.render_rgba(&small, &mut fonts, 1.).unwrap(),
         before
@@ -420,7 +421,7 @@ fn cjk_scroll_and_document_close_release_cpu_glyph_caches() {
     renderer.reset_fonts();
     fonts.clear_document_caches();
     assert_eq!(renderer.gpu.atlas.borrow().rasters.capacity(), 0);
-    assert!(renderer.gpu.atlas.borrow().atlas.is_empty());
+    assert!(renderer.gpu.atlas.borrow().is_empty());
     assert_eq!(renderer.gpu.layouts.borrow().storage_bytes(), 0);
     assert_eq!(fonts.document_cache_bytes(), (0, 0));
     assert_eq!(fonts.file_storage_bytes(), files);
