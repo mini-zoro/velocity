@@ -514,6 +514,12 @@ private func settledFootprint(_ pid: pid_t, series: inout [String]) -> Int64 {
     return reads.last!
 }
 
+/// One build under test.
+private struct Variant {
+    let name: String
+    let launcher: URL
+}
+
 private struct VariantResult {
     var name: String
     var reps: [DragMetrics] = []
@@ -686,14 +692,20 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     // that depends on the session.
     report.note("start", detail: "pid \(getpid())")
     let environment = Environment.from(options)
-    var variants: [(String, URL)] = []
-    for pair in (ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? "").split(separator: ",") {
-        let parts = pair.split(separator: "=", maxSplits: 1)
-        if parts.count == 2 { variants.append((String(parts[0]), URL(fileURLWithPath: String(parts[1])))) }
-    }
-    if variants.isEmpty { variants = [("after", environment.launcher)] }
-    let judged = variants.contains { $0.0 == "after" } ? "after" : variants.last!.0
-    report.info("variants", detail: variants.map { "\($0.0)=\($0.1.path)" }.joined(separator: ", ") + " judged=\(judged)")
+    // Built once, never mutated: a `var` array of (String, URL) reassigned in an `if`
+    // and then iterated trapped on a bounds check in the runner's compiler build
+    // (pull-request runs take this single-build path; dispatch runs pass a pair).
+    let pairs = (ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? "")
+        .split(separator: ",")
+        .compactMap { pair -> Variant? in
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            return parts.count == 2 ? Variant(name: String(parts[0]), launcher: URL(fileURLWithPath: String(parts[1]))) : nil
+        }
+    let variants = pairs.isEmpty ? [Variant(name: "after", launcher: environment.launcher)] : pairs
+    let names = variants.map(\.name)
+    let judged = names.contains("after") ? "after" : (names.last ?? "after")
+    report.info("variants", detail: variants.map { "\($0.name)=\($0.launcher.path)" }.joined(separator: ", ")
+        + " judged=\(judged)")
     report.info("screen", detail: NSScreen.screens.map {
         "\($0.frame.width)x\($0.frame.height)@\($0.backingScaleFactor)x \($0.maximumFramesPerSecond) Hz"
     }.joined(separator: ", "))
@@ -704,12 +716,13 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     for round in 1...rounds {
         // Alternate which build goes first.
         let ordered = round % 2 == 1 ? variants : variants.reversed()
-        for (name, launcher) in ordered {
+        for variant in ordered {
+            let name = variant.name, launcher = variant.launcher
             results.append(runVariant(name, launcher: launcher, work: environment.work, round: round,
                                       judged: name == judged, report: report))
         }
     }
-    for (name, _) in variants {
+    for name in names {
         let mine = results.filter { $0.name == name }
         let reps = mine.flatMap(\.reps)
         guard !reps.isEmpty else { continue }

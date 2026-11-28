@@ -33,6 +33,8 @@ usage() {
 
 build() {
     mkdir -p "$E2E_BIN"
+    # Crash offsets are only comparable with the same compiler.
+    swiftc --version 2>&1 | head -1
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
         "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
         "$VELOCITY_E2E/tabdrag.swift" "$VELOCITY_E2E/startup.swift"
