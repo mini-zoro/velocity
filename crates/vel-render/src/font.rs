@@ -50,17 +50,30 @@ impl Face {
         files: &mut HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
         outlines: bool,
     ) -> Result<Self, String> {
+        // A MobileAsset collection (PingFang is 78 MB) is mapped through a private
+        // clone when the volume can make one; only when it cannot is the selected
+        // face copied out (13 MB of heap for PingFang SC alone).
         #[cfg(target_os = "macos")]
-        let snapshot = snapshot::mobile_asset_face(path, name, native.as_deref(), outlines)?;
+        let cloned = vel_platform::fonts::is_mobile_asset_path(path)
+            .then(|| vel_platform::fonts::map_private_clone(path, files))
+            .flatten();
+        #[cfg(windows)]
+        let cloned = None;
+        #[cfg(target_os = "macos")]
+        let snapshot = match cloned {
+            Some(_) => None,
+            None => snapshot::mobile_asset_face(path, name, native.as_deref(), outlines)?,
+        };
         #[cfg(windows)]
         let snapshot = {
             let _ = outlines;
             None
         };
         let face_snapshot = snapshot.is_some();
-        let bytes = match snapshot {
-            Some(bytes) => std::sync::Arc::new(vel_platform::fonts::FontData::Owned(bytes)),
-            None => vel_platform::fonts::map_font_file(path, files)?,
+        let bytes = match (cloned, snapshot) {
+            (Some(bytes), _) => bytes,
+            (None, Some(bytes)) => std::sync::Arc::new(vel_platform::fonts::FontData::Owned(bytes)),
+            (None, None) => vel_platform::fonts::map_font_file(path, files)?,
         };
         let collection = FontDataRef::new(&bytes)
             .ok_or_else(|| format!("{} is not a supported font", path.display()))?;
@@ -728,7 +741,7 @@ impl FontStore {
         } else {
             "swash with CoreText fallback when a glyph has no swash image"
         };
-        json!({"rasterizer":rasterizer,"coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":root.cell,"ascent_points":root.metrics.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":root.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
+        json!({"rasterizer":rasterizer,"coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":root.cell,"ascent_points":root.metrics.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"cloned_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Cloned(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":root.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)|vel_platform::fonts::FontData::Cloned(_)),"private_clone":matches!(&*f.bytes,vel_platform::fonts::FontData::Cloned(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
     /// Unique face backing bytes: owned heap capacity and mapped file length.
     /// The latter is not a count of resident pages.
@@ -745,7 +758,8 @@ impl FontStore {
             if seen.insert(std::sync::Arc::as_ptr(bytes)) {
                 match bytes.as_ref() {
                     vel_platform::fonts::FontData::Owned(data) => owned += data.capacity(),
-                    vel_platform::fonts::FontData::Mapped(data) => mapped += data.len(),
+                    vel_platform::fonts::FontData::Mapped(data)
+                    | vel_platform::fonts::FontData::Cloned(data) => mapped += data.len(),
                 }
             }
         }
@@ -1728,9 +1742,11 @@ mod review_regressions {
             after.iter().map(|g| g.id).collect::<Vec<_>>()
         );
         assert!(after.iter().all(|g| g.id != 0));
+        // A private APFS clone (or, off APFS, a heap snapshot); never a mapping of
+        // the replaceable file itself.
         assert!(matches!(
             &*fonts.store.borrow().faces[0].bytes,
-            vel_platform::fonts::FontData::Owned(_)
+            vel_platform::fonts::FontData::Owned(_) | vel_platform::fonts::FontData::Cloned(_)
         ));
         std::fs::remove_file(path).unwrap();
     }
