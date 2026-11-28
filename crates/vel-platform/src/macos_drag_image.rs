@@ -91,12 +91,15 @@ impl Popup {
             .setFrameTopLeftPoint(NSPoint::new(point.x - self.grab.x, point.y + self.grab.y));
         if !self.visible {
             self.panel.orderFrontRegardless();
+            self.panel.invalidateShadow();
             self.visible = true;
         }
     }
 }
 
-pub(super) fn show(mtm: MainThreadMarker, image: &DragImage, point: Point, grab: Point) {
+/// Uploads the image while the panel stays hidden; the next `follow` only moves
+/// and orders it front, so the first visible frame does no image work.
+pub(super) fn load(mtm: MainThreadMarker, image: &DragImage, grab: Point) {
     let (width, height) = (image.width as usize, image.height as usize);
     if width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(image.rgba.len())
         || width == 0
@@ -137,6 +140,10 @@ pub(super) fn show(mtm: MainThreadMarker, image: &DragImage, point: Point, grab:
     POPUP.with(|slot| {
         let mut slot = slot.borrow_mut();
         let popup = slot.get_or_insert_with(|| Popup::new(mtm));
+        if popup.visible {
+            popup.panel.orderOut(None);
+            popup.visible = false;
+        }
         let size = NSSize::new(width as f64 / image.scale, height as f64 / image.scale);
         popup.panel.setContentSize(size);
         CATransaction::begin();
@@ -153,8 +160,6 @@ pub(super) fn show(mtm: MainThreadMarker, image: &DragImage, point: Point, grab:
         CATransaction::commit();
         popup.grab = grab;
         popup.loaded = true;
-        popup.follow(point);
-        popup.panel.invalidateShadow();
     });
 }
 

@@ -434,6 +434,7 @@ case "scenario":
     case "activate": scenarioActivate(options.dropFirst())
     case "background": scenarioBackground(options.dropFirst())
     case "footprint": scenarioFootprint(options.dropFirst())
+    case "tabdrag": scenarioTabDrag(options.dropFirst())
     default: fail("unknown scenario \(name)")
     }
 default:

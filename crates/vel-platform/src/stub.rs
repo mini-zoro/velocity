@@ -5,17 +5,9 @@ use std::{ffi::c_void, time::Instant};
 pub struct WindowHandle;
 impl WindowHandle {
     /// Unsupported platforms have no floating native drag image.
-    pub fn show_drag_image(
-        &self,
-        _image: &crate::DragImage,
-        _screen_point: crate::Point,
-        _grab_offset: crate::Point,
-    ) {
-    }
+    pub fn load_drag_image(&self, _image: &crate::DragImage, _grab_offset: crate::Point) {}
     /// Unsupported platforms have no floating native drag image.
     pub fn move_drag_image(&self, _screen_point: crate::Point) {}
-    /// Unsupported platforms have no floating native drag image.
-    pub fn pause_drag_image(&self) {}
     /// Unsupported platforms have no floating native drag image.
     pub fn hide_drag_image(&self) {}
     /// Unsupported platforms have no native z-order.

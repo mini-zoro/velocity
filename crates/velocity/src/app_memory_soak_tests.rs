@@ -6,7 +6,7 @@
 //! A workload runs once to warm bounded caches, then many times; the steady state may
 //! not grow by more than a small slack, whatever the per-iteration peak was.
 use super::*;
-use crate::alloc_count::live_bytes;
+use crate::alloc_count::{allocation_calls, live_bytes};
 use vel_text::Text;
 
 const MIB: isize = 1024 * 1024;
@@ -404,4 +404,90 @@ fn memory_soak_pressure_releases_cjk_and_image_caches_without_changing_output() 
         render(&mut a, &after_scene) == before_pixels,
         "trim changed rendered pixels"
     );
+}
+
+fn pointer(a: &mut App, kind: MouseKind, position: Point) {
+    a.handle_mouse_event(
+        None,
+        MouseEvent {
+            button: 0,
+            kind,
+            position,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+            timestamp: 0.,
+        },
+    );
+}
+
+/// One floating drag of the middle tab: a diagonal sweep out of the strip and
+/// back, released on the strip, then the landing runs to its end. Returns the
+/// allocation calls made by the pointer moves alone.
+fn tab_drag_cycle(a: &mut App, sheet: u64) -> usize {
+    let _ = a.scene();
+    let (_, rect) = *a.tab_hits.iter().find(|(id, _)| *id == sheet).unwrap();
+    let start = Point {
+        x: rect.x + rect.width / 2.,
+        y: rect.y + rect.height / 2.,
+    };
+    pointer(a, MouseKind::Down, start);
+    let _ = a.scene();
+    pointer(
+        a,
+        MouseKind::Drag,
+        Point {
+            x: start.x + 6.,
+            y: start.y + 3.,
+        },
+    );
+    assert!(a.tab_press.as_ref().unwrap().drag.unwrap().floating);
+    let before = allocation_calls();
+    for step in 0..240 {
+        let t = f64::from(step) / 239.;
+        let (dx, dy) = if t < 0.5 {
+            (300. * t * 2., 150. * t * 2.)
+        } else {
+            (300. - 420. * (t - 0.5) * 2., 150. * (1. - (t - 0.5) * 2.))
+        };
+        pointer(
+            a,
+            MouseKind::Drag,
+            Point {
+                x: start.x + dx,
+                y: start.y + dy,
+            },
+        );
+    }
+    let moves = allocation_calls() - before;
+    let end = Point {
+        x: start.x - 120.,
+        y: start.y,
+    };
+    pointer(a, MouseKind::Up, end);
+    let far = Instant::now() + Duration::from_secs(1);
+    a.advance_tab_landing(None, far);
+    a.release_landed_tab_image(None, far + Duration::from_secs(1), true);
+    assert!(a.tab_landing.is_none() && a.sessions.borrow().tab_drag.is_none());
+    moves
+}
+
+#[test]
+#[ignore = "memory soak: run alone with --ignored --test-threads=1"]
+fn memory_soak_floating_tab_moves_allocate_nothing_and_drags_return_to_baseline() {
+    let mut a = app();
+    named(&mut a, "new_file", json!({}));
+    named(&mut a, "new_file", json!({}));
+    a.window_frame = Some([600., 300., a.window_size.width, a.window_size.height]);
+    let sheet = a.workspace.workbench.groups[0].sheets[1];
+    tab_drag_cycle(&mut a, sheet);
+    let base = settled(&mut a);
+    for _ in 0..100 {
+        assert_eq!(
+            tab_drag_cycle(&mut a, sheet),
+            0,
+            "pointer moves of a floating tab must not allocate"
+        );
+    }
+    let after = settled(&mut a);
+    assert_flat("floating tab drags", base, after, MIB / 4);
 }

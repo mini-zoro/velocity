@@ -63,17 +63,14 @@ impl fmt::Debug for WindowHandle {
 }
 
 impl WindowHandle {
-    /// Displays a floating drag image without activating or capturing input.
-    pub fn show_drag_image(&self, image: &crate::DragImage, point: Point, grab: Point) {
-        drag_image::show(image, point, grab);
+    /// Uploads a floating drag image without showing it. `grab` is the pointer's
+    /// offset inside the image in logical points; the next `move_drag_image` shows it.
+    pub fn load_drag_image(&self, image: &crate::DragImage, grab: Point) {
+        drag_image::load(image, grab);
     }
-    /// Moves an existing drag image, showing it again if paused.
+    /// Moves the loaded drag image, showing it without activating or capturing input.
     pub fn move_drag_image(&self, point: Point) {
         drag_image::follow(point);
-    }
-    /// Hides the drag image but retains its pixels until the gesture ends.
-    pub fn pause_drag_image(&self) {
-        drag_image::hide(false);
     }
     /// Hides the drag image and releases its pixels.
     pub fn hide_drag_image(&self) {

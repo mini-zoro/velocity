@@ -1,11 +1,18 @@
-//! Pointer capture, paint-only tab order, and the process-wide detached gesture.
+//! Pointer capture, paint-only tab order, and the process-wide floating tab.
 use super::*;
-use crate::session::{DragSlot, DragTab, ScreenTabStrip, SharedTabDrag};
+use crate::session::{DragImageHide, DragSlot, DragTab, ScreenTabStrip, SharedTabDrag};
 use std::{collections::BTreeMap, rc::Rc};
 
 const THRESHOLD: f64 = 4.;
 const SLIDE_TIME: Duration = Duration::from_millis(150);
+/// A dropped or cancelled tab eases into its slot over this long.
+const LAND_TIME: Duration = Duration::from_millis(120);
+/// The landed image outlives the receiving window's next presented frame.
+const IMAGE_HIDE_DELAY: Duration = Duration::from_millis(34);
+const IMAGE_HIDE_TIMEOUT: Duration = Duration::from_millis(250);
 const IMAGE_PAD: f64 = 12.;
+/// The floating tab closes the click threshold's lead on the pointer over this long.
+const CATCH_UP: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TabStrip {
@@ -32,15 +39,73 @@ pub(super) struct TabPress {
     start: Point,
     grab: Point,
     pub drag: Option<TabDrag>,
+    /// `Some(true)` once the floating image is uploaded, still hidden.
+    pub image: Option<bool>,
 }
 
+/// A tab drag after the threshold. The tab is always a floating image that
+/// follows the pointer in both axes; strips only show the gap it would fill.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TabDrag {
-    pub group: usize,
-    index: usize,
-    x: f64,
-    pub(super) detached: bool,
-    popup_loaded: bool,
+    /// Where the tab sat when the drag began; Escape and in-place drops land here.
+    pub home: DragSlot,
+    /// The pointer has left the source strip's detach band, so an off-strip drop
+    /// tears the tab off. It never changes how the tab follows the pointer.
+    pub detached: bool,
+    pub transferable: bool,
+    /// Whether the floating image exists. Without it strips paint the tab in the gap.
+    pub floating: bool,
+    /// The pointer's latest screen point.
+    pub pointer: Point,
+    /// How far the pointer had moved when the drag began. The floating tab first
+    /// covers the strip tab exactly, then closes this lead over `CATCH_UP`.
+    lead: Point,
+    started: Instant,
+}
+
+impl TabDrag {
+    /// The screen point the floating image is anchored to: the pointer, less the
+    /// part of the threshold lead not yet closed. The grab offset is in the image.
+    pub(super) fn anchor(&self, now: Instant) -> Point {
+        let k = 1. - smoothstep(self.progress(now));
+        Point {
+            x: self.pointer.x - self.lead.x * k,
+            y: self.pointer.y - self.lead.y * k,
+        }
+    }
+
+    fn progress(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.started).as_secs_f64() / CATCH_UP.as_secs_f64()
+    }
+
+    #[cfg(test)]
+    pub(super) fn started_at(&mut self, at: Instant) {
+        self.started = at;
+    }
+
+    fn catching_up(&self, now: Instant) -> bool {
+        self.floating && self.lead != Point::default() && self.progress(now) < 1.
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Landing {
+    /// Insert into this slot once the floating tab reaches it.
+    Insert(DragSlot),
+    /// Fly back to where the drag began and leave the order alone.
+    Return,
+}
+
+/// A released tab on its way into a slot.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TabLanding {
+    pub sheet: u64,
+    pub action: Landing,
+    from: Point,
+    to: Point,
+    start: Instant,
+    time: Duration,
+    floating: bool,
 }
 
 #[derive(Debug)]
@@ -59,34 +124,6 @@ fn outside_detach_band(strip: TabStrip, point: Point, window_width: f64) -> bool
         || point.y > strip.bounds.y + strip.bounds.height + band
         || point.x < -band
         || point.x > window_width + band
-}
-
-fn strip_at(strips: &[TabStrip], point: Point) -> Option<TabStrip> {
-    strips
-        .iter()
-        .copied()
-        .find(|s| vel_ui::contains(s.bounds, point))
-}
-
-// Slots are the unanimated layout with the dragged tab occupying its current gap.
-// Crossing back requires passing the neighbour's new midpoint, not its edge.
-fn insertion_index(
-    widths: impl Iterator<Item = f64>,
-    mut left: f64,
-    current: Option<usize>,
-    x: f64,
-) -> usize {
-    let mut insertion = 0;
-    for (i, width) in widths.enumerate() {
-        if current != Some(i) {
-            if x < left + width / 2. {
-                break;
-            }
-            insertion += 1;
-        }
-        left += width;
-    }
-    insertion
 }
 
 fn preview_order(group: &[u64], sheet: u64, insert: Option<usize>) -> Vec<u64> {
@@ -122,6 +159,7 @@ impl App {
                 y: point.y - strip.bounds.y,
             },
             drag: None,
+            image: None,
         });
     }
 
@@ -136,220 +174,458 @@ impl App {
         if self.cancel_orphaned_tab_drag(window) {
             return true;
         }
-        let Some(mut press) = self.tab_press.take() else {
+        let Some(press) = self.tab_press.as_ref() else {
             return false;
         };
-        if press.drag.is_some_and(|drag| drag.detached) {
-            self.detached_tab_gesture(window, event, press);
-            return true;
-        }
-        let Some(source) = self.workspace.workbench.group_of(press.sheet) else {
-            return true;
-        };
-        let Some(mut drag) = press.drag.or_else(|| {
-            if event.kind != MouseKind::Drag || !over_threshold(press.start, event.position) {
-                return None;
+        if press.drag.is_none() {
+            if event.kind == MouseKind::Up {
+                // A click: nothing moved, so the prepared image goes away unseen.
+                if let Some(press) = self.tab_press.take() {
+                    self.release_tab_image(window, &press);
+                }
+                return true;
             }
-            let index = self.workspace.workbench.groups[source]
-                .sheets
-                .iter()
-                .position(|id| *id == press.sheet)?;
-            Some(TabDrag {
-                group: source,
-                index,
-                x: press.start.x,
-                detached: false,
-                popup_loaded: false,
-            })
-        }) else {
-            if event.kind == MouseKind::Drag {
-                self.tab_press = Some(press);
-            }
-            return true;
-        };
-        self.tab_click = None;
-        let local = strip_at(&self.tab_strips, event.position);
-        let source_strip = self.tab_strips.iter().find(|s| s.group == source).copied();
-        if local.is_none()
-            && let Some(strip) = source_strip
-            && outside_detach_band(strip, event.position, self.window_size.width)
-            && self.start_detached_tab(window, &press, strip)
-        {
-            drag.detached = true;
-            press.drag = Some(drag);
-            self.detached_tab_gesture(window, event, press);
-            return true;
-        }
-        let previous = (drag.group, drag.index);
-        if let Some(strip) = local {
-            let count = self.workspace.workbench.groups[strip.group].sheets.len();
-            let same_group = strip.group == drag.group;
-            let slots = count + usize::from(strip.group != source && same_group)
-                - usize::from(strip.group == source && !same_group);
-            drag.index = insertion_index(
-                std::iter::repeat_n(strip.step, slots),
-                strip.origin(),
-                same_group.then_some(drag.index),
-                event.position.x,
-            );
-            drag.group = strip.group;
-        }
-        let moved = drag.x != event.position.x || press.drag.is_none();
-        drag.x = event.position.x;
-        if event.kind == MouseKind::Up {
-            self.begin_tab_slide();
-            if local.is_some() {
-                self.commit_tab_drag(press.sheet, drag.group, drag.index);
-            }
-            self.named_changed(window, false);
-        } else {
-            let order_changed = previous != (drag.group, drag.index);
-            if order_changed {
-                self.begin_tab_slide();
-            }
-            press.drag = Some(drag);
-            self.tab_press = Some(press);
-            if (order_changed || moved)
-                && let Some(window) = window
+            // No frame has rendered since the press yet, so render before the threshold.
+            self.prepare_tab_image(window);
+            if !self
+                .tab_press
+                .as_ref()
+                .is_some_and(|press| over_threshold(press.start, event.position))
+                || !self.start_tab_drag(window, event.position)
             {
-                window.request_frame();
+                return true;
             }
         }
+        self.tab_drag_gesture(window, event);
         true
     }
 
-    fn start_detached_tab(
-        &mut self,
-        window: Option<&WindowHandle>,
-        press: &TabPress,
-        strip: TabStrip,
-    ) -> bool {
-        let Some(index) = self.workspace.sheet_index(press.sheet) else {
+    /// Renders and uploads the floating tab while it is still hidden, normally in
+    /// the frame after the press, so crossing the threshold only moves a window.
+    pub(super) fn prepare_tab_image(&mut self, window: Option<&WindowHandle>) {
+        let Some(press) = self
+            .tab_press
+            .as_ref()
+            .filter(|press| press.image.is_none())
+        else {
+            return;
+        };
+        let (sheet, grab) = (press.sheet, press.grab);
+        self.retire_landed_tab_image(window);
+        let source = self.workspace.workbench.group_of(sheet).and_then(|group| {
+            let strip = *self.tab_strips.iter().find(|strip| strip.group == group)?;
+            Some((strip, self.workspace.sheet_index(sheet)?))
+        });
+        let loaded = source.is_some_and(|(strip, index)| {
+            let tab = self.drag_tab_presentation(index);
+            let scale = window.map_or(1., WindowHandle::scale_factor);
+            match self.render_drag_tab(&tab, strip, scale) {
+                Ok(image) => {
+                    if let Some(window) = window {
+                        let grab = Point {
+                            x: grab.x + IMAGE_PAD,
+                            y: grab.y + IMAGE_PAD,
+                        };
+                        window.load_drag_image(&image, grab);
+                    }
+                    true
+                }
+                // Most presses are clicks, so no message: without an image the
+                // drag still works, painting the tab in its gap instead.
+                Err(_) => false,
+            }
+        });
+        if let Some(press) = &mut self.tab_press {
+            press.image = Some(loaded);
+        }
+    }
+
+    fn release_tab_image(&self, window: Option<&WindowHandle>, press: &TabPress) {
+        if press.image == Some(true)
+            && let Some(window) = window
+        {
+            window.hide_drag_image();
+        }
+    }
+
+    /// Replaces the tab with its floating image at once. The strip keeps a gap
+    /// where the tab was until the pointer finds another slot.
+    fn start_tab_drag(&mut self, window: Option<&WindowHandle>, position: Point) -> bool {
+        let Some(press) = self.tab_press.as_ref() else {
             return false;
         };
-        // Unsupported transfers (for example a cloned view of the same buffer) can still
-        // reorder in this window. Do not lift them out of the strip.
-        if !self.transferable_tab(index) {
+        let (sheet, start) = (press.sheet, press.start);
+        let floating = press.image == Some(true);
+        let (Some(from), Some(pointer)) = (
+            self.tab_screen_point(window, start),
+            self.tab_screen_point(window, position),
+        ) else {
             return false;
-        }
-        let tab = self.drag_tab_presentation(index);
-        let scale = window.map_or(1., WindowHandle::scale_factor);
-        match self.render_drag_tab(&tab, strip, scale) {
-            Ok(image) => self.drag_image = Some(image),
-            Err(error) => {
-                self.named_error(window, &error);
-                return false;
+        };
+        let home = self.workspace.workbench.group_of(sheet).and_then(|group| {
+            let index = self.workspace.workbench.groups[group]
+                .sheets
+                .iter()
+                .position(|id| *id == sheet)?;
+            Some(DragSlot {
+                window: self.session_id,
+                group,
+                index,
+            })
+        });
+        let (Some(home), Some(index)) = (home, self.workspace.sheet_index(sheet)) else {
+            if let Some(press) = self.tab_press.take() {
+                self.release_tab_image(window, &press);
             }
-        }
-        self.begin_tab_slide();
+            return false;
+        };
+        let transferable = self.transferable_tab(index);
+        let tab = Rc::new(self.drag_tab_presentation(index));
         self.sessions.borrow_mut().tab_drag = Some(SharedTabDrag {
             source: self.session_id,
-            tab: Rc::new(tab),
-            slot: None,
-            pointer_x: press.start.x,
-            grab_x: press.grab.x,
+            tab,
+            slot: Some(home),
+            floating,
         });
+        self.tab_click = None;
+        if let Some(press) = &mut self.tab_press {
+            press.drag = Some(TabDrag {
+                home,
+                detached: false,
+                transferable,
+                floating,
+                pointer,
+                lead: Point {
+                    x: pointer.x - from.x,
+                    y: pointer.y - from.y,
+                },
+                started: Instant::now(),
+            });
+        }
         if let Some(window) = window {
             window.request_frame();
         }
         true
     }
 
-    fn detached_tab_gesture(
-        &mut self,
-        window: Option<&WindowHandle>,
-        event: &MouseEvent,
-        mut press: TabPress,
-    ) {
+    /// Moves the floating tab 1:1 with the pointer in both axes and tracks the
+    /// slot under it in any window. Strips only repaint when that slot changes.
+    fn tab_drag_gesture(&mut self, window: Option<&WindowHandle>, event: &MouseEvent) {
         let Some(screen) = self.tab_screen_point(window, event.position) else {
-            self.tab_press = Some(press);
             self.cancel_tab_drag(window);
             return;
         };
-        let drag = press.drag.as_mut().unwrap();
-        let (slot, previous) = {
-            let mut sessions = self.sessions.borrow_mut();
-            let previous = sessions.tab_drag.as_ref().and_then(|drag| drag.slot);
-            let hit = sessions.tab_strip_at(window, screen);
-            let (slot, pointer_x) = if let Some((id, strip)) = hit {
+        let Some((sheet, grab, mut drag)) = self
+            .tab_press
+            .as_ref()
+            .and_then(|press| Some((press.sheet, press.grab, press.drag?)))
+        else {
+            return;
+        };
+        let previous = self
+            .sessions
+            .borrow()
+            .tab_drag
+            .as_ref()
+            .and_then(|drag| drag.slot);
+        let hit = self
+            .sessions
+            .borrow()
+            .tab_strip_at(window, screen)
+            .filter(|(id, _)| drag.transferable || *id == self.session_id)
+            .map(|(id, strip)| {
                 let gap = previous
                     .filter(|slot| slot.window == id && slot.group == strip.group)
                     .map(|slot| slot.index);
-                let (index, pointer_x) = strip.drag_position(
-                    screen.x,
-                    (id == self.session_id).then_some(press.sheet),
-                    gap,
-                );
-                (
-                    Some(DragSlot {
-                        window: id,
-                        group: strip.group,
-                        index,
-                    }),
-                    pointer_x,
-                )
-            } else {
-                (None, 0.)
-            };
-            if let Some(slot) = slot.filter(|slot| slot.window == self.session_id) {
-                drag.group = slot.group;
-            }
-            let shared = sessions.tab_drag.as_mut().unwrap();
-            shared.slot = slot;
-            shared.pointer_x = pointer_x;
-            if previous != slot {
-                if let Some(previous) = previous {
-                    sessions.request_window_frame(previous.window);
+                let source = (id == self.session_id).then_some(sheet);
+                DragSlot {
+                    window: id,
+                    group: strip.group,
+                    index: strip.drag_position(screen.x, source, gap),
                 }
-                if let Some(slot) = slot
-                    && previous.is_none_or(|previous| previous.window != slot.window)
-                {
-                    sessions.request_window_frame(slot.window);
-                }
-            }
-            (slot, previous)
-        };
+            });
+        if hit.is_none() && !drag.detached {
+            let width = self.window_size.width;
+            drag.detached = self
+                .tab_strips
+                .iter()
+                .find(|strip| strip.group == drag.home.group)
+                .is_some_and(|strip| outside_detach_band(*strip, event.position, width));
+        }
+        // Inside the detach band an off-strip pointer keeps the last gap here.
+        let slot = hit
+            .or_else(|| previous.filter(|slot| !drag.detached && slot.window == self.session_id));
+        self.set_shared_slot(slot);
+        drag.pointer = screen;
         if event.kind == MouseKind::Up {
-            self.clear_detached_tab(window);
-            let result = match slot {
-                Some(slot) if slot.window == self.session_id => {
-                    self.commit_tab_drag(press.sheet, slot.group, slot.index);
-                    Ok(())
-                }
-                Some(slot) => self.merge_dragged_tab(window, press.sheet, slot),
-                None => {
-                    let tab = screen_offset(window, screen, press.grab);
-                    self.tear_off_tab(window, press.sheet, tab)
-                }
-            };
-            if let Err(error) = result {
-                self.named_error(window, &error);
-            }
-            self.named_changed(window, false);
+            self.tab_press = None;
+            self.drop_tab(window, sheet, grab, drag, hit);
             return;
         }
+        if drag.floating
+            && let Some(window) = window
+        {
+            window.move_drag_image(drag.anchor(Instant::now()));
+        }
+        if let Some(press) = &mut self.tab_press {
+            press.drag = Some(drag);
+        }
+    }
 
-        if let Some(window) = window {
-            match slot {
-                None if drag.popup_loaded => window.move_drag_image(screen),
-                None => {
-                    if let Some(image) = &self.drag_image {
-                        window.show_drag_image(
-                            image,
-                            screen,
-                            Point {
-                                x: press.grab.x + IMAGE_PAD,
-                                y: press.grab.y + IMAGE_PAD,
-                            },
-                        );
-                        drag.popup_loaded = true;
-                    }
-                }
-                Some(_) if previous.is_none() && drag.popup_loaded => window.pause_drag_image(),
-                Some(_) => {}
+    fn set_shared_slot(&self, slot: Option<DragSlot>) {
+        let mut sessions = self.sessions.borrow_mut();
+        let Some(shared) = sessions.tab_drag.as_mut() else {
+            return;
+        };
+        let previous = std::mem::replace(&mut shared.slot, slot);
+        if previous != slot {
+            for window in previous.into_iter().chain(slot).map(|slot| slot.window) {
+                sessions.request_window_frame(window);
             }
         }
-        self.tab_press = Some(press);
+    }
+
+    fn drop_tab(
+        &mut self,
+        window: Option<&WindowHandle>,
+        sheet: u64,
+        grab: Point,
+        drag: TabDrag,
+        hit: Option<DragSlot>,
+    ) {
+        let action = match hit {
+            Some(slot) => Landing::Insert(slot),
+            None if drag.detached && drag.transferable => {
+                // Off every strip and out of the band: a new window, exactly where the tab is.
+                self.end_shared_tab_drag(window);
+                let anchor = screen_offset(window, drag.pointer, grab);
+                if let Err(error) = self.tear_off_tab(window, sheet, anchor) {
+                    self.named_error(window, &error);
+                }
+                self.named_changed(window, false);
+                return;
+            }
+            None => Landing::Return,
+        };
+        self.land_tab(window, sheet, grab, drag, action);
+    }
+
+    /// Eases the floating tab into its slot. The order changes only when it arrives.
+    fn land_tab(
+        &mut self,
+        window: Option<&WindowHandle>,
+        sheet: u64,
+        grab: Point,
+        drag: TabDrag,
+        action: Landing,
+    ) {
+        let slot = match action {
+            Landing::Insert(slot) => slot,
+            Landing::Return => drag.home,
+        };
+        self.set_shared_slot(Some(slot));
+        let start = Instant::now();
+        let from = drag.anchor(start);
+        let to = self.slot_anchor(window, slot, grab).unwrap_or(from);
+        let time = if drag.floating && self.tab_animation_enabled() {
+            LAND_TIME
+        } else {
+            Duration::ZERO
+        };
+        self.tab_landing = Some(TabLanding {
+            sheet,
+            action,
+            from,
+            to,
+            start,
+            time,
+            floating: drag.floating,
+        });
+        self.advance_tab_landing(window, start);
+    }
+
+    /// The pointer position that puts the floating tab exactly on `slot`.
+    fn slot_anchor(
+        &self,
+        window: Option<&WindowHandle>,
+        slot: DragSlot,
+        grab: Point,
+    ) -> Option<Point> {
+        let sessions = self.sessions.borrow();
+        let strip = sessions
+            .tab_strips
+            .get(&slot.window)?
+            .iter()
+            .find(|strip| strip.group == slot.group)?;
+        let left = Point {
+            x: strip.origin + strip.step * slot.index as f64,
+            y: strip.top_y,
+        };
+        Some(screen_offset(
+            window,
+            left,
+            Point {
+                x: -grab.x,
+                y: -grab.y,
+            },
+        ))
+    }
+
+    /// Closes the threshold lead between pointer events, from the frame loop.
+    pub(super) fn catch_up_tab_drag(&self, window: Option<&WindowHandle>, now: Instant) {
+        let Some(drag) = self.tab_press.as_ref().and_then(|press| press.drag) else {
+            return;
+        };
+        if let Some(window) = window
+            && drag.floating
+            && drag.lead != Point::default()
+            && drag.started + CATCH_UP + CATCH_UP / 2 > now
+        {
+            window.move_drag_image(drag.anchor(now));
+            if drag.catching_up(now) {
+                window.request_frame();
+            }
+        }
+    }
+
+    /// Steps a released tab toward its slot from the frame loop. On arrival the
+    /// tab is inserted, and its image stays until the receiving window has
+    /// presented the inserted tab underneath it.
+    pub(super) fn advance_tab_landing(&mut self, window: Option<&WindowHandle>, now: Instant) {
+        let Some(landing) = self.tab_landing else {
+            return;
+        };
+        let live = self
+            .sessions
+            .borrow()
+            .tab_drag
+            .as_ref()
+            .is_some_and(|drag| drag.source == self.session_id);
+        let elapsed = now.saturating_duration_since(landing.start);
+        if live && elapsed < landing.time {
+            let t = ease_out(elapsed.as_secs_f64() / landing.time.as_secs_f64());
+            if let Some(window) = window {
+                window.move_drag_image(Point {
+                    x: landing.from.x + (landing.to.x - landing.from.x) * t,
+                    y: landing.from.y + (landing.to.y - landing.from.y) * t,
+                });
+                window.request_frame();
+            }
+            return;
+        }
+        self.tab_landing = None;
+        if !live {
+            // The receiving window went away mid-flight; the tab stays where it was.
+            if let Some(window) = window {
+                window.hide_drag_image();
+                window.request_frame();
+            }
+            return;
+        }
+        if landing.floating
+            && let Some(window) = window
+        {
+            window.move_drag_image(landing.to);
+        }
+        {
+            let mut sessions = self.sessions.borrow_mut();
+            if let Some(slot) = sessions.tab_drag.take().and_then(|drag| drag.slot) {
+                sessions.request_window_frame(slot.window);
+            }
+            sessions.request_window_frame(self.session_id);
+        }
+        let result = match landing.action {
+            Landing::Insert(slot) if slot.window == self.session_id => {
+                self.commit_tab_drag(landing.sheet, slot.group, slot.index);
+                Ok(self.session_id)
+            }
+            Landing::Insert(slot) => self
+                .merge_dragged_tab(window, landing.sheet, slot)
+                .map(|()| slot.window),
+            Landing::Return => Ok(self.session_id),
+        };
+        match result {
+            Ok(receiver) if landing.floating => {
+                self.sessions.borrow_mut().drag_image_hide = Some(DragImageHide {
+                    window: receiver,
+                    after: now + IMAGE_HIDE_DELAY,
+                    rendered: false,
+                });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(window) = window {
+                    window.hide_drag_image();
+                }
+                self.named_error(window, &error);
+            }
+        }
+        if let Some(window) = window {
+            window.request_frame();
+        }
+        self.named_changed(window, false);
+    }
+
+    /// Hides a landed tab's image once its receiving window has presented the
+    /// inserted tab. Every other window keeps a deadline frame, so the image can
+    /// never stay behind when the receiver cannot present.
+    pub(super) fn release_landed_tab_image(
+        &mut self,
+        window: Option<&WindowHandle>,
+        now: Instant,
+        presented: bool,
+    ) {
+        let mut sessions = self.sessions.borrow_mut();
+        let Some(hide) = sessions.drag_image_hide.as_mut() else {
+            return;
+        };
+        let deadline = hide.after + IMAGE_HIDE_TIMEOUT;
+        let receiver = hide.window == self.session_id && presented;
+        if now >= deadline || (receiver && hide.rendered && now >= hide.after) {
+            sessions.drag_image_hide = None;
+            drop(sessions);
+            if let Some(window) = window {
+                window.hide_drag_image();
+            }
+            return;
+        }
+        let next = if receiver {
+            hide.rendered = true;
+            hide.after
+        } else {
+            deadline
+        };
+        drop(sessions);
+        if let Some(window) = window {
+            window.request_frame_at(next);
+        }
+    }
+
+    /// Completes a released drop at once, for input that cannot wait for it.
+    /// The image still waits for the receiving window's next frame.
+    pub(super) fn finish_tab_landing(&mut self, window: Option<&WindowHandle>) {
+        if let Some(landing) = self.tab_landing {
+            self.advance_tab_landing(window, landing.start + landing.time);
+        }
+    }
+
+    /// A new press needs the popup: retire a landed image still waiting for its frame.
+    fn retire_landed_tab_image(&self, window: Option<&WindowHandle>) {
+        let pending = self.sessions.borrow_mut().drag_image_hide.take();
+        if pending.is_some()
+            && let Some(window) = window
+        {
+            window.hide_drag_image();
+        }
+    }
+
+    fn end_shared_tab_drag(&mut self, window: Option<&WindowHandle>) {
+        if let Some(window) = window {
+            window.hide_drag_image();
+        }
+        self.sessions
+            .borrow_mut()
+            .cancel_window_tab_drag(self.session_id);
     }
 
     fn merge_dragged_tab(
@@ -388,29 +664,35 @@ impl App {
         }
     }
 
-    fn clear_detached_tab(&mut self, window: Option<&WindowHandle>) {
-        self.drag_image = None;
-        if let Some(window) = window {
-            window.hide_drag_image();
-        }
-        self.sessions
-            .borrow_mut()
-            .cancel_window_tab_drag(self.session_id);
-    }
-
+    /// Ends a gesture without dropping. A released tab still lands, at once.
     pub(super) fn cancel_tab_drag(&mut self, window: Option<&WindowHandle>) -> bool {
+        self.finish_tab_landing(window);
         let Some(press) = self.tab_press.take() else {
             return false;
         };
-        if let Some(drag) = press.drag {
+        if press.drag.is_some() {
             self.begin_tab_slide();
-            if drag.detached {
-                self.clear_detached_tab(window);
-            }
+            self.end_shared_tab_drag(window);
             if let Some(window) = window {
                 window.request_frame();
             }
+        } else {
+            self.release_tab_image(window, &press);
         }
+        true
+    }
+
+    /// Escape: the floating tab eases back into its original slot.
+    pub(super) fn return_tab_drag(&mut self, window: Option<&WindowHandle>) -> bool {
+        let Some((sheet, grab, drag)) = self
+            .tab_press
+            .as_ref()
+            .and_then(|press| Some((press.sheet, press.grab, press.drag?)))
+        else {
+            return self.cancel_tab_drag(window);
+        };
+        self.tab_press = None;
+        self.land_tab(window, sheet, grab, drag, Landing::Return);
         true
     }
 
@@ -418,8 +700,7 @@ impl App {
         if self
             .tab_press
             .as_ref()
-            .and_then(|press| press.drag)
-            .is_some_and(|drag| drag.detached)
+            .is_some_and(|press| press.drag.is_some())
             && self
                 .sessions
                 .borrow()
@@ -442,40 +723,17 @@ impl App {
     }
 
     pub(super) fn tab_preview_order(&self, group: usize, sheets: &[u64]) -> Option<Vec<u64>> {
-        if let Some(shared) = self.shared_tab_preview()
-            && let Some(slot) = shared.slot.filter(|slot| slot.group == group)
+        let sessions = self.sessions.borrow();
+        let drag = sessions.tab_drag.as_ref()?;
+        if let Some(slot) = drag
+            .slot
+            .filter(|slot| slot.window == self.session_id && slot.group == group)
         {
-            return Some(preview_order(sheets, shared.tab.sheet, Some(slot.index)));
+            return Some(preview_order(sheets, drag.tab.sheet, Some(slot.index)));
         }
-        let press = self.tab_press.as_ref()?;
-        let drag = press.drag?;
-        ((!drag.detached && drag.group == group) || sheets.contains(&press.sheet)).then(|| {
-            preview_order(
-                sheets,
-                press.sheet,
-                (!drag.detached && drag.group == group).then_some(drag.index),
-            )
-        })
-    }
-
-    pub(super) fn lifted_tab_x(
-        &self,
-        shared: Option<&SharedTabDrag>,
-        sheet: u64,
-        clip: Rect,
-        width: f64,
-    ) -> Option<f64> {
-        let x = if let Some(shared) = shared.filter(|drag| drag.tab.sheet == sheet) {
-            shared.pointer_x - shared.grab_x.clamp(0., width)
-        } else {
-            let press = self
-                .tab_press
-                .as_ref()
-                .filter(|press| press.sheet == sheet)?;
-            let drag = press.drag.filter(|drag| !drag.detached)?;
-            drag.x - press.grab.x.clamp(0., width)
-        };
-        Some(x.clamp(clip.x, clip.x + (clip.width - width).max(0.)))
+        // The tab is over another strip or off every strip: its own strip closes up.
+        (drag.source == self.session_id && sheets.contains(&drag.tab.sheet))
+            .then(|| preview_order(sheets, drag.tab.sheet, None))
     }
 
     pub(super) fn publish_tab_strips(&self, window: Option<&WindowHandle>) {
@@ -532,8 +790,7 @@ impl App {
                 width: (bottom.x - top.x).max(0.),
                 height: (bottom.y - top.y).abs(),
             };
-            item.view_x = strip.bounds.x;
-            item.x_scale = x_scale;
+            item.top_y = top.y;
             item.origin = top.x + (strip.origin() - strip.bounds.x) * x_scale;
             item.step = strip.step * x_scale;
             item.sheets
@@ -787,12 +1044,7 @@ impl App {
 }
 
 impl ScreenTabStrip {
-    fn drag_position(
-        &self,
-        screen_x: f64,
-        source_sheet: Option<u64>,
-        gap: Option<usize>,
-    ) -> (usize, f64) {
+    fn drag_position(&self, screen_x: f64, source_sheet: Option<u64>, gap: Option<usize>) -> usize {
         // Removing the source sheet leaves a compact layout for a re-entry into its group.
         let count = self.sheets.len()
             - usize::from(source_sheet.is_some_and(|sheet| self.sheets.contains(&sheet)));
@@ -800,12 +1052,17 @@ impl ScreenTabStrip {
         let gap = gap.map(|index| index.min(count));
         let crossed = (((screen_x - self.origin) / self.step + 0.5).floor() as usize)
             .min(count + usize::from(gap.is_some()));
-        let index = crossed - usize::from(gap.is_some_and(|index| index < crossed));
-        (
-            index,
-            self.view_x + (screen_x - self.bounds.x) / self.x_scale,
-        )
+        crossed - usize::from(gap.is_some_and(|index| index < crossed))
     }
+}
+
+fn smoothstep(t: f64) -> f64 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+
+fn ease_out(t: f64) -> f64 {
+    1. - (1. - t.clamp(0., 1.)).powi(3)
 }
 
 fn screen_offset(window: Option<&WindowHandle>, screen: Point, grab: Point) -> Point {
@@ -830,56 +1087,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_hit_testing_and_threshold_are_in_logical_points() {
+    fn threshold_and_detach_band_are_in_logical_points() {
         let bounds = Rect {
             x: 100.,
             y: 40.,
             width: 200.,
             height: 30.,
         };
-        let strips = [TabStrip {
+        let strip = TabStrip {
             group: 1,
             bounds,
             clip: bounds,
             step: 80.,
             scroll: 0.,
-        }];
-        assert_eq!(
-            strip_at(&strips, Point { x: 299., y: 69. }).unwrap().group,
-            1
-        );
-        assert!(strip_at(&strips, Point { x: 299., y: 70. }).is_none());
-        assert!(strip_at(&strips, Point { x: 300., y: 60. }).is_none());
+        };
         let press = Point { x: 125., y: 50. };
         assert!(!over_threshold(press, Point { x: 127., y: 52. }));
         assert!(over_threshold(press, Point { x: 125., y: 54. }));
-        assert!(!outside_detach_band(
-            strips[0],
-            Point { x: 150., y: 95. },
-            500.,
-        ));
-        assert!(outside_detach_band(
-            strips[0],
-            Point { x: 150., y: 5. },
-            500.,
-        ));
-        assert!(outside_detach_band(
-            strips[0],
-            Point { x: -31., y: 50. },
-            500.,
-        ));
+        assert!(!outside_detach_band(strip, Point { x: 150., y: 95. }, 500.));
+        assert!(outside_detach_band(strip, Point { x: 150., y: 5. }, 500.));
+        assert!(outside_detach_band(strip, Point { x: -31., y: 50. }, 500.));
         for (x, y) in [(150., 10.), (150., 100.), (-30., 50.), (530., 50.)] {
-            assert!(!outside_detach_band(strips[0], Point { x, y }, 500.));
+            assert!(!outside_detach_band(strip, Point { x, y }, 500.));
         }
-        assert!(outside_detach_band(
-            strips[0],
-            Point { x: 150., y: 101. },
-            500.
-        ));
+        assert!(outside_detach_band(strip, Point { x: 150., y: 101. }, 500.));
     }
 
     #[test]
-    fn detached_tab_uses_scaled_scrolled_slots_and_skips_the_current_gap() {
+    fn screen_slots_use_scaled_scrolled_steps_and_skip_the_current_gap() {
         let strip = ScreenTabStrip {
             origin: 360.,
             step: 80.,
@@ -887,33 +1122,75 @@ mod tests {
                 x: 400.,
                 ..Rect::default()
             },
-            x_scale: 2.,
-            view_x: 130.,
             sheets: vec![1, 2, 3],
             ..Default::default()
         };
-        assert_eq!(strip.drag_position(430., None, None), (1, 145.));
-        assert_eq!(strip.drag_position(500., None, Some(1)).0, 1);
-        assert_eq!(strip.drag_position(560., None, Some(1)).0, 2);
-        assert_eq!(strip.drag_position(900., Some(2), None).0, 2);
+        assert_eq!(strip.drag_position(430., None, None), 1);
+        assert_eq!(strip.drag_position(500., None, Some(1)), 1);
+        assert_eq!(strip.drag_position(560., None, Some(1)), 2);
+        assert_eq!(strip.drag_position(900., Some(2), None), 2);
+    }
+
+    /// The in-window reorder the floating drag replaced: midpoint crossings in
+    /// the unanimated layout with the dragged tab occupying its current gap.
+    fn former_insertion_index(
+        widths: &[f64],
+        mut left: f64,
+        current: Option<usize>,
+        x: f64,
+    ) -> usize {
+        let mut insertion = 0;
+        for (i, width) in widths.iter().enumerate() {
+            if current != Some(i) {
+                if x < left + width / 2. {
+                    break;
+                }
+                insertion += 1;
+            }
+            left += width;
+        }
+        insertion
     }
 
     #[test]
-    fn swaps_at_midpoints_without_oscillating_for_unequal_tabs() {
-        for (dragged, other) in [(25., 140.), (175., 44.)] {
-            let crossing = dragged + other / 2.;
-            let index =
-                |widths: [f64; 2], at, x| insertion_index(widths.into_iter(), 0., Some(at), x);
-            assert_eq!(index([dragged, other], 0, crossing - 0.1), 0);
-            assert_eq!(index([dragged, other], 0, crossing), 1);
-            for x in [crossing, crossing - 1., other / 2.] {
-                assert_eq!(
-                    index([other, dragged], 1, x),
-                    1,
-                    "{dragged} / {other}, x={x}"
-                );
+    fn own_strip_slots_match_the_former_in_window_reorder() {
+        let (origin, step) = (37.5, 80.);
+        for count in 1..=5usize {
+            let sheets: Vec<u64> = (1..=count as u64).collect();
+            let strip = ScreenTabStrip {
+                origin,
+                step,
+                sheets: sheets.clone(),
+                ..Default::default()
+            };
+            let widths = vec![step; count];
+            for &dragged in &sheets {
+                for gap in 0..count {
+                    let mut x = origin - step;
+                    while x < origin + step * (count + 1) as f64 {
+                        assert_eq!(
+                            strip.drag_position(x, Some(dragged), Some(gap)),
+                            former_insertion_index(&widths, origin, Some(gap), x),
+                            "count={count} dragged={dragged} gap={gap} x={x}"
+                        );
+                        x += 2.5;
+                    }
+                }
             }
-            assert_eq!(index([other, dragged], 1, other / 2. - 0.1), 0);
         }
+    }
+
+    #[test]
+    fn landing_eases_out_from_the_release_point_and_ends_exactly_on_the_slot() {
+        assert_eq!(ease_out(0.), 0.);
+        assert_eq!(ease_out(1.), 1.);
+        assert_eq!(ease_out(2.), 1.);
+        let mut last = 0.;
+        for step in 1..=12 {
+            let t = ease_out(step as f64 / 12.);
+            assert!(t > last, "ease_out must keep moving toward the slot");
+            last = t;
+        }
+        assert!(ease_out(0.5) > 0.8, "most of the distance is covered early");
     }
 }

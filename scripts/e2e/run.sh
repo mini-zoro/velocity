@@ -6,6 +6,7 @@
 #   scripts/e2e/run.sh probe
 #   scripts/e2e/run.sh scenarios       # probe first, then every scenario the runner supports
 #   scripts/e2e/run.sh scenario ime
+#   scripts/e2e/run.sh scenario tabdrag  # E2E_TABDRAG_LAUNCHERS=before=…,after=… compares two builds
 #   scripts/e2e/run.sh summary         # nonzero unless every recorded scenario passed
 #
 # Environment:
@@ -33,7 +34,8 @@ usage() {
 build() {
     mkdir -p "$E2E_BIN"
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
-        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift"
+        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
+        "$VELOCITY_E2E/tabdrag.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
@@ -97,8 +99,11 @@ scenario() {
     rm -rf "$work"
     mkdir -p "$work" "$E2E_ARTIFACTS"
     local status=0
+    # The tabdrag scenario measures two builds over several rounds.
+    local limit=480
+    [ "$name" = tabdrag ] && limit=1200
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
-        run_with_timeout 480 "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
+        run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
     cleanup_apps
     append_summary "Scenario $name" "$log"
     echo "$name exit=$status"
@@ -126,6 +131,7 @@ scenarios() {
     fi
     if [ "$pointer" = 1 ]; then
         scenario tabs
+        scenario tabdrag
         scenario activate
         scenario background
     fi

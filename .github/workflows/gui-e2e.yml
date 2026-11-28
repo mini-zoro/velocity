@@ -14,10 +14,18 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "auto = probe then every supported scenario; probe only; scenarios only"
+        description: "auto = probe then every supported scenario; probe only; scenarios only; tab drag scenario only"
         type: choice
         default: auto
-        options: [auto, probe, scenarios]
+        options: [auto, probe, scenarios, tabdrag]
+      tabdrag_compare_ref:
+        description: "tabdrag: also build this ref (e.g. main) and measure both builds on this runner"
+        type: string
+        default: ""
+      tabdrag_rounds:
+        description: "tabdrag: rounds per build (each round is three measured drags plus a merge and a tear-off)"
+        type: string
+        default: "2"
 
 concurrency:
   group: gui-e2e-${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +38,7 @@ jobs:
   gui:
     name: gui e2e (macos-15 arm64)
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -61,14 +69,42 @@ jobs:
       # Step 1: capability table (csrutil, GUI session, TCC, HID keyboard/pointer,
       # Pinyin selection, screencapture). Also decides which scenarios run below.
       - name: Probe runner capabilities
-        if: inputs.suite != 'scenarios'
+        if: inputs.suite != 'scenarios' && inputs.suite != 'tabdrag'
         continue-on-error: true
         run: scripts/e2e/run.sh probe
 
       - name: Scenarios (probe-gated)
-        if: github.event_name == 'pull_request' || inputs.suite != 'probe'
+        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'tabdrag')
         continue-on-error: true
         run: scripts/e2e/run.sh scenarios
+
+      # Before/after numbers from one runner. The same checkout builds the comparison
+      # ref incrementally (resource paths are compiled in, so both binaries find the
+      # same packages), then is restored; the driver always comes from this commit.
+      - name: Build the comparison app
+        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'tabdrag' && inputs.tabdrag_compare_ref != ''
+        env:
+          COMPARE_REF: ${{ inputs.tabdrag_compare_ref }}
+        run: |
+          set -euo pipefail
+          ab="$RUNNER_TEMP/ab"
+          mkdir -p "$ab/before" "$ab/after"
+          cp target/release/velocity "$ab/after/velocity"
+          git fetch --no-tags --depth=1 origin "$COMPARE_REF"
+          git checkout FETCH_HEAD -- crates Cargo.toml Cargo.lock
+          cargo build --release --locked -p velocity
+          cp target/release/velocity "$ab/before/velocity"
+          git checkout HEAD -- crates Cargo.toml Cargo.lock
+          git status --short
+          echo "before: $(git rev-parse FETCH_HEAD)  after: $(git rev-parse HEAD)"
+          echo "E2E_TABDRAG_LAUNCHERS=before=$ab/before/velocity,after=$ab/after/velocity" >> "$GITHUB_ENV"
+
+      - name: Tab drag scenario only
+        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'tabdrag'
+        continue-on-error: true
+        env:
+          E2E_TABDRAG_ROUNDS: ${{ inputs.tabdrag_rounds }}
+        run: scripts/e2e/run.sh scenario tabdrag
 
       - name: Summarise
         if: always()
