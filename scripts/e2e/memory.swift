@@ -298,6 +298,7 @@ final class MemorySession {
         let restored = runSelf(["minimize", "\(pid)", "0"]).out
         sleep(seconds: 3)
         report.note("\(build.label) drawables after restoring it", detail: "\(restored) \(surfaces())")
+        backgroundRelease()
         app?.hide()
         sleep(seconds: 4)
         report.note("\(build.label) drawables app hidden 4 s", detail: surfaces())
@@ -308,6 +309,38 @@ final class MemorySession {
         command("close_window")
         let closed = settle()
         report.note("\(build.label) after closing two windows", detail: "\(mib(closed)) MiB, \(surfaces())")
+    }
+
+    /// Another app in front: after a few seconds every Velocity window may keep only
+    /// the drawable on screen. Its pixels must not change when the others go.
+    func backgroundRelease() {
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+            .first?.processIdentifier, let front = onScreenWindows(pid).first?.bounds else {
+            report.note("\(build.label) background release", detail: "no Finder or no window")
+            return
+        }
+        _ = activate(finder)
+        sleep(seconds: 0.8)
+        let early = logs.appendingPathComponent("inactive-early.png").path
+        let late = logs.appendingPathComponent("inactive-released.png").path
+        let rect = "\(Int(front.minX)),\(Int(front.minY)),\(Int(front.width)),\(Int(front.height))"
+        _ = shell("screencapture -x -R \(rect) '\(early)'")
+        report.note("\(build.label) drawables inactive 0.8 s", detail: "front=\(frontmostName()) \(surfaces())")
+        sleep(seconds: 4.5)
+        _ = shell("screencapture -x -R \(rect) '\(late)'")
+        report.note("\(build.label) drawables inactive 5.3 s", detail: surfaces())
+        let same = pixels(early).flatMap { a in pixels(late).map { a == $0 } }
+        report.note("\(build.label) window pixels across the release", detail: same.map { $0 ? "identical" : "DIFFER" } ?? "unreadable")
+        _ = activate(pid)
+        sleep(seconds: 1.5)
+        report.note("\(build.label) drawables active again", detail: "front=\(frontmostName()) \(surfaces())")
+    }
+
+    func pixels(_ path: String) -> Data? {
+        guard let image = NSImage(contentsOfFile: path),
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cg)
+        return rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) }
     }
 
     func dump(_ name: String, extra: Bool) {
