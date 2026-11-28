@@ -35,12 +35,38 @@ private let footprintSlack: Int64 = 2 * 1_048_576
 
 private enum TabSource: String { case none = "-", floating = "F", strip = "S" }
 
+/// The scenario's App Nap exemption.
+private var napGuard: NSObjectProtocol?
+
 /// One pointer event as posted.
 private struct Posted {
     var t: Double
     var point: CGPoint
     var phase: Int
     var cost: Double
+    /// How long after its deadline the event was posted.
+    var late: Double
+}
+
+/// Gives the calling thread a real-time (time-constraint) schedule, as audio and
+/// video threads use, so a 120 Hz deadline is not stretched by timer coalescing.
+private func makeRealtime(period: Double) -> Bool {
+    var info = mach_timebase_info_data_t()
+    mach_timebase_info(&info)
+    func ticks(_ seconds: Double) -> UInt32 {
+        UInt32(seconds * 1e9 * Double(info.denom) / Double(info.numer))
+    }
+    var policy = thread_time_constraint_policy_data_t(period: ticks(period), computation: ticks(0.0015),
+                                                      constraint: ticks(0.003), preemptible: 1)
+    let count = mach_msg_type_number_t(MemoryLayout<thread_time_constraint_policy_data_t>.size
+        / MemoryLayout<integer_t>.size)
+    let status = withUnsafeMutablePointer(to: &policy) { pointer in
+        pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            thread_policy_set(pthread_mach_thread_np(pthread_self()), thread_policy_flavor_t(THREAD_TIME_CONSTRAINT_POLICY),
+                              $0, count)
+        }
+    }
+    return status == KERN_SUCCESS
 }
 
 private struct DragSample {
@@ -67,11 +93,14 @@ private struct DragMetrics {
     var lagMs = Double.nan
     var sampleP95Ms = Double.nan
     var postP95Ms = Double.nan
+    var postLateP95Ms = Double.nan
+    var postLateMaxMs = Double.nan
+    var realtime = false
 
     var line: String {
-        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall=%.1f%% lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f",
+        String(format: "moving=%d floating=%.1f%% err_med=%.2f err_p95=%.2f max_jump=%.2f max_jump_raw=%.2f entry_jump=%.2f entry_shift=%.2f stall=%.1f%% lag_ms=%.1f sample_dt_p95_ms=%.1f post_p95_ms=%.2f post_late_p95_ms=%.1f post_late_max_ms=%.1f realtime=%@",
                moving, floatingShare * 100, errorMedian, errorP95, maxJump, maxJumpRaw, entryJump, entryShift,
-               stallShare * 100, lagMs, sampleP95Ms, postP95Ms)
+               stallShare * 100, lagMs, sampleP95Ms, postP95Ms, postLateP95Ms, postLateMaxMs, realtime ? "yes" : "no")
     }
 }
 
@@ -147,6 +176,7 @@ private final class Poster: @unchecked Sendable {
     let press: CGPoint
     let legs: [Leg]
     private(set) var log: [Posted] = []
+    private(set) var realtime = false
     let done = DispatchSemaphore(value: 0)
 
     init(clock: MachClock, press: CGPoint, legs: [Leg]) {
@@ -157,7 +187,10 @@ private final class Poster: @unchecked Sendable {
     }
 
     func start() {
-        let thread = Thread { [self] in run() }
+        let thread = Thread { [self] in
+            realtime = makeRealtime(period: tick)
+            run()
+        }
         thread.qualityOfService = .userInteractive
         thread.start()
     }
@@ -167,6 +200,7 @@ private final class Poster: @unchecked Sendable {
         var deadline = clock.now()
         func post(_ type: CGEventType, _ point: CGPoint, phase: Int) {
             let start = clock.now()
+            let late = start - deadline
             if let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
                                    mouseButton: .left) {
                 event.setIntegerValueField(.mouseEventClickState, value: 1)
@@ -174,7 +208,7 @@ private final class Poster: @unchecked Sendable {
                 event.post(tap: .cghidEventTap)
             }
             let end = clock.now()
-            log.append(Posted(t: end, point: point, phase: phase, cost: end - start))
+            log.append(Posted(t: end, point: point, phase: phase, cost: end - start, late: late))
         }
         func step() {
             deadline += tick
@@ -199,38 +233,70 @@ private final class Poster: @unchecked Sendable {
     }
 }
 
+/// Samples the dragged tab on its own real-time thread at 120 Hz.
+private final class Sampler: @unchecked Sendable {
+    let clock: MachClock
+    let floating: FloatingTab
+    let stripTab: AXUIElement?
+    let poster: Poster
+    private(set) var samples: [DragSample] = []
+    let done = DispatchSemaphore(value: 0)
+
+    init(clock: MachClock, pid: pid_t, stripTab: AXUIElement?, poster: Poster) {
+        self.clock = clock
+        floating = FloatingTab(pid: pid)
+        self.stripTab = stripTab
+        self.poster = poster
+        samples.reserveCapacity(1536)
+    }
+
+    func start() {
+        let thread = Thread { [self] in
+            _ = makeRealtime(period: tick)
+            run()
+            done.signal()
+        }
+        thread.qualityOfService = .userInteractive
+        thread.start()
+    }
+
+    private func run() {
+        // Half a tick after the posts, so a sample sees the latest event's effect.
+        var deadline = clock.now() + tick / 2
+        var released: Double?
+        while released.map({ clock.now() < $0 + 0.32 }) ?? true {
+            clock.wait(until: deadline)
+            let start = clock.now()
+            var tab = floating.tabOrigin()
+            var source = tab == nil ? TabSource.none : .floating
+            // AX makes the app answer on its main thread; read it only while no
+            // floating window shows the tab.
+            if tab == nil, let stripTab,
+               let rect = AXReadErrors.shared.quietly({ axRect(stripTab) }), rect.width > 1, rect.height > 1 {
+                tab = rect.origin
+                source = .strip
+            }
+            let end = clock.now()
+            samples.append(DragSample(t: (start + end) / 2, tab: tab, source: source, cost: end - start))
+            // A blocked read delays the next sample; it never bunches samples together.
+            deadline = max(deadline + tick, clock.now())
+            if released == nil, poster.done.wait(timeout: .now()) == .success { released = clock.now() }
+        }
+    }
+}
+
 /// Presses at `press`, follows `legs`, holds, releases, and keeps sampling through
 /// the drop.
-private func runDrag(pid: pid_t, press: CGPoint, legs: [Leg], stripTab: AXUIElement?) -> ([DragSample], [Posted]) {
+private func runDrag(pid: pid_t, press: CGPoint, legs: [Leg], stripTab: AXUIElement?) -> ([DragSample], [Posted], Bool) {
     let clock = MachClock()
-    let floating = FloatingTab(pid: pid)
     mouseMove(to: press)
     usleep(150_000)
     let poster = Poster(clock: clock, press: press, legs: legs)
-    var samples: [DragSample] = []
-    samples.reserveCapacity(1536)
-    // Half a tick after the posts, so a sample sees the latest event's effect.
-    var deadline = clock.now() + tick / 2
+    let sampler = Sampler(clock: clock, pid: pid, stripTab: stripTab, poster: poster)
+    sampler.start()
     poster.start()
-    var released: Double?
-    while released.map({ clock.now() < $0 + 0.32 }) ?? true {
-        clock.wait(until: deadline)
-        let start = clock.now()
-        var tab = floating.tabOrigin()
-        var source = tab == nil ? TabSource.none : .floating
-        // AX makes the app answer on its main thread; read it only while no
-        // floating window shows the tab.
-        if tab == nil, let stripTab,
-           let rect = AXReadErrors.shared.quietly({ axRect(stripTab) }), rect.width > 1, rect.height > 1 {
-            tab = rect.origin
-            source = .strip
-        }
-        let end = clock.now()
-        samples.append(DragSample(t: (start + end) / 2, tab: tab, source: source, cost: end - start))
-        // A blocked read delays the next sample; it never bunches samples together.
-        deadline = max(deadline + tick, clock.now())
-        if released == nil, poster.done.wait(timeout: .now()) == .success { released = clock.now() }
-    }
+    sampler.done.wait()
+    var samples = sampler.samples
     // Attach the pointer that was in effect at each sample.
     let log = poster.log
     var k = 0
@@ -244,7 +310,7 @@ private func runDrag(pid: pid_t, press: CGPoint, legs: [Leg], stripTab: AXUIElem
             samples[i].phase = 0
         }
     }
-    return (samples, log)
+    return (samples, log, poster.realtime)
 }
 
 private func percentile(_ values: [Double], _ p: Double) -> Double {
@@ -276,6 +342,8 @@ private func measure(_ samples: [DragSample], log: [Posted], press: CGPoint, leg
     let dts = zip(samples, samples.dropFirst()).map { ($1.t - $0.t) * 1000 }
     metrics.sampleP95Ms = percentile(dts, 0.95)
     metrics.postP95Ms = percentile(log.map { $0.cost * 1000 }, 0.95)
+    metrics.postLateP95Ms = percentile(log.map { $0.late * 1000 }, 0.95)
+    metrics.postLateMaxMs = log.map { $0.late * 1000 }.max() ?? .nan
     func pointer(_ i: Int, lag: Double) -> CGPoint {
         pointerAt(samples, i, lag: lag, log: log, press: press)
     }
@@ -398,10 +466,11 @@ private func measuredDrag(_ window: AXUIElement, pid: pid_t, label: String) -> (
     let out = CGPoint(x: press.x + 300, y: press.y + 150)
     let back = CGPoint(x: first.frame.minX + min(12, first.frame.width / 4), y: first.frame.midY)
     let backTicks = Int((distance(out, back) / 1.86).rounded(.up))
-    let (samples, log) = runDrag(pid: pid, press: press,
-                                 legs: [Leg(to: out, ticks: 180), Leg(to: back, ticks: backTicks)],
-                                 stripTab: tabElement(window, named: order[1] + "."))
-    let metrics = measure(samples, log: log, press: press, legs: 2, grab: grab)
+    let (samples, log, realtime) = runDrag(pid: pid, press: press,
+                                           legs: [Leg(to: out, ticks: 180), Leg(to: back, ticks: backTicks)],
+                                           stripTab: tabElement(window, named: order[1] + "."))
+    var metrics = measure(samples, log: log, press: press, legs: 2, grab: grab)
+    metrics.realtime = realtime
     _ = writeCSV(samples, name: label)
     return (metrics, [order[1], order[0], order[2]])
 }
@@ -486,7 +555,7 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
             let press = CGPoint(x: source.frame.midX, y: source.frame.midY)
             let below = CGPoint(x: press.x + 40, y: press.y + 140)
             let drop = CGPoint(x: target.frame.minX + 6, y: target.frame.midY)
-            let (samples, _) = runDrag(pid: pid, press: press,
+            let (samples, _, _) = runDrag(pid: pid, press: press,
                                   legs: [Leg(to: below, ticks: 80),
                                          Leg(to: drop, ticks: Int((distance(below, drop) / 1.86).rounded(.up)))],
                                   stripTab: nil)
@@ -523,6 +592,10 @@ private func runVariant(_ name: String, launcher: URL, work: URL, round: Int, ju
 
 func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     let report = Report("tabdrag")
+    // No App Nap or timer coalescing for the harness while it keeps 120 Hz deadlines.
+    // Held until the process exits.
+    napGuard = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled], reason: "tab drag timing")
     let environment = Environment.from(options)
     var variants: [(String, URL)] = []
     for pair in (ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? "").split(separator: ",") {
