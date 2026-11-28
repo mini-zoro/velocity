@@ -222,7 +222,14 @@ fn tab_press_threshold_floats_the_tab_and_escape_eases_it_home() {
             .layers
             .iter()
             .flat_map(|layer| &layer.text)
-            .filter(|run| run.text == label)
+            // A tab narrower than its label paints it truncated ("first docum…").
+            .filter(|run| {
+                run.text == label
+                    || run
+                        .text
+                        .strip_suffix('…')
+                        .is_some_and(|prefix| !prefix.is_empty() && label.starts_with(prefix))
+            })
             .count()
     };
     let scene = a.scene();
