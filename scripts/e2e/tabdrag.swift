@@ -692,20 +692,26 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
     // that depends on the session.
     report.note("start", detail: "pid \(getpid())")
     let environment = Environment.from(options)
-    // Built once, never mutated: a `var` array of (String, URL) reassigned in an `if`
-    // and then iterated trapped on a bounds check in the runner's compiler build
-    // (pull-request runs take this single-build path; dispatch runs pass a pair).
-    let pairs = (ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? "")
-        .split(separator: ",")
-        .compactMap { pair -> Variant? in
-            let parts = pair.split(separator: "=", maxSplits: 1)
-            return parts.count == 2 ? Variant(name: String(parts[0]), launcher: URL(fileURLWithPath: String(parts[1]))) : nil
+    // A single build is spelled like a pair ("after=<launcher>") and goes through the
+    // same parsing loop. With the runner's compiler (Swift 6.1.2, -O -wmo) an array
+    // literal holding the launcher URL came out with zero elements: iterating it
+    // trapped on a bounds check, and a rewrite then ran no drags at all.
+    let given = ProcessInfo.processInfo.environment["E2E_TABDRAG_LAUNCHERS"] ?? ""
+    let spec = given.isEmpty ? "after=" + environment.launcher.path : given
+    var variants: [Variant] = []
+    for pair in spec.split(separator: ",") {
+        let parts = pair.split(separator: "=", maxSplits: 1)
+        if parts.count == 2 {
+            variants.append(Variant(name: String(parts[0]), launcher: URL(fileURLWithPath: String(parts[1]))))
         }
-    let variants = pairs.isEmpty ? [Variant(name: "after", launcher: environment.launcher)] : pairs
+    }
     let names = variants.map(\.name)
     let judged = names.contains("after") ? "after" : (names.last ?? "after")
     report.info("variants", detail: variants.map { "\($0.name)=\($0.launcher.path)" }.joined(separator: ", ")
         + " judged=\(judged)")
+    // Never pass without measuring anything.
+    report.check(!variants.isEmpty && names.count == variants.count, "at least one build to measure",
+                 detail: "spec \(spec) -> \(variants.count) build(s)")
     report.info("screen", detail: NSScreen.screens.map {
         "\($0.frame.width)x\($0.frame.height)@\($0.backingScaleFactor)x \($0.maximumFramesPerSecond) Hz"
     }.joined(separator: ", "))
@@ -722,6 +728,8 @@ func scenarioTabDrag(_ options: ArraySlice<String>) -> Never {
                                       judged: name == judged, report: report))
         }
     }
+    report.check(results.count == rounds * variants.count && results.allSatisfy { !$0.reps.isEmpty },
+                 "every build was measured", detail: "\(results.count) run(s), reps \(results.map(\.reps.count))")
     for name in names {
         let mine = results.filter { $0.name == name }
         let reps = mine.flatMap(\.reps)
