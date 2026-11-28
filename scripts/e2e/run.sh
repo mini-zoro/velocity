@@ -7,6 +7,7 @@
 #   scripts/e2e/run.sh scenarios       # probe first, then every scenario the runner supports
 #   scripts/e2e/run.sh scenario ime
 #   scripts/e2e/run.sh scenario tabdrag  # E2E_TABDRAG_LAUNCHERS=before=…,after=… compares two builds
+#   scripts/e2e/run.sh scenario memory # needs a build with the syntax packages (see gui-e2e.yml)
 #   scripts/e2e/run.sh summary         # nonzero unless every recorded scenario passed
 #
 # Environment:
@@ -182,8 +183,6 @@ scenarios() {
     scenario footprint
     # Screen recording only; no keyboard or mouse.
     scenario startup
-    # Needs no HID: every action is a CLI request. Fails the run above its limits.
-    scenario memory
     {
         printf '\n### Scenario selection\n\nkeyboard(IME)=%s pointer(mouse)=%s (from the probe)\n' "$keyboard" "$pointer"
     } >>"$SUMMARY"

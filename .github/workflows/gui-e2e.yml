@@ -62,9 +62,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # The bundled syntax packages: the memory gate measures a highlighted project,
-          # as people use it. The other scenarios open plain text either way.
-          submodules: true
+          # The harness reads no package data; the product build needs no submodule.
+          # The memory gate fetches the syntax packages itself, after the other scenarios.
+          submodules: false
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -140,32 +140,37 @@ jobs:
           E2E_TABDRAG_ROUNDS: ${{ inputs.tabdrag_rounds }}
         run: scripts/e2e/run.sh scenario tabdrag
 
-      # Memory gate on its own, optionally against another ref built in this checkout
-      # (resource paths are compiled in, so both binaries read the same packages).
-      - name: Build the memory comparison app
-        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'memory' && inputs.memory_compare_ref != ''
-        env:
-          COMPARE_REF: ${{ inputs.memory_compare_ref }}
-        run: |
-          set -euo pipefail
-          ab="$RUNNER_TEMP/memory-ab"
-          mkdir -p "$ab/before" "$ab/after"
-          cp target/release/velocity "$ab/after/velocity"
-          git fetch --no-tags --depth=1 origin "$COMPARE_REF"
-          git checkout FETCH_HEAD -- crates Cargo.toml Cargo.lock
-          cargo build --release --locked -p velocity
-          cp target/release/velocity "$ab/before/velocity"
-          git checkout HEAD -- crates Cargo.toml Cargo.lock
-          git status --short
-          echo "before: $(git rev-parse FETCH_HEAD)  after: $(git rev-parse HEAD)"
-          echo "E2E_MEMORY_LAUNCHERS=before=$ab/before/velocity,after=$ab/after/velocity" >> "$GITHUB_ENV"
-
-      - name: Memory scenario only
-        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'memory'
+      # Memory gate: a highlighted project, as people use it, so it needs the bundled syntax
+      # packages. The scenarios above are calibrated for a build without them (the startup
+      # scenario's flash check failed with the packages present), so this step runs last,
+      # fetches the packages and rebuilds. With memory_compare_ref
+      # it also builds that ref in this checkout (resource paths are compiled in, so both
+      # binaries read the same packages) and runs both builds interleaved.
+      - name: Memory gate
+        if: inputs.suite != 'probe' && inputs.suite != 'startup' && inputs.suite != 'tabdrag'
         continue-on-error: true
         env:
+          COMPARE_REF: ${{ inputs.memory_compare_ref }}
           E2E_MEMORY_DIAG: ${{ inputs.memory_diagnostics && '1' || '' }}
-        run: scripts/e2e/run.sh scenario memory
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 third_party/sublime-packages \
+            || git submodule update --init third_party/sublime-packages
+          cargo build --release --locked -p velocity
+          if [ -n "${COMPARE_REF:-}" ]; then
+            ab="$RUNNER_TEMP/memory-ab"
+            mkdir -p "$ab/before" "$ab/after"
+            cp target/release/velocity "$ab/after/velocity"
+            git fetch --no-tags --depth=1 origin "$COMPARE_REF"
+            git checkout FETCH_HEAD -- crates Cargo.toml Cargo.lock
+            cargo build --release --locked -p velocity
+            cp target/release/velocity "$ab/before/velocity"
+            git checkout HEAD -- crates Cargo.toml Cargo.lock
+            git status --short
+            echo "before: $(git rev-parse FETCH_HEAD)  after: $(git rev-parse HEAD)"
+            export E2E_MEMORY_LAUNCHERS="before=$ab/before/velocity,after=$ab/after/velocity"
+          fi
+          scripts/e2e/run.sh scenario memory
 
       - name: Summarise
         if: always()
