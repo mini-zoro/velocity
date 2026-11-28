@@ -346,6 +346,17 @@ func memoryProject(root: URL, into dir: URL) -> [String] {
     return paths
 }
 
+/// E2E_MEMORY_LAUNCHERS pairs, else the build under test (E2E_VELOCITY).
+func memoryBuilds(_ env: [String: String], root: URL) -> [MemoryBuild] {
+    let pairs = (env["E2E_MEMORY_LAUNCHERS"] ?? "").split(separator: ",").compactMap { pair -> MemoryBuild? in
+        let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+        return parts.count == 2 ? MemoryBuild(label: parts[0], launcher: URL(fileURLWithPath: parts[1])) : nil
+    }
+    if !pairs.isEmpty { return pairs }
+    let current = env["E2E_VELOCITY"] ?? root.appendingPathComponent("target/release/velocity").path
+    return [MemoryBuild(label: "current", launcher: URL(fileURLWithPath: current))]
+}
+
 func scenarioMemory(_ options: ArraySlice<String>) -> Never {
     let report = Report("memory")
     guard let workPath = options.first else { fail("scenario needs a work directory") }
@@ -367,17 +378,10 @@ func scenarioMemory(_ options: ArraySlice<String>) -> Never {
         if parts[0] == "single" { singleLimit = value }
         if parts[0] == "window" { windowLimit = value }
     }
-    var builds: [MemoryBuild] = []
-    for pair in (env["E2E_MEMORY_LAUNCHERS"] ?? "").split(separator: ",") {
-        let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
-        if parts.count == 2 { builds.append(MemoryBuild(label: parts[0], launcher: URL(fileURLWithPath: parts[1]))) }
-    }
-    if builds.isEmpty {
-        let current = env["E2E_VELOCITY"] ?? root.appendingPathComponent("target/release/velocity").path
-        builds = [MemoryBuild(label: "current", launcher: URL(fileURLWithPath: current))]
-    }
+    let builds = memoryBuilds(env, root: root)
     report.info("screens", detail: NSScreen.screens.map { "\($0.frame.width)x\($0.frame.height)@\($0.backingScaleFactor)x" }.joined(separator: ", "))
-    report.info("builds", detail: builds.map { "\($0.label)=\($0.launcher.path)" }.joined(separator: " "))
+    report.info("builds", detail: "\(builds.count): " + builds.map { "\($0.label)=\($0.launcher.path)" }.joined(separator: " ")
+        + " (E2E_MEMORY_LAUNCHERS=\(env["E2E_MEMORY_LAUNCHERS"] ?? "unset") E2E_VELOCITY=\(env["E2E_VELOCITY"] ?? "unset") rounds=\(rounds))")
 
     var results: [String: [MemorySample]] = [:]
     for round in 1...rounds {
@@ -400,19 +404,23 @@ func scenarioMemory(_ options: ArraySlice<String>) -> Never {
             session.archive(artifacts, as: name)
         }
     }
-    if diagnostics, let build = builds.last {
+    if diagnostics {
         // The Simplified Chinese UI needs a CJK fallback face for every label.
         report.info("CJK fonts", detail: shell("ls /System/Library/Fonts | grep -i -E 'ping|hei'; ls -d /System/Library/AssetsV2/com_apple_MobileAsset_Font*/*/AssetData/PingFang* 2>/dev/null; true").out.replacingOccurrences(of: "\n", with: " | "))
-        _ = shell("pkill -x velocity 2>/dev/null; true")
-        let chinese = MemorySession(build: build, name: "memory-\(build.label)-zh", root: work, repository: root,
-                                    report: report, settings: #"{"ui_language": "zh-Hans"}"#)
-        if let sample = chinese.run(diagnostics: false) {
-            report.note("\(build.label) zh-Hans UI", detail: "1w \(mib(sample.single)) MiB, 2w \(mib(sample.two)), 3w \(mib(sample.three))")
-            for line in sample.categories { report.note("\(build.label) zh-Hans categories", detail: line) }
-            chinese.dump("zh-heap", extra: false)
+        for build in builds {
+            _ = shell("pkill -x velocity 2>/dev/null; true")
+            let chinese = MemorySession(build: build, name: "memory-\(build.label)-zh", root: work, repository: root,
+                                        report: report, settings: #"{"ui_language": "zh-Hans"}"#)
+            if let sample = chinese.run(diagnostics: false) {
+                report.note("\(build.label) zh-Hans UI", detail: "1w \(mib(sample.single)) MiB, 2w \(mib(sample.two)), 3w \(mib(sample.three))")
+                for line in sample.categories { report.note("\(build.label) zh-Hans categories", detail: line) }
+                chinese.dump("zh-heap", extra: false)
+            }
+            chinese.quit()
+            chinese.archive(artifacts, as: "\(build.label)-zh")
         }
-        chinese.quit()
-        chinese.archive(artifacts, as: "\(build.label)-zh")
+    }
+    if diagnostics, let build = builds.last {
         // Allocation call trees; MallocStackLogging itself costs memory, so this
         // session is never part of the gate.
         _ = shell("pkill -x velocity 2>/dev/null; true")
