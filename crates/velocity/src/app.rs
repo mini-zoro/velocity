@@ -5105,6 +5105,14 @@ impl App {
         let (appearance, background) = self.title_bar_style();
         w.set_title_bar_theme(appearance, background);
     }
+    /// The colour behind the window's drawables: the focused editor's background,
+    /// which covers most of the first frame. (An interactive scene's own
+    /// background is never the theme's: it is composed from painted panes.)
+    #[cfg(target_os = "macos")]
+    fn content_background(&self) -> [f32; 4] {
+        self.view.editor_background(self.workspace.editor())
+    }
+
     fn title_bar_style(&self) -> (Option<Appearance>, Option<[f32; 4]>) {
         let settings = &self.workspace.editor().settings;
         if !settings.bool("themed_title_bar", true) {
@@ -6515,6 +6523,14 @@ impl AppHandler for App {
                     w.scale_factor() as f32,
                 )?;
             self.clock.mark("first_offscreen_submitted");
+            // The window is ordered in before this frame reaches the screen and
+            // shows its own backgrounds until then: the theme's title bar and
+            // editor colours instead of the system window colour.
+            #[cfg(target_os = "macos")]
+            {
+                self.apply_title_theme(w);
+                w.set_content_background(Some(self.content_background()));
+            }
             return Ok(());
         }
         if !self.startup_done {
@@ -6697,6 +6713,8 @@ impl AppHandler for App {
             w.request_frame_at(Instant::now() + Duration::from_millis(8));
         }
         self.apply_title_theme(w);
+        #[cfg(target_os = "macos")]
+        w.set_content_background(Some(self.content_background()));
         let result = self.renderer.as_mut().ok_or("renderer missing")?.render(
             &scene,
             self.fonts.as_mut().ok_or("fonts missing")?,

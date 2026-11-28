@@ -33,7 +33,8 @@ usage() {
 build() {
     mkdir -p "$E2E_BIN"
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
-        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift"
+        "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
+        "$VELOCITY_E2E/startup.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
@@ -98,7 +99,10 @@ scenario() {
     mkdir -p "$work" "$E2E_ARTIFACTS"
     local status=0
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
-        run_with_timeout 480 "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
+        # The startup scenario records dozens of cold launches (twice with an A/B pair).
+        local limit=480
+        [ "$name" = startup ] && limit=1800
+        run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
     cleanup_apps
     append_summary "Scenario $name" "$log"
     echo "$name exit=$status"
@@ -130,6 +134,8 @@ scenarios() {
         scenario background
     fi
     scenario footprint
+    # Screen recording only; no keyboard or mouse.
+    scenario startup
     {
         printf '\n### Scenario selection\n\nkeyboard(IME)=%s pointer(mouse)=%s (from the probe)\n' "$keyboard" "$pointer"
     } >>"$SUMMARY"

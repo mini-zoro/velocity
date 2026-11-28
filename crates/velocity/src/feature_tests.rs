@@ -492,3 +492,25 @@ fn block_only_line_comments_survive_two_immediate_toggles() {
         assert_eq!(e.text.to_string(), "", "{syntax}");
     }
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn content_background_is_the_painted_editor_background() {
+    let e = editor("fn name() {}\n", "Rust");
+    let scheme = Arc::new(
+        ColorScheme::parse(
+            r##"{"globals":{"background":"#0a141e","foreground":"#abcdef"},"rules":[]}"##,
+        )
+        .unwrap(),
+    );
+    e.language
+        .borrow_mut()
+        .as_mut()
+        .unwrap()
+        .recolor(scheme.clone(), e.text.clone(), 4);
+    let mut v = view();
+    let expected = crate::language::rgba(scheme.default_style().background);
+    assert_eq!(v.editor_background(&e), expected);
+    assert_eq!(v.scene(&e).background, expected);
+    // Not the composed window scene's default, which painted a near-black backdrop.
+    assert_ne!(expected, vel_render::scene::Scene::default().background);
+}
