@@ -1119,7 +1119,11 @@ func scenarioStartup(_ options: ArraySlice<String>) -> Never {
                 }
             }
             compare("first content from process start", judged: true) { $0.ms($0.firstContent) }
-            compare("first window pixels after the prepared frame", judged: true) {
+            // Recorded, not judged: before the fix this was the empty system-coloured
+            // window, i.e. the flash itself. The fix commits the theme colours before
+            // ordering the window in, so it can appear later while first content (judged
+            // above) does not.
+            compare("first window pixels after the prepared frame", judged: false) {
                 $0.sincePrepared($0.event("screen_first_window_pixels"))
             }
             compare("ordering in after the prepared frame", judged: false) { $0.sincePrepared($0.milestone("ordered_front")) }
