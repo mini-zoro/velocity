@@ -376,6 +376,14 @@ case "ime-info":  // read-only inspection of installed input sources
         print(inputSourceInfo(id))
     }
     print("current=\(currentInputSourceId())")
+case "minimize":  // minimize <pid> <1|0>: (un)minimize the app's document window through AX
+    guard options.count >= 2, let pid = pid_t(options[0]) else { fail("minimize <pid> <1|0>") }
+    let flag = options[1] == "1" ? kCFBooleanTrue : kCFBooleanFalse
+    guard let window = axDocumentWindow(pid) ?? axStandardWindows(pid).first else {
+        print("minimize: no window (ax_trusted=\(AXIsProcessTrusted()))")
+        exit(0)
+    }
+    print("minimize=\(axErrorName(AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, flag!)))")
 case "trust":
     print("ax_trusted=\(AXIsProcessTrusted())")
 case "grant":  // grant <path>
@@ -442,6 +450,7 @@ case "scenario":
     case "footprint": scenarioFootprint(options.dropFirst())
     case "tabdrag": scenarioTabDrag(options.dropFirst())
     case "startup": scenarioStartup(options.dropFirst())
+    case "memory": scenarioMemory(options.dropFirst())
     default: fail("unknown scenario \(name)")
     }
 default:
