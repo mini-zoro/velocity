@@ -1077,15 +1077,23 @@ impl Host {
         let now = Instant::now();
         let mut pool = self.drawable_pool.get();
         let old = pool.limit();
-        if self.drawing.get() {
+        let trimmed = if self.drawing.get() {
             // A nested AppKit run loop must not trim during a draw.
             pool.frame(now);
+            false
         } else {
-            pool.timer(now);
-        }
+            pool.timer(now)
+        };
         self.drawable_pool.set(pool);
         if pool.limit() != old {
             self.set_drawable_limit(pool.limit());
+        }
+        if trimmed && self.visible.get() {
+            // The layer frees its surplus drawable only at the next nextDrawable; an idle
+            // window never asks for one, so draw the unchanged scene once at the new cap.
+            // A covered window frees it with its first frame after it becomes visible.
+            self.dirty.set(true);
+            self.pace();
         }
         self.arm_drawable_timer(pool, now);
     }

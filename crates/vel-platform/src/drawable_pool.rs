@@ -1,4 +1,10 @@
 //! Drawable count hysteresis, independent of AppKit and the display timer.
+//!
+//! Lowering CAMetalLayer's `maximumDrawableCount` does not free a drawable that is
+//! already allocated: the surplus IOSurface stays until the next `nextDrawable` at
+//! the lower cap (runner measurement, 2026-11-28: three window-sized surfaces stayed
+//! for as long as the window was idle). So the host draws one frame when the cap
+//! drops, which hands the surplus surface back.
 use std::time::{Duration, Instant};
 
 const QUIET: Duration = Duration::from_millis(350);
@@ -36,10 +42,15 @@ impl DrawablePool {
         }
     }
 
-    pub(crate) fn timer(&mut self, now: Instant) {
+    /// Settles an expired burst. Returns true when the cap dropped, i.e. when the
+    /// layer may still hold a surplus drawable that only a frame at the new cap frees.
+    pub(crate) fn timer(&mut self, now: Instant) -> bool {
         if self.deadline().is_some_and(|due| now >= due) {
+            let before = self.limit();
             *self = Self::Idle;
+            return self.limit() < before;
         }
+        false
     }
 }
 
@@ -61,11 +72,13 @@ mod tests {
             assert_eq!(pool.deadline(), Some(now + QUIET));
         }
         let deadline = pool.deadline().unwrap();
-        pool.timer(deadline - Duration::from_millis(1));
+        assert!(!pool.timer(deadline - Duration::from_millis(1)));
         assert_eq!(pool.limit(), 3);
-        pool.timer(deadline);
+        // The cap drops: the host redraws once so the layer frees its third surface.
+        assert!(pool.timer(deadline));
         assert_eq!(pool.limit(), 2);
         assert_eq!(pool.deadline(), None);
+        assert!(!pool.timer(deadline + QUIET));
     }
 
     #[test]
@@ -74,7 +87,7 @@ mod tests {
         let mut pool = DrawablePool::default();
         pool.frame(start);
         let idle = start + QUIET;
-        pool.timer(idle);
+        assert!(pool.timer(idle));
         pool.frame(idle);
         assert_eq!(pool.limit(), 2);
         let later = idle + BURST + Duration::from_millis(1);
