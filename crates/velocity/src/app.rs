@@ -323,6 +323,15 @@ pub struct App {
     external_input: usize,
     first_scanout: FirstScanout,
     waiting_since: Option<Instant>,
+    /// CLI requests taken at startup that another window must handle (`-n`, or after
+    /// such a request, to keep their order); `poll_workbench` applies them in order.
+    startup_requests:
+        std::collections::VecDeque<(crate::open_requests::Route, crate::instance::Incoming)>,
+    /// When the first frame was presented on a visible display tick.
+    startup_presented: Option<Instant>,
+    /// Input arrived before startup finished: the prepared frame no longer shows it.
+    startup_interrupted: bool,
+    presentation_audit: crate::report::PresentationAudit,
 }
 /// Shown when an image file cannot be decoded and its bytes are shown instead.
 #[cfg(test)]
@@ -574,6 +583,10 @@ impl App {
             external_input: 0,
             first_scanout: FirstScanout::default(),
             waiting_since: None,
+            startup_requests: Default::default(),
+            startup_presented: None,
+            startup_interrupted: false,
+            presentation_audit: Default::default(),
         }
     }
     pub fn restore_ui(&mut self, window: &vel_session::Window) {
@@ -601,11 +614,19 @@ impl App {
     /// An interactive window must become usable even when macOS never reports a real
     /// scanout: screen sharing and remote-control sessions skip every drawable
     /// (`presentedTime == 0`), and a window behind others or on another Space may not
-    /// present for a long time. Until startup is done, forwarded files, loads and
-    /// resource polls wait, so stop waiting and continue without the scanout record.
-    fn start_without_scanout(&mut self, w: &WindowHandle, waited: Duration) -> Result<(), String> {
+    /// present for a long time. Until startup is done, services, model polls, CLI
+    /// commands and restored windows wait (forwarded files and highlighting do not:
+    /// see `accept_startup_requests`), so stop waiting and continue without the
+    /// scanout record. `reason` is `presented` (the presented frame's grace period
+    /// ended), `input`, or `timeout` (no frame was presented).
+    fn start_without_scanout(
+        &mut self,
+        w: &WindowHandle,
+        waited: Duration,
+        reason: &'static str,
+    ) -> Result<(), String> {
         self.clock.mark("startup_without_scanout");
-        self.reporter.emit(json!({"kind":"startup_without_scanout","waited_ms":ms(waited),"skipped_drawables":self.first_scanout.skipped_drawables,"first_callback_main_ms":self.first_scanout.first_callback.map(|t|ms(t.saturating_duration_since(self.clock.entered))),"surface_retries":self.retries}))?;
+        self.reporter.emit(json!({"kind":"startup_without_scanout","reason":reason,"waited_ms":ms(waited),"presented_ms":self.startup_presented.map(|t|ms(t.elapsed())),"skipped_drawables":self.first_scanout.skipped_drawables,"first_callback_main_ms":self.first_scanout.first_callback.map(|t|ms(t.saturating_duration_since(self.clock.entered))),"surface_retries":self.retries}))?;
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.release_prepared();
             renderer.persist_pipeline_cache()?;
@@ -645,10 +666,132 @@ impl App {
             .waiting_since
             .get_or_insert_with(Instant::now)
             .elapsed();
-        if stop_waiting_for_scanout(self.options.mode, waited)
-            && let Err(error) = self.start_without_scanout(w, waited)
+        if stop_waiting_for_scanout(self.options.mode, waited, None)
+            && let Err(error) = self.start_without_scanout(w, waited, "timeout")
         {
             self.named_error(Some(w), &error);
+        }
+    }
+    /// Applies CLI requests that reached this process before its first window was
+    /// ready. The CLI that launches the GUI forwards its files over the instance socket
+    /// within milliseconds, while the GUI is still configuring itself; they used to wait
+    /// for the first real scanout (or its one-second timeout), so the window first
+    /// showed an empty document and the file up to a second later. Taking them before
+    /// the first frame lets their loading and highlighting run during AppKit start-up.
+    /// Services stay deferred: the startup watcher reconciles every open file when it
+    /// starts. Returns whether this window opened anything.
+    /// The native title for this window's current model.
+    pub(crate) fn window_title(&self) -> String {
+        self.workspace.window_title()
+    }
+    pub(crate) fn accept_startup_requests(&mut self) -> bool {
+        if self.startup_done || self.options.mode != Mode::Interactive || self.settings_window {
+            return false;
+        }
+        let mut accepted = false;
+        loop {
+            let incoming = {
+                let sessions = self.sessions.borrow();
+                if sessions
+                    .cli_destination()
+                    .is_some_and(|id| id != self.session_id)
+                {
+                    break;
+                }
+                sessions.instance.as_ref().and_then(|i| i.next())
+            };
+            let Some(incoming) = incoming else {
+                break;
+            };
+            accepted |= self.accept_startup_request(incoming);
+        }
+        if accepted {
+            self.clock.mark("startup_requests_accepted");
+        }
+        accepted
+    }
+    fn accept_startup_request(&mut self, incoming: crate::instance::Incoming) -> bool {
+        use crate::open_requests::Route;
+        self.publish_open_route();
+        // Requests are only routed to ready windows; this one is about to be shown.
+        self.sessions.borrow_mut().ready(self.session_id);
+        match self.route_or_queue_open(incoming) {
+            Ok(Some((Route::Window(id), incoming)))
+                if id == self.session_id && self.startup_requests.is_empty() =>
+            {
+                if let Err(error) = self.accept_request_with(incoming, false) {
+                    self.workspace
+                        .messages
+                        .push(format!("CLI request: {error}"));
+                }
+                self.publish_open_route();
+                self.sync_workspace_after_panels();
+                true
+            }
+            // A new window (`-n`) opens once this one is running; later requests
+            // queue behind it to keep their order.
+            Ok(Some(pair)) => {
+                self.startup_requests.push_back(pair);
+                false
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.workspace
+                    .messages
+                    .push(format!("CLI request: {error}"));
+                false
+            }
+        }
+    }
+    /// Before an interactive window's first frame, waits until `deadline` for the
+    /// highlighting of the rows that frame shows, so a file does not appear in plain
+    /// grey first. With `request`, asks for those rows (plus a margin) first; without,
+    /// checks the request the first scene made. Returns whether styles arrived for a
+    /// scene that drew some of its rows unstyled (it must be rebuilt).
+    fn wait_for_startup_highlight(&mut self, deadline: Instant, request: bool) -> bool {
+        if self.options.mode != Mode::Interactive
+            || self.workspace.settings_page.is_some()
+            || self.workspace.editor().text.len_bytes() == 0
+        {
+            return false;
+        }
+        let started = Instant::now();
+        if request {
+            self.sync_active_view();
+            self.view
+                .request_highlight(self.workspace.editor(), STARTUP_HIGHLIGHT_MARGIN);
+        }
+        let language = self.workspace.editor().language.clone();
+        let mut slot = language.borrow_mut();
+        let Some(l) = slot.as_mut() else {
+            return false;
+        };
+        // The scene polled and asked for its rows: if they were styled, it drew them so.
+        if !request && l.requested_rows_styled() {
+            return false;
+        }
+        let mut changed = l.poll();
+        while !l.requested_rows_styled() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            changed |= l.wait_highlight(deadline - now);
+        }
+        let styled = l.requested_rows_styled();
+        let syntax = l.syntax.clone();
+        drop(slot);
+        if styled {
+            self.clock.mark("first_frame_highlight_ready");
+        }
+        let _ = self.reporter.emit(json!({"kind":"startup_highlight","styled":styled,"after_scene":!request,"waited_ms":ms(started.elapsed()),"syntax":syntax}));
+        changed
+    }
+    /// Input before startup is done ends the startup wait: the prepared first frame
+    /// cannot show its effect, normal frames can.
+    fn note_startup_input(&mut self) {
+        if !self.startup_done {
+            self.startup_interrupted = true;
         }
     }
     fn ensure_startup_services(&mut self) -> bool {
@@ -1106,13 +1249,24 @@ impl App {
                 .global_bool("update_system_recent_files", true),
             |path| w.system_recent_document(path),
         );
-        let incoming = {
+        if let Some((route, incoming)) = self.startup_requests.pop_front() {
+            // Taken before the first frame and routed then; startup is done now.
+            let result = if route == crate::open_requests::Route::New {
+                self.ensure_startup_services();
+                self.open_request_in_new_window(w, incoming)
+            } else {
+                self.apply_open_request(w, incoming)
+            };
+            if let Err(e) = result {
+                self.workspace.messages.push(format!("CLI request: {e}"));
+            }
+            w.request_frame();
+        } else if let Some(incoming) = {
             let sessions = self.sessions.borrow();
             (sessions.cli_destination() == Some(self.session_id))
                 .then(|| sessions.instance.as_ref()?.next())
                 .flatten()
-        };
-        if let Some(incoming) = incoming {
+        } {
             if let Err(e) = self.receive_request(w, incoming) {
                 self.workspace.messages.push(format!("CLI request: {e}"));
             }
@@ -1376,7 +1530,14 @@ impl App {
     }
     pub(super) fn accept_request(
         &mut self,
+        incoming: crate::instance::Incoming,
+    ) -> Result<(), String> {
+        self.accept_request_with(incoming, true)
+    }
+    fn accept_request_with(
+        &mut self,
         mut incoming: crate::instance::Incoming,
+        start_services: bool,
     ) -> Result<(), String> {
         if incoming.expired() {
             incoming.reject(crate::instance::DELIVERY_EXPIRED);
@@ -1389,7 +1550,9 @@ impl App {
             }
             return Err("CLI command queue is full".into());
         }
-        self.ensure_startup_services();
+        if start_services {
+            self.ensure_startup_services();
+        }
         self.receive_file_renames();
         if !self.finish_tab_rename(None) {
             if incoming.confirmed() {
@@ -5564,6 +5727,19 @@ impl App {
         }
         Ok(())
     }
+    /// Records once whether presentation times arrive after startup (see
+    /// `PresentationAudit`), with the startup drawables for comparison.
+    fn audit_presentation(&mut self, p: &Presentation) -> Result<(), String> {
+        let Some((positive, unreported)) = self.presentation_audit.observe(p) else {
+            return Ok(());
+        };
+        if positive {
+            self.clock
+                .mark_at("first_positive_presented_time", p.scanout);
+        }
+        let main_ms = |at: Instant| ms(at.saturating_duration_since(self.clock.entered));
+        self.reporter.emit(json!({"kind":"presentation_timing","positive_after_startup":positive,"unreported_after_startup":unreported,"startup_unreported":self.first_scanout.skipped_drawables,"startup_callback_main_ms":self.first_scanout.first_callback.map(main_ms),"drawable":p.drawable,"callback_main_ms":main_ms(p.callback),"scanout_main_ms":positive.then(|| main_ms(p.scanout)),"boundary":"MTLDrawable presented handler after startup; zero presentedTime means dropped or untimed"}))
+    }
     fn observe_highlight(&mut self, p: Presentation) -> Result<(), String> {
         if self.highlighted_scanout.is_none()
             && p.presented_time > 0.
@@ -5716,6 +5892,10 @@ impl AppHandler for App {
         if let Some(request) = self.opening_request.take() {
             self.accept_request(request)?;
         }
+        // Files forwarded while the window was being created.
+        if self.accept_startup_requests() {
+            w.set_title(&self.workspace.window_title());
+        }
         Ok(())
     }
     fn accessibility_tree(&self) -> accessibility::Tree {
@@ -5760,6 +5940,7 @@ impl AppHandler for App {
     }
     fn on_key(&mut self, w: &WindowHandle, event: KeyEvent) -> bool {
         if event.state == KeyState::Down {
+            self.note_startup_input();
             self.cancel_context(w);
         }
         self.log_input("key", &event);
@@ -6105,6 +6286,7 @@ impl AppHandler for App {
         })
     }
     fn on_text_input(&mut self, w: &WindowHandle, event: TextInput) {
+        self.note_startup_input();
         self.cancel_context(w);
         self.handle_text_input(Some(w), event);
     }
@@ -6169,6 +6351,9 @@ impl AppHandler for App {
         self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
+        if event.kind == MouseKind::Down {
+            self.note_startup_input();
+        }
         if event.kind == MouseKind::Down
             && event.button == 0
             && self.panels.overlay.is_none()
@@ -6187,6 +6372,7 @@ impl AppHandler for App {
     }
     // Native and headless events share UI hit testing, focus, binding lookup and gestures.
     fn on_scroll(&mut self, w: &WindowHandle, event: ScrollEvent) {
+        self.note_startup_input();
         self.handle_scroll_event(Some(w), event);
     }
     fn on_resize(&mut self, w: &WindowHandle, size: Size, scale: f64) {
@@ -6275,6 +6461,7 @@ impl AppHandler for App {
         if self.startup_done {
             for p in &observations {
                 self.observe_highlight(*p)?;
+                self.audit_presentation(p)?;
             }
         }
         let focused = w.is_focused();
@@ -6517,7 +6704,14 @@ impl AppHandler for App {
             }
         }
         if ctx.reason == FrameReason::StartupPrepare {
-            let scene = self.render_scene();
+            let deadline = Instant::now() + STARTUP_HIGHLIGHT_WAIT;
+            self.wait_for_startup_highlight(deadline, true);
+            let mut scene = self.render_scene();
+            // The scene asks for its own rows; if some are still unstyled, wait out
+            // the rest of the budget once and rebuild.
+            if self.wait_for_startup_highlight(deadline, false) {
+                scene = self.render_scene();
+            }
             if let Some(anchor) = self.tear_off_anchor.take() {
                 let bar = self
                     .tab_strips
@@ -6548,23 +6742,40 @@ impl AppHandler for App {
         }
         if !self.startup_done {
             let waiting_since = *self.waiting_since.get_or_insert_with(Instant::now);
-            if stop_waiting_for_scanout(self.options.mode, waiting_since.elapsed()) {
-                return self.start_without_scanout(w, waiting_since.elapsed());
+            if self.startup_interrupted && self.options.mode == Mode::Interactive {
+                return self.start_without_scanout(w, waiting_since.elapsed(), "input");
+            }
+            let presented = self.startup_presented.map(|at| at.elapsed());
+            if stop_waiting_for_scanout(self.options.mode, waiting_since.elapsed(), presented) {
+                let reason = if presented.is_some() {
+                    "presented"
+                } else {
+                    "timeout"
+                };
+                return self.start_without_scanout(w, waiting_since.elapsed(), reason);
             }
             // Main already checked the display. The first display-link tick
             // is view-bound; don't query WindowServer again before the acquire.
             if self.options.mode.automatic() && waiting_since.elapsed() >= Duration::from_secs(1) {
                 w.display_status().check()?;
             }
+            // Forwarded files that arrive after the first frame was prepared, and
+            // highlighting that finishes after it, replace the prepared frame: content
+            // does not wait for a scanout record.
+            let content = self.options.mode == Mode::Interactive
+                && (self.accept_startup_requests() | self.workspace.poll_languages());
+            if content {
+                w.set_title(&self.workspace.window_title());
+            }
             // Ordering can constrain an oversized window or change its scale.
             // Rebuild on this tick if a resize invalidated the offscreen texture.
-            if self.receive_tabs()
+            let resized = self.receive_tabs()
                 || !self
                     .renderer
                     .as_ref()
                     .ok_or("renderer missing")?
-                    .has_prepared_frame()
-            {
+                    .has_prepared_frame();
+            if content || resized {
                 let scene = self.render_scene();
                 self.publish_tab_strips(Some(w));
                 self.renderer
@@ -6575,8 +6786,11 @@ impl AppHandler for App {
                         self.fonts.as_mut().ok_or("fonts missing")?,
                         w.scale_factor() as f32,
                     )?;
-                self.clock
-                    .mark("first_frame_reprepared_after_native_resize");
+                self.clock.mark(if resized {
+                    "first_frame_reprepared_after_native_resize"
+                } else {
+                    "first_frame_reprepared_with_content"
+                });
             }
             if let Some(times) = self
                 .renderer
@@ -6584,13 +6798,14 @@ impl AppHandler for App {
                 .ok_or("renderer missing")?
                 .present_prepared()?
             {
+                self.startup_presented.get_or_insert_with(Instant::now);
                 self.record(w, times, ctx.received)?;
                 #[cfg(windows)]
                 {
                     // The renderer can report present return, not scanout.
                     // Start IPC, load services and editing without waiting for
                     // a Metal-only presented callback.
-                    self.start_without_scanout(w, waiting_since.elapsed())?;
+                    self.start_without_scanout(w, waiting_since.elapsed(), "presented")?;
                 }
                 w.request_frame_at(Instant::now() + Duration::from_millis(16));
             } else {
@@ -7095,12 +7310,30 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
     );
 }
 
-/// How long an interactive window waits for its first real scanout before startup
-/// continues without it. Benchmarks and other automatic modes always wait for a real
-/// frame (they check the display status instead).
+/// How long an interactive window that has not presented a frame (minimized, hidden,
+/// on another Space, or failing to get a drawable) waits for its first real scanout
+/// before startup continues without it. Benchmarks and other automatic modes always
+/// wait for a real frame (they check the display status instead).
 const INTERACTIVE_SCANOUT_WAIT: Duration = Duration::from_secs(1);
-fn stop_waiting_for_scanout(mode: Mode, waited: Duration) -> bool {
-    mode == Mode::Interactive && waited >= INTERACTIVE_SCANOUT_WAIT
+/// How long an interactive window keeps re-presenting its first frame for a positive
+/// presentation time once it presented on a visible display tick. Healthy sessions
+/// report one 134–152 ms after the first present (docs/performance.md): the drawable
+/// right after ordering in is often dropped, and the re-presents cover that. Sessions
+/// that never time drawables (screen sharing, remote control, CI's virtual display,
+/// and every launch on the 2026-11-28 macOS 26 trace) used to wait the full second
+/// before services, CLI commands and restored windows started.
+const INTERACTIVE_PRESENTED_WAIT: Duration = Duration::from_millis(250);
+/// How long the first frame of an interactive window waits for the highlighting of
+/// its rows; a slower grammar shows plain text and the startup wait swaps in the
+/// styled frame as soon as it arrives.
+const STARTUP_HIGHLIGHT_WAIT: Duration = Duration::from_millis(50);
+/// Rows asked for below the estimated viewport before the first scene: the window's
+/// content size includes the tab and status bars, so the estimate covers the scene.
+const STARTUP_HIGHLIGHT_MARGIN: usize = 8;
+fn stop_waiting_for_scanout(mode: Mode, waited: Duration, presented: Option<Duration>) -> bool {
+    mode == Mode::Interactive
+        && (waited >= INTERACTIVE_SCANOUT_WAIT
+            || presented.is_some_and(|presented| presented >= INTERACTIVE_PRESENTED_WAIT))
 }
 
 #[cfg(test)]
@@ -7109,16 +7342,40 @@ mod scanout_wait_tests {
     #[test]
     fn interactive_startup_stops_waiting_for_a_real_scanout_but_benchmarks_do_not() {
         let just_under = INTERACTIVE_SCANOUT_WAIT - Duration::from_millis(1);
-        assert!(!stop_waiting_for_scanout(Mode::Interactive, Duration::ZERO));
-        assert!(!stop_waiting_for_scanout(Mode::Interactive, just_under));
-        assert!(stop_waiting_for_scanout(
+        assert!(!stop_waiting_for_scanout(
             Mode::Interactive,
-            INTERACTIVE_SCANOUT_WAIT
+            Duration::ZERO,
+            None
+        ));
+        assert!(!stop_waiting_for_scanout(
+            Mode::Interactive,
+            just_under,
+            None
         ));
         assert!(stop_waiting_for_scanout(
             Mode::Interactive,
-            Duration::from_secs(60)
+            INTERACTIVE_SCANOUT_WAIT,
+            None
         ));
+        assert!(stop_waiting_for_scanout(
+            Mode::Interactive,
+            Duration::from_secs(60),
+            None
+        ));
+        // A presented first frame waits only for its short grace period.
+        let grace = INTERACTIVE_PRESENTED_WAIT;
+        let under = grace - Duration::from_millis(1);
+        assert!(!stop_waiting_for_scanout(
+            Mode::Interactive,
+            under,
+            Some(under)
+        ));
+        assert!(stop_waiting_for_scanout(
+            Mode::Interactive,
+            grace,
+            Some(grace)
+        ));
+        assert!(grace < INTERACTIVE_SCANOUT_WAIT / 2);
         for mode in [
             Mode::Startup,
             Mode::Open,
@@ -7127,7 +7384,11 @@ mod scanout_wait_tests {
             Mode::LargeFiles,
         ] {
             assert!(
-                !stop_waiting_for_scanout(mode, Duration::from_secs(60)),
+                !stop_waiting_for_scanout(
+                    mode,
+                    Duration::from_secs(60),
+                    Some(Duration::from_secs(60))
+                ),
                 "{mode:?}"
             );
         }

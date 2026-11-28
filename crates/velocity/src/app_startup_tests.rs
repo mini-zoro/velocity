@@ -253,3 +253,110 @@ fn a_later_interactive_window_shares_the_first_windows_syntax_assets() {
         &unwatched.assets.syntaxes
     ));
 }
+
+#[test]
+fn startup_cli_requests_open_before_the_first_frame_and_leave_services_deferred() {
+    use crate::open_requests::Route;
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture_file(dir.path());
+    let second = dir.path().join("second.txt");
+    fs::write(&second, "second\n").unwrap();
+    let second = second.canonicalize().unwrap();
+    let request = |path: &Path, new_window: bool| {
+        let options = Options {
+            files: vec![FileLocation {
+                path: path.to_owned(),
+                line: 2,
+                column: 2,
+            }],
+            new_window,
+            ..Options::default()
+        };
+        Request::new(&options, None).unwrap()
+    };
+    let mut app = first_action_app(dir.path(), None, false);
+    // The CLI that launched the GUI waits for this confirmation; such requests are
+    // routed to ready windows only.
+    #[cfg(unix)]
+    let (incoming, _client) = {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let incoming =
+            Incoming::confirmed_fixture(request(&path, false), server, Duration::from_secs(30));
+        (incoming, client)
+    };
+    #[cfg(not(unix))]
+    let incoming = Incoming::local(request(&path, false));
+    assert!(app.accept_startup_request(incoming));
+    assert_eq!(
+        app.workspace.tabs[app.workspace.active].path.as_ref(),
+        Some(&path)
+    );
+    assert_eq!(app.workspace.editor().text, "one\ntwo\n");
+    assert_eq!(app.workspace.editor().selection(), 5..5);
+    let title = app.window_title();
+    assert!(title.contains("fixture.txt"), "{title}");
+    // The first frame does not start services; the watcher reconciles the file later.
+    assert!(app.startup_services_pending && app.workspace.palette_pending());
+    assert!(app.workspace.watcher.is_none());
+    assert!(app.startup_requests.is_empty());
+
+    // A new window opens once this one runs, and later requests keep their order.
+    assert!(!app.accept_startup_request(Incoming::local(request(&second, true))));
+    assert!(!app.accept_startup_request(Incoming::local(request(&path, false))));
+    assert_eq!(app.startup_requests.len(), 2);
+    assert_eq!(app.startup_requests[0].0, Route::New);
+    assert_eq!(app.workspace.tabs.len(), 1);
+    assert!(app.startup_services_pending);
+
+    // After startup the queue is no longer used.
+    app.startup_done = true;
+    assert!(!app.accept_startup_requests());
+}
+
+#[test]
+fn startup_input_ends_the_scanout_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = first_action_app(dir.path(), None, false);
+    app.note_startup_input();
+    assert!(app.startup_interrupted);
+    let other = tempfile::tempdir().unwrap();
+    let mut done = first_action_app(other.path(), None, false);
+    done.startup_done = true;
+    done.note_startup_input();
+    assert!(!done.startup_interrupted);
+}
+
+#[test]
+fn the_first_frame_waits_for_the_highlighting_of_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("first.rs");
+    let body: String = (0..400)
+        .map(|i| format!("fn item_{i}(value: usize) -> usize {{ value.wrapping_mul({i}) }}\n"))
+        .collect();
+    fs::write(&path, body).unwrap();
+    let mut app = first_action_app(dir.path(), Some(&path), false);
+    // Generous: this only bounds a stuck highlighter in a loaded test run.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    app.wait_for_startup_highlight(deadline, true);
+    {
+        let cell = app.workspace.editor().language.clone();
+        let slot = cell.borrow();
+        let language = slot.as_ref().expect("a language for a file");
+        assert!(language.requested_rows_styled(), "{}", language.readiness());
+        assert!(language.styled.contains_key(&0));
+    }
+    // The scene's own request is a subset of the rows already styled: it draws them
+    // styled, and the second check neither waits nor rebuilds.
+    app.render_scene();
+    assert!(!app.wait_for_startup_highlight(deadline, false));
+    assert!(
+        app.workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .requested_rows_styled()
+    );
+    assert!(app.startup_services_pending, "the wait starts no services");
+}

@@ -3882,6 +3882,17 @@ impl Workspace {
     }
 
     /// Polls jobs/notifications and reports whether scene content changed.
+    /// Applies finished highlighting and language analysis only. A starting window
+    /// uses it to refresh its first frame before the full model poll runs.
+    pub(crate) fn poll_languages(&mut self) -> bool {
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            if tab.lazy.is_none() && !tab.editor.shared_shadow {
+                changed |= tab.editor.poll_language();
+            }
+        }
+        changed
+    }
     pub fn poll(&mut self) -> bool {
         self.materialize_input();
         let enabled = self.settings.bool("show_git_status", true);

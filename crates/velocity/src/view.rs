@@ -2491,6 +2491,23 @@ impl View {
     pub fn scene(&mut self, e: &Editor) -> Scene {
         self.scene_impl::<false>(e, &[])
     }
+    /// Asks the highlighter for the rows the next scene shows, plus `extra` rows below
+    /// them, without building the scene. A starting window sends this before its first
+    /// scene so that the scene can already be highlighted; the scene's own request is
+    /// then a subset whose rows are styled.
+    pub(crate) fn request_highlight(&mut self, e: &Editor, extra: usize) {
+        if e.marked.is_some() || e.binary.is_some() || self.image_preview.image().is_some() {
+            return;
+        }
+        self.apply_style(e);
+        let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as usize;
+        let last = (first + self.rows() + 2 + extra).min(e.layout.borrow().total());
+        let ranges = document_rows(e, first..last);
+        if let Some(l) = e.language.borrow_mut().as_mut() {
+            l.poll();
+            l.request_view(e.id, ranges);
+        }
+    }
     pub(crate) fn scene_with_build_input(&mut self, e: &Editor, input: &[Range<usize>]) -> Scene {
         if input.is_empty() {
             self.scene(e)
@@ -2521,19 +2538,7 @@ impl View {
         let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as usize;
         let last = (first + self.rows() + 2).min(e.layout.borrow().total());
         if e.marked.is_none() {
-            let layout = e.layout.borrow();
-            let mut ranges: Vec<Range<usize>> = Vec::new();
-            for visual in first..last {
-                let row = layout.locate(visual).0;
-                if let Some(range) = ranges.last_mut()
-                    && row <= range.end
-                {
-                    range.end = range.end.max(row + 1);
-                } else {
-                    ranges.push(row..row + 1);
-                }
-            }
-            drop(layout);
+            let ranges = document_rows(e, first..last);
             if let Some(l) = e.language.borrow_mut().as_mut() {
                 l.poll();
                 l.request_view(e.id, ranges.clone());
@@ -4502,6 +4507,23 @@ fn file_size(bytes: u64) -> String {
 fn intersection(a: Rect, b: Rect) -> Rect {
     vel_ui::minihtml::intersection(a, b)
 }
+/// Document rows of the visual rows `visual`, merged into ascending runs.
+fn document_rows(e: &Editor, visual: Range<usize>) -> Vec<Range<usize>> {
+    let layout = e.layout.borrow();
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for visual in visual {
+        let row = layout.locate(visual).0;
+        if let Some(range) = ranges.last_mut()
+            && row <= range.end
+        {
+            range.end = range.end.max(row + 1);
+        } else {
+            ranges.push(row..row + 1);
+        }
+    }
+    ranges
+}
+
 fn fallback_scheme(appearance: Appearance) -> &'static ColorScheme {
     static DARK: OnceLock<ColorScheme> = OnceLock::new();
     static LIGHT: OnceLock<ColorScheme> = OnceLock::new();

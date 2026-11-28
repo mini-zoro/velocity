@@ -9,6 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
+    time::Duration,
 };
 use vel_buffer::{ChangeId, ChangeSet};
 use vel_color_scheme::{ColorScheme, Highlighter};
@@ -1266,6 +1267,39 @@ impl Language {
     }
     pub fn highlight_complete(&self) -> bool {
         self.service.complete.load(Ordering::Acquire)
+    }
+    /// Whether every row of the current view request is styled as a scene would
+    /// draw it once highlighting settles (exact, or present for viewport highlighting).
+    pub(crate) fn requested_rows_styled(&self) -> bool {
+        let viewport = self.policy.highlighting == vel_largefile::HighlightMode::Viewport;
+        self.requested
+            .as_ref()
+            .is_some_and(|(version, scheme, ranges)| {
+                *version == self.version
+                    && *scheme == self.scheme_revision
+                    && ranges.iter().all(|r| {
+                        r.clone().all(|row| {
+                            self.styled
+                                .get(&row)
+                                .is_some_and(|line| viewport || line.exact)
+                        })
+                    })
+            })
+    }
+    /// Blocks for at most `timeout` until the highlighter publishes results, then
+    /// applies them. Only a starting window waits, for its first frame.
+    pub(crate) fn wait_highlight(&mut self, timeout: Duration) -> bool {
+        let Ok(result) = self.service.rx.recv_timeout(timeout) else {
+            return false;
+        };
+        let mut changed = false;
+        for batch in result.batches.into_values() {
+            changed |= self.accept(batch);
+        }
+        if let Some(e) = result.error {
+            self.errors.push(e);
+        }
+        changed
     }
     pub fn scopes(&self, _text: &Text, byte: usize) -> ScopeStack {
         ScopeStack::from_vec(

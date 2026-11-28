@@ -502,6 +502,37 @@ impl FirstScanout {
         self.first_real
     }
 }
+/// Whether macOS reports presentation times for this window at all once startup is
+/// over. A zero `presentedTime` on every startup drawable can mean the drawables were
+/// dropped, or that the session does not time them (screen sharing, remote control,
+/// some virtual displays); the first later positive value, or its absence, tells the
+/// two apart in a native trace.
+#[derive(Debug, Default)]
+pub struct PresentationAudit {
+    unreported: usize,
+    done: bool,
+}
+impl PresentationAudit {
+    /// Unreported drawables after startup before the audit concludes "never reported".
+    pub const LIMIT: usize = 30;
+    /// Returns `Some((positive, unreported_before))` once: at the first positive
+    /// presentation time, or after [Self::LIMIT] unreported drawables.
+    pub fn observe(&mut self, observation: &vel_platform::Presentation) -> Option<(bool, usize)> {
+        if self.done {
+            return None;
+        }
+        if observation.presented_time > 0. && observation.presented_time.is_finite() {
+            self.done = true;
+            return Some((true, self.unreported));
+        }
+        self.unreported += 1;
+        if self.unreported >= Self::LIMIT {
+            self.done = true;
+            return Some((false, self.unreported));
+        }
+        None
+    }
+}
 #[cfg(test)]
 mod scanout_tests {
     use super::*;
@@ -524,5 +555,29 @@ mod scanout_tests {
         assert_eq!(real.scanout, at + Duration::from_millis(20));
         assert_eq!(progress.observe(&[p(3, 0., 30)]).unwrap().drawable, 2);
         assert_eq!(progress.skipped_drawables, 2);
+    }
+    #[test]
+    fn presentation_audit_reports_the_first_positive_time_or_gives_up_once() {
+        let at = Instant::now();
+        let p = |presented_time| vel_platform::Presentation {
+            drawable: 0,
+            presented_time,
+            scanout: at,
+            callback: at,
+        };
+        let mut audit = PresentationAudit::default();
+        assert_eq!(audit.observe(&p(0.)), None);
+        assert_eq!(audit.observe(&p(f64::NAN)), None);
+        assert_eq!(audit.observe(&p(5.)), Some((true, 2)));
+        assert_eq!(audit.observe(&p(6.)), None, "reported once");
+        let mut silent = PresentationAudit::default();
+        for _ in 1..PresentationAudit::LIMIT {
+            assert_eq!(silent.observe(&p(0.)), None);
+        }
+        assert_eq!(
+            silent.observe(&p(0.)),
+            Some((false, PresentationAudit::LIMIT))
+        );
+        assert_eq!(silent.observe(&p(7.)), None);
     }
 }

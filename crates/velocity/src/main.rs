@@ -792,6 +792,12 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             if headless_interactive {
                 return app.report_headless_interactive_startup();
             }
+            // The CLI that launched this process has usually forwarded its files by
+            // now: open them before AppKit starts, so their highlighting runs while the
+            // window is created and the first frame shows them.
+            if app.accept_startup_requests() {
+                window.title = app.window_title();
+            }
             Platform::run_with_options(window, app)?;
             if options.mode == Mode::Interactive {
                 done.store(true, Ordering::Release);
