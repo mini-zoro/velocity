@@ -1231,6 +1231,11 @@ impl Host {
             app.on_platform_phase(phase);
         }
     }
+    fn phase_at(&self, phase: &'static str, at: Instant) {
+        if let Some(app) = self.app.borrow_mut().as_mut() {
+            app.on_platform_phase_at(phase, at);
+        }
+    }
     fn fail(self: &Rc<Self>, error: String) {
         *self.error.borrow_mut() = Some(error);
         self.handle().quit();
@@ -2407,6 +2412,7 @@ impl Delegate {
             msg_send![super(allocated), initWithContentRect: frame, styleMask: style, backing: NSBackingStoreType::Buffered, defer: false]
         };
         let window = window.into_super();
+        h.phase("window_created");
         let utility = self.ivars().options.kind == crate::WindowKind::Utility;
         let minimum = self
             .ivars()
@@ -2503,6 +2509,7 @@ impl Delegate {
             NSWindowCollectionBehavior::FullScreenPrimary
         });
         window.setDelegate(Some(ProtocolObject::from_ref(self)));
+        h.phase("window_placed");
         let view = EditorView::alloc(mtm).set_ivars(ViewIvars {
             host: Rc::downgrade(h),
         });
@@ -2538,6 +2545,7 @@ impl Delegate {
         // SAFETY: file-URL pasteboard types are immutable AppKit constants. The
         // one content view covers editor, tab bar, and side bar hit regions.
         view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        h.phase("content_view_installed");
         // SAFETY: view is retained by the host; the notification uses a one-argument selector.
         unsafe {
             NSWorkspace::sharedWorkspace()
@@ -2555,7 +2563,9 @@ impl Delegate {
                 None,
             );
         }
+        h.phase("view_observers_ready");
         h.dispatch(Event::AccessibilityPreferences);
+        h.phase("accessibility_preferences_read");
         window.setAcceptsMouseMovedEvents(true);
         window.makeFirstResponder(Some(&view));
         h.native.replace(NativeWindow {
@@ -2568,6 +2578,7 @@ impl Delegate {
         h.phase("window_layer_ready");
         if NSApplication::sharedApplication(mtm).mainMenu().is_none() {
             build_menu(mtm);
+            h.phase("menu_built");
         }
         // SAFETY: macOS 14 availability was checked before run; tick: accepts CADisplayLink.
         let link = unsafe { view.displayLinkWithTarget_selector(&view, sel!(tick:)) };
@@ -2576,6 +2587,7 @@ impl Delegate {
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         h.native.borrow_mut().link = Some(link);
         h.resize();
+        h.phase("display_link_ready");
         h.dispatching.set(true);
         let started = {
             let mut slot = h.app.borrow_mut();
@@ -3152,10 +3164,16 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     }
     // Before run(): finishLaunching reads the launch arguments.
     ignore_launch_arguments_as_documents();
+    let defaults = Instant::now();
     let nsapp = NSApplication::sharedApplication(mtm);
+    let shared = Instant::now();
     nsapp.setActivationPolicy(startup_activation_policy(app.activate_on_open()));
     let host = create_host(mtm, &options, app)?;
+    host.phase_at("launch_defaults_registered", defaults);
+    host.phase_at("shared_application_ready", shared);
     host.phase("nsapplication_ready");
+    // Reports the last phase before the run loop; released before it starts.
+    let reporter = Rc::clone(&host);
     let id = host.id;
     WINDOWS.with(|windows| {
         windows
@@ -3192,6 +3210,8 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     }
     memory_guard::reset();
     let pressure = memory_guard::macos::PressureSource::new();
+    reporter.phase("application_run");
+    drop(reporter);
     nsapp.run();
     drop(pressure);
     // SAFETY: this target is still retained and the event codes match registration.

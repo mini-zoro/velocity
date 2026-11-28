@@ -452,6 +452,11 @@ pub trait AppHandler: 'static {
     }
     /// Observe a native lifecycle phase for startup instrumentation.
     fn on_platform_phase(&mut self, _phase: &'static str) {}
+    /// A phase that happened at `at`, reported once the window's handler exists.
+    fn on_platform_phase_at(&mut self, phase: &'static str, at: Instant) {
+        let _ = at;
+        self.on_platform_phase(phase);
+    }
     /// Offer a key to the keymap before native interpretation, unless composing.
     /// Returning true consumes it.
     fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) -> bool {

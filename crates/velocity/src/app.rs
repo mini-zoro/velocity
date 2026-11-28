@@ -5779,6 +5779,9 @@ impl AppHandler for App {
     fn on_platform_phase(&mut self, phase: &'static str) {
         self.clock.mark(phase);
     }
+    fn on_platform_phase_at(&mut self, phase: &'static str, at: Instant) {
+        self.clock.mark_at(phase, at);
+    }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
         if self.options.mode == Mode::Interactive {
             vel_platform::memory_pressure::enable();
