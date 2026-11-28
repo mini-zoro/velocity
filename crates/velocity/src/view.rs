@@ -311,6 +311,17 @@ pub(crate) struct ScrollPosition {
     pub visual_row: f64,
 }
 impl View {
+    /// The editor's background as `scene` paints it: the document's colour scheme,
+    /// else the built-in one for the appearance.
+    #[cfg(target_os = "macos")]
+    pub fn editor_background(&self, e: &Editor) -> Color {
+        let language = e.language.borrow();
+        let scheme = language
+            .as_ref()
+            .map_or_else(|| fallback_scheme(self.appearance), |l| &*l.scheme);
+        rgba(scheme.default_style().background)
+    }
+
     /// Ordinary row units and cached text used to construct CPU scenes.
     pub(crate) fn row_cache_bytes(&self) -> usize {
         let mut units = std::collections::HashSet::new();

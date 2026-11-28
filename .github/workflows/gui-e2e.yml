@@ -14,10 +14,22 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "auto = probe then every supported scenario; probe only; scenarios only; tab drag scenario only"
+        description: "auto = probe then every supported scenario; probe only; scenarios only; startup or tab drag scenario only"
         type: choice
         default: auto
-        options: [auto, probe, scenarios, tabdrag]
+        options: [auto, probe, scenarios, startup, tabdrag]
+      startup_cases:
+        description: "startup scenario: comma-separated cases to run (empty = all)"
+        type: string
+        default: ""
+      startup_compare_ref:
+        description: "startup scenario: also build this ref (e.g. main) and launch both builds interleaved on this runner"
+        type: string
+        default: ""
+      startup_baseline:
+        description: "startup scenario: pre-fix first-content medians, e.g. light=700,dark=720 (empty = report only)"
+        type: string
+        default: ""
       tabdrag_compare_ref:
         description: "tabdrag: also build this ref (e.g. main) and measure both builds on this runner"
         type: string
@@ -38,7 +50,7 @@ jobs:
   gui:
     name: gui e2e (macos-15 arm64)
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
         with:
@@ -69,22 +81,26 @@ jobs:
       # Step 1: capability table (csrutil, GUI session, TCC, HID keyboard/pointer,
       # Pinyin selection, screencapture). Also decides which scenarios run below.
       - name: Probe runner capabilities
-        if: inputs.suite != 'scenarios' && inputs.suite != 'tabdrag'
+        if: inputs.suite != 'scenarios' && inputs.suite != 'startup' && inputs.suite != 'tabdrag'
         continue-on-error: true
         run: scripts/e2e/run.sh probe
 
       - name: Scenarios (probe-gated)
-        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'tabdrag')
+        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'startup' && inputs.suite != 'tabdrag')
         continue-on-error: true
         run: scripts/e2e/run.sh scenarios
 
-      # Before/after numbers from one runner. The same checkout builds the comparison
-      # ref incrementally (resource paths are compiled in, so both binaries find the
-      # same packages), then is restored; the driver always comes from this commit.
+      # Before/after numbers from one runner (startup or tab drag). The same checkout
+      # builds the comparison ref incrementally (resource paths are compiled in, so both
+      # binaries find the same packages), then is restored; the driver always comes
+      # from this commit.
       - name: Build the comparison app
-        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'tabdrag' && inputs.tabdrag_compare_ref != ''
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          ((inputs.suite == 'startup' && inputs.startup_compare_ref != '') ||
+           (inputs.suite == 'tabdrag' && inputs.tabdrag_compare_ref != ''))
         env:
-          COMPARE_REF: ${{ inputs.tabdrag_compare_ref }}
+          COMPARE_REF: ${{ inputs.suite == 'startup' && inputs.startup_compare_ref || inputs.tabdrag_compare_ref }}
         run: |
           set -euo pipefail
           ab="$RUNNER_TEMP/ab"
@@ -97,7 +113,16 @@ jobs:
           git checkout HEAD -- crates Cargo.toml Cargo.lock
           git status --short
           echo "before: $(git rev-parse FETCH_HEAD)  after: $(git rev-parse HEAD)"
+          echo "E2E_STARTUP_LAUNCHERS=before=$ab/before/velocity,after=$ab/after/velocity" >> "$GITHUB_ENV"
           echo "E2E_TABDRAG_LAUNCHERS=before=$ab/before/velocity,after=$ab/after/velocity" >> "$GITHUB_ENV"
+
+      - name: Startup scenario only
+        if: github.event_name == 'workflow_dispatch' && inputs.suite == 'startup'
+        continue-on-error: true
+        env:
+          E2E_STARTUP_CASES: ${{ inputs.startup_cases }}
+          E2E_STARTUP_BASELINE: ${{ inputs.startup_baseline }}
+        run: scripts/e2e/run.sh scenario startup
 
       - name: Tab drag scenario only
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'tabdrag'

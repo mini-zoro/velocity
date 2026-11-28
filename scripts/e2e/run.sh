@@ -36,6 +36,7 @@ build() {
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
         "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
         "$VELOCITY_E2E/tabdrag.swift"
+        "$VELOCITY_E2E/startup.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
@@ -99,9 +100,11 @@ scenario() {
     rm -rf "$work"
     mkdir -p "$work" "$E2E_ARTIFACTS"
     local status=0
-    # The tabdrag scenario measures two builds over several rounds.
+    # The tabdrag scenario measures two builds over several rounds; the startup
+    # scenario records dozens of cold launches (twice with an A/B pair).
     local limit=480
     [ "$name" = tabdrag ] && limit=1200
+    [ "$name" = startup ] && limit=1800
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
         run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
     cleanup_apps
@@ -136,6 +139,8 @@ scenarios() {
         scenario background
     fi
     scenario footprint
+    # Screen recording only; no keyboard or mouse.
+    scenario startup
     {
         printf '\n### Scenario selection\n\nkeyboard(IME)=%s pointer(mouse)=%s (from the probe)\n' "$keyboard" "$pointer"
     } >>"$SUMMARY"

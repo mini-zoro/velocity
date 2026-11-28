@@ -522,6 +522,27 @@ impl WindowHandle {
             .unwrap_or_else(NSColor::windowBackgroundColor);
         window.setBackgroundColor(Some(&color));
     }
+    /// Paints the content layer behind its drawables (sRGB channels; the layer is
+    /// opaque, so alpha is ignored), or clears it with None. A window is ordered in
+    /// before its first drawable reaches the screen; until then an empty layer let
+    /// the system window colour through.
+    pub fn set_content_background(&self, background: Option<[f32; 4]>) {
+        let bits = background.map(|c| c.map(f32::to_bits));
+        if self.0.content_background.get() == bits {
+            return;
+        }
+        let Some(layer) = self.0.layer() else {
+            return;
+        };
+        self.0.content_background.set(bits);
+        let color = background.map(|c| {
+            objc2_core_graphics::CGColor::new_srgb(c[0] as f64, c[1] as f64, c[2] as f64, 1.)
+        });
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        layer.setBackgroundColor(color.as_deref());
+        CATransaction::commit();
+    }
     /// Changes the native title only when its text changes.
     pub fn set_title(&self, title: &str) {
         let Some(w) = self.0.window() else {
@@ -891,6 +912,8 @@ struct Host {
     drawing: Cell<bool>,
     input_depth: Cell<u32>,
     ime_geometry_dirty: Cell<bool>,
+    /// The content layer's background, as f32 bits, once set.
+    content_background: Cell<Option<[u32; 4]>>,
     ime_discard: NativeDiscard,
     ime_key: Cell<Option<CompositionKey>>,
     ready: Cell<bool>,
@@ -2431,6 +2454,12 @@ impl Delegate {
                     if h.stopped.get() {
                         return false;
                     }
+                    // The prepared frame set the window and content-layer
+                    // backgrounds to the theme's; commit them before the window
+                    // is ordered in, so its first composite shows them. No
+                    // drawable is involved: the first one is still acquired
+                    // on the first visible display-link tick.
+                    CATransaction::flush();
                     h.phase("first_frame_prepared_before_order_front");
                 }
                 StartupStep::OrderFront => {
@@ -3094,6 +3123,7 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         drawing: Cell::new(false),
         input_depth: Cell::new(0),
         ime_geometry_dirty: Cell::new(false),
+        content_background: Cell::new(None),
         ime_discard: NativeDiscard::default(),
         ime_key: Cell::new(None),
         ready: Cell::new(false),
