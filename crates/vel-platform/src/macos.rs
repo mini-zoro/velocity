@@ -418,6 +418,13 @@ impl WindowHandle {
     pub fn is_focused(&self) -> bool {
         self.0.window().is_some_and(|w| w.isKeyWindow())
     }
+    /// True only while the first frame is prepared, before the window is ordered in.
+    /// A drawable presented then is committed with the transaction that orders the
+    /// window in (`presentsWithTransaction`), so the window's first composite shows it
+    /// instead of its background colour until the first visible display-link tick.
+    pub fn presents_with_window(&self) -> bool {
+        self.0.launch_present.get()
+    }
     /// Whether any part of the window is on screen (not minimized, hidden or covered).
     pub fn is_visible(&self) -> bool {
         self.0
@@ -957,6 +964,11 @@ struct Host {
     release_timer: Cell<Option<Retained<NSTimer>>>,
     last_drawable_frame: Cell<Option<Instant>>,
     spare_released: Cell<bool>,
+    /// While the first frame is prepared before ordering in: the layer presents with
+    /// the Core Animation transaction, and the app may present the prepared frame.
+    launch_present: Cell<bool>,
+    /// The first occlusion change to visible during startup was reported.
+    shown_reported: Cell<bool>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
     title: RefCell<WindowTitle>,
@@ -2332,6 +2344,11 @@ define_class!(
                 .window()
                 .is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible));
             h.visible.set(visible);
+            if visible && h.first_tick.get() && !h.shown_reported.replace(true) {
+                // Ordering in returns before WindowServer shows the window; the first
+                // display tick follows this notification.
+                h.phase("window_occlusion_visible");
+            }
             if visible {
                 h.dirty.set(true);
             } else {
@@ -2582,16 +2599,34 @@ impl Delegate {
         let prepared = startup_frame(activate, |step| {
             match step {
                 StartupStep::Prepare => {
+                    // The app may present the prepared frame now. With
+                    // presentsWithTransaction the drawable becomes the layer's
+                    // contents when this transaction commits, like the backgrounds
+                    // below, rather than reaching the compositor on its own: a
+                    // drawable queued right after ordering in was often dropped
+                    // (docs/performance.md). The first visible display-link tick
+                    // still presents the same frame again.
+                    let layer = h.layer();
+                    if let Some(layer) = &layer {
+                        layer.setPresentsWithTransaction(true);
+                    }
+                    h.launch_present.set(true);
                     h.render(FrameReason::StartupPrepare, true);
+                    h.launch_present.set(false);
                     if h.stopped.get() {
+                        if let Some(layer) = &layer {
+                            layer.setPresentsWithTransaction(false);
+                        }
                         return false;
                     }
                     // The prepared frame set the window and content-layer
-                    // backgrounds to the theme's; commit them before the window
-                    // is ordered in, so its first composite shows them. No
-                    // drawable is involved: the first one is still acquired
-                    // on the first visible display-link tick.
+                    // backgrounds to the theme's; commit them, and the frame if it
+                    // was presented, before the window is ordered in, so its first
+                    // composite shows them.
                     CATransaction::flush();
+                    if let Some(layer) = &layer {
+                        layer.setPresentsWithTransaction(false);
+                    }
                     h.phase("first_frame_prepared_before_order_front");
                 }
                 StartupStep::OrderFront => {
@@ -2620,6 +2655,9 @@ impl Delegate {
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible),
         );
+        if h.visible.get() && !h.shown_reported.replace(true) {
+            h.phase("window_occlusion_visible");
+        }
         h.first_tick.set(true);
         h.starting.set(false);
         h.handle().request_frame();
@@ -3275,6 +3313,8 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         release_timer: Cell::new(None),
         last_drawable_frame: Cell::new(None),
         spare_released: Cell::new(false),
+        launch_present: Cell::new(false),
+        shown_reported: Cell::new(false),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
         title: RefCell::new(WindowTitle::new(options.title.clone())),

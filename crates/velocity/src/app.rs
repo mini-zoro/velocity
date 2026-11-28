@@ -6737,6 +6737,20 @@ impl AppHandler for App {
             {
                 self.apply_title_theme(w);
                 w.set_content_background(Some(self.content_background()));
+                // Committed with the window: its first composite shows this frame,
+                // not its background colour until the first visible display tick
+                // (about 150 ms after ordering in on the 2026-11-28 native trace).
+                if self.options.mode == Mode::Interactive
+                    && w.presents_with_window()
+                    && let Some(times) = self
+                        .renderer
+                        .as_mut()
+                        .ok_or("renderer missing")?
+                        .present_prepared()?
+                {
+                    self.clock
+                        .mark_at("first_frame_presented_with_window", times.presented);
+                }
             }
             return Ok(());
         }
