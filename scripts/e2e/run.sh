@@ -35,8 +35,7 @@ build() {
     mkdir -p "$E2E_BIN"
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
         "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
-        "$VELOCITY_E2E/tabdrag.swift"
-        "$VELOCITY_E2E/startup.swift"
+        "$VELOCITY_E2E/tabdrag.swift" "$VELOCITY_E2E/startup.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
