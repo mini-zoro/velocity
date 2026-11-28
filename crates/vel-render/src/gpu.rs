@@ -56,7 +56,12 @@ unsafe fn win32_surface(
 }
 
 const ATLAS_SIDE: u32 = 1024;
-const MAX_PAGES: usize = 8;
+/// R8 coverage pages, 1 MiB each.
+const MASK_PAGES: usize = 8;
+/// RGBA pages for color glyphs and images, 4 MiB each. One page fewer than the old
+/// shared RGBA budget: that budget always held at least one page of UI text, which
+/// now lives in the mask array.
+const COLOR_PAGES: usize = 7;
 const MIN_INSTANCE_BYTES: u64 = 1024 * 1024;
 const INSTANCE_SHRINK_FRAMES: u32 = 120;
 #[repr(C)]
@@ -415,7 +420,8 @@ impl Renderer {
     /// Allocation diagnostics (texture storage excludes driver overhead).
     pub fn atlas_info(&self) -> Value {
         let atlas = self.gpu.atlas.borrow();
-        json!({"side":ATLAS_SIDE,"pages":atlas.atlas.pages(),"allocated_array_layers":atlas.allocated_layers(),"allocated_texture_bytes":atlas.bytes(),"glyph_keys":atlas.atlas.len(),"page_evictions":atlas.atlas.evictions(),"generation":atlas.atlas.generation(),"layout_cache_entries":self.gpu.layouts.borrow().len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
+        let ([mask_pages, color_pages], [mask_layers, color_layers]) = atlas.pages();
+        json!({"side":ATLAS_SIDE,"pages":mask_pages + color_pages,"mask_pages":mask_pages,"color_pages":color_pages,"mask_layers":mask_layers,"color_layers":color_layers,"allocated_array_layers":atlas.allocated_layers(),"allocated_texture_bytes":atlas.bytes(),"glyph_keys":atlas.len(),"page_evictions":atlas.evictions(),"generation":atlas.generation(),"layout_cache_entries":self.gpu.layouts.borrow().len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
     }
 
     fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
@@ -424,9 +430,9 @@ impl Renderer {
         let mut fonts = fonts.for_frame();
         let gpu = Rc::clone(&self.gpu);
         let mut atlas = gpu.atlas.borrow_mut();
-        atlas.grow_texture(&gpu, 1);
+        atlas.prepare_textures(&gpu);
         self.prepared_generation = None;
-        let warm = !atlas.atlas.is_empty();
+        let warm = !atlas.is_empty();
         let mut result = self.build_instances(scene, &mut fonts, scale, &gpu, &mut atlas);
         if warm && matches!(&result, Err(error) if error == ALL_PAGES_PINNED) {
             // A hot atlas can pin fragments across every page even if this
@@ -439,7 +445,7 @@ impl Renderer {
             self.discard_staged_writes();
         }
         result?;
-        self.prepared_generation = Some(atlas.atlas.generation());
+        self.prepared_generation = Some(atlas.generation());
         #[cfg(target_os = "macos")]
         if fonts.fallback_pending()
             && let Some(window) = &self.window
@@ -457,7 +463,7 @@ impl Renderer {
         gpu: &GpuContext,
         atlas: &mut GpuAtlas,
     ) -> Result<(), String> {
-        atlas.atlas.begin_frame();
+        atlas.begin_frame();
         let scale_bits = scale.to_bits();
         let font_set = fonts.layout_identity();
         let mut layouts = gpu.layouts.borrow_mut();
@@ -578,6 +584,7 @@ impl Renderer {
                                     height / side,
                                 ];
                                 q.meta[1] = entry.page as f32;
+                                q.meta[3] = 1.; // RGBA page array
                                 self.data.push(q);
                             }
                         }
@@ -779,6 +786,7 @@ impl Renderer {
                             q.color[3] *= 0.65;
                         }
                         q.meta[1] = entry.page as f32;
+                        q.meta[3] = if raster.color { 1. } else { 0. };
                         self.data.push(q);
                     }
                 }
@@ -862,10 +870,10 @@ impl Renderer {
         query: Option<u32>,
     ) -> Result<(), String> {
         let atlas = self.gpu.atlas.borrow();
-        if self.prepared_generation != Some(atlas.atlas.generation()) {
+        if self.prepared_generation != Some(atlas.generation()) {
             return Err("atlas placements changed since frame preparation".into());
         }
-        let atlas_bind = &atlas.atlas_texture.as_ref().expect("prepared atlas").bind;
+        let atlas_bind = atlas.bind().expect("prepared atlas");
         let batches = self.batches.as_slice();
         let separate = query.is_some() && !self.minimap_batches.is_empty();
         let ranges = if separate {

@@ -10,6 +10,11 @@ pub use windows::{font_families, font_named, font_style};
 pub enum FontData {
     /// Immutable, OS-owned font resource.
     Mapped(memmap2::Mmap),
+    /// A replaceable font (user, app or MobileAsset) mapped through a private
+    /// copy-on-write clone that was unlinked right after mapping: later writes,
+    /// truncation or replacement of the original never reach these bytes, and its
+    /// clean file-backed pages are not part of the process footprint.
+    Cloned(memmap2::Mmap),
     /// Snapshot of a user, app or other replaceable font.
     Owned(Vec<u8>),
 }
@@ -17,7 +22,7 @@ impl std::ops::Deref for FontData {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
-            Self::Mapped(data) => data,
+            Self::Mapped(data) | Self::Cloned(data) => data,
             Self::Owned(data) => data,
         }
     }
@@ -89,7 +94,8 @@ fn mapping_policy() -> &'static MappingPolicy {
             }),
     })
 }
-/// Maps immutable system resources and snapshots replaceable fonts in full.
+/// Maps immutable system resources. Replaceable fonts are mapped through a private
+/// clone where the file system can make one, and otherwise snapshotted in full.
 /// Renderers can read selected MobileAsset collection faces instead.
 pub fn map_font_file(
     path: &std::path::Path,
@@ -104,17 +110,74 @@ pub fn map_font_file(
         let file = std::fs::File::open(&canonical).map_err(|e| e.to_string())?;
         // SAFETY: canonicalization and mount/firmlink checks establish a read-only
         // system resource. User/app/mobile-asset fonts can be truncated or replaced
-        // in place, so they are copied below. The Arc
+        // in place, so they are cloned or copied below. The Arc
         // retains the mapping for every borrowed table and collection face.
         FontData::Mapped(
             unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| e.to_string())?,
         )
+    } else if let Some(mapping) = clone_and_map(&canonical) {
+        FontData::Cloned(mapping)
     } else {
         FontData::Owned(std::fs::read(&canonical).map_err(|e| e.to_string())?)
     };
     let bytes = std::sync::Arc::new(data);
     files.insert(canonical, bytes.clone());
     Ok(bytes)
+}
+
+/// Maps a replaceable font file through a private clone, sharing it with every face
+/// of the same collection; `None` when the file system cannot clone it. Renderers
+/// use this before falling back to a per-face snapshot.
+pub fn map_private_clone(
+    path: &std::path::Path,
+    files: &mut FontFiles,
+) -> Option<std::sync::Arc<FontData>> {
+    let canonical = path.canonicalize().ok()?;
+    if let Some(bytes) = files.get(&canonical) {
+        return Some(bytes.clone());
+    }
+    let bytes = std::sync::Arc::new(FontData::Cloned(clone_and_map(&canonical)?));
+    files.insert(canonical, bytes.clone());
+    Some(bytes)
+}
+
+/// APFS `clonefile` shares the original's blocks copy-on-write, so the clone costs
+/// neither a copy nor disk space, and later changes to the original reach neither
+/// the clone nor its mapping. The clone is unlinked as soon as it is mapped, so no
+/// other process can open or truncate it; the mapping keeps it alive.
+#[cfg(target_os = "macos")]
+fn clone_and_map(canonical: &std::path::Path) -> Option<memmap2::Mmap> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // <sys/clonefile.h>; the libc crate does not export the clonefile flags.
+    const CLONE_NOFOLLOW: u32 = 0x0001;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let clone = std::env::temp_dir().join(format!(
+        "velocity-font-{}-{}-{}.clone",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_nanos())
+    ));
+    let source = std::ffi::CString::new(canonical.as_os_str().as_bytes()).ok()?;
+    let target = std::ffi::CString::new(clone.as_os_str().as_bytes()).ok()?;
+    // SAFETY: two live NUL-terminated paths. The destination name is unique to this
+    // process, and clonefile fails rather than replace an existing file.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), CLONE_NOFOLLOW) } != 0 {
+        return None;
+    }
+    let file = std::fs::File::open(&clone);
+    let _ = std::fs::remove_file(&clone);
+    let file = file.ok()?;
+    // SAFETY: the clone is private to this process: nothing else knows its name, and
+    // it is unlinked before any font table is read, so it cannot shrink or change
+    // underneath the mapping. The Arc in FontFiles retains the mapping.
+    unsafe { memmap2::MmapOptions::new().map(&file) }.ok()
+}
+#[cfg(not(target_os = "macos"))]
+fn clone_and_map(_: &std::path::Path) -> Option<memmap2::Mmap> {
+    None
 }
 /// Stable identity of one face in a memory-mapped font file.
 #[derive(Clone, Debug)]
@@ -544,5 +607,65 @@ impl std::fmt::Debug for AsyncFontFallback {
         f.debug_struct("AsyncFontFallback")
             .field("pending", &self.pending)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod clone_tests {
+    use super::*;
+
+    #[test]
+    fn a_private_clone_keeps_the_bytes_when_the_original_is_rewritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "velocity-clone-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("font.ttf");
+        let original: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&path, &original).unwrap();
+        let mut files = FontFiles::new();
+        let Some(bytes) = map_private_clone(&path, &mut files) else {
+            // Temporary directories off APFS cannot clone; map_font_file copies.
+            assert!(matches!(
+                &*map_font_file(&path, &mut files).unwrap(),
+                FontData::Owned(_)
+            ));
+            return;
+        };
+        assert!(matches!(&*bytes, FontData::Cloned(_)));
+        // Every face of the collection shares the one mapping.
+        assert!(std::sync::Arc::ptr_eq(
+            &bytes,
+            &map_font_file(&path, &mut files).unwrap()
+        ));
+        // Truncated, rewritten and then deleted: the mapping still has the original.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        std::fs::write(&path, b"replaced").unwrap();
+        assert_eq!(&bytes[..], &original[..]);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(&bytes[..], &original[..]);
+        // The clone was unlinked once mapped: nothing is left beside the original.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let leftovers = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("velocity-font-{}-", std::process::id()))
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir(&dir).unwrap();
     }
 }

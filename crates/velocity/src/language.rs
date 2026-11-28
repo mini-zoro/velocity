@@ -416,6 +416,7 @@ impl Drop for HighlightFrontend {
     }
 }
 
+static PACKED: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
 #[derive(Debug)]
 pub struct Assets {
     pub syntaxes: Arc<SyntaxSet>,
@@ -425,14 +426,18 @@ pub struct Assets {
 }
 use crate::bundled_syntax::INTERNAL_SYNTAXES;
 impl Assets {
+    /// Whether this process already decoded the packed assets (the first interactive
+    /// window does). Later windows then share them rather than load a second copy.
+    pub(crate) fn packed_ready() -> bool {
+        PACKED.get().is_some_and(Result::is_ok)
+    }
     pub(crate) fn packed() -> Option<Result<Arc<Self>, String>> {
         const INDEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/startup-syntaxes.bin"));
-        static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
         if INDEX.is_empty() {
             return None; // Source archive built without the syntax submodule.
         }
         Some(
-            ASSETS
+            PACKED
                 .get_or_init(|| {
                     let phase = std::time::Instant::now();
                     let mut syntaxes: SyntaxSet =

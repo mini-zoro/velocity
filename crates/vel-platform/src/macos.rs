@@ -75,6 +75,21 @@ use std::{
     time::Duration,
 };
 
+/// How long a window that is not where the person types (not key, the app is not
+/// active, or it is covered or minimized) waits after its last frame before it
+/// releases its spare drawable and keeps only the one on screen.
+const BACKGROUND_RELEASE: Duration = Duration::from_secs(3);
+
+/// `VELOCITY_LOG_DRAWABLES=1` traces drawable cap changes and trim frames to stderr
+/// (the GUI log), for checking the pool on a real window.
+fn drawable_log(message: impl FnOnce() -> String) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("VELOCITY_LOG_DRAWABLES").is_some_and(|v| v == "1"))
+    {
+        eprintln!("velocity drawables: {}", message());
+    }
+}
+
 /// A main-thread handle. Clones are inexpensive and do not keep native objects alive after close.
 #[derive(Clone)]
 pub struct WindowHandle(Rc<Host>);
@@ -784,11 +799,18 @@ impl WindowHandle {
         let mut pool = self.0.drawable_pool.get();
         let old = pool.limit();
         pool.frame(now);
+        drawable_log(|| format!("frame at cap {}", pool.limit()));
         self.0.drawable_pool.set(pool);
         if pool.limit() != old {
             self.0.set_drawable_limit(pool.limit());
         }
         self.0.arm_drawable_timer(pool, now);
+        // This frame's acquisition refills the pool as needed.
+        self.0.last_drawable_frame.set(Some(now));
+        self.0.spare_released.set(false);
+        if !self.0.foreground() {
+            self.0.arm_release_timer(BACKGROUND_RELEASE);
+        }
         pool.limit()
     }
     /// Reapplies the idle cap after wgpu configure, which always sets three.
@@ -931,6 +953,10 @@ struct Host {
     timer: Cell<Option<Retained<NSTimer>>>,
     drawable_pool: Cell<DrawablePool>,
     drawable_timer: Cell<Option<Retained<NSTimer>>>,
+    /// Background release of the spare drawable (see `BACKGROUND_RELEASE`).
+    release_timer: Cell<Option<Retained<NSTimer>>>,
+    last_drawable_frame: Cell<Option<Instant>>,
+    spare_released: Cell<bool>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
     title: RefCell<WindowTitle>,
@@ -971,9 +997,13 @@ impl Host {
         if let Some(link) = native.link {
             link.invalidate();
         }
-        for timer in [self.timer.take(), self.drawable_timer.take()]
-            .into_iter()
-            .flatten()
+        for timer in [
+            self.timer.take(),
+            self.drawable_timer.take(),
+            self.release_timer.take(),
+        ]
+        .into_iter()
+        .flatten()
         {
             timer.invalidate();
         }
@@ -1040,6 +1070,7 @@ impl Host {
         WindowHandle(Rc::clone(self))
     }
     fn set_drawable_limit(&self, limit: usize) {
+        drawable_log(|| format!("cap {limit}"));
         if let Some(layer) = self.layer() {
             layer.setMaximumDrawableCount(limit);
         }
@@ -1069,6 +1100,88 @@ impl Host {
         unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
         self.drawable_timer.set(Some(timer));
     }
+    /// Where the person types: visible, key, in the active application.
+    fn foreground(&self) -> bool {
+        self.visible.get()
+            && NSApplication::sharedApplication(self.mtm).isActive()
+            && self.window().is_some_and(|w| w.isKeyWindow())
+    }
+    fn arm_release_timer(&self, delay: Duration) {
+        if self.stopped.get() || self.spare_released.get() {
+            return;
+        }
+        let Some(view) = self.view() else {
+            return;
+        };
+        let current = self.release_timer.take();
+        if current.is_some() {
+            // The pending timer rechecks the last frame and rearms itself.
+            self.release_timer.set(current);
+            return;
+        }
+        // SAFETY: releaseSpareDrawables: takes the timer on the view's main thread.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                delay.as_secs_f64().max(0.0001),
+                &view,
+                sel!(releaseSpareDrawables:),
+                None,
+                false,
+            )
+        };
+        // SAFETY: timer and common-mode constant belong to the main run loop.
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+        self.release_timer.set(Some(timer));
+    }
+    /// A window nobody types in keeps only the drawable on screen; nothing on screen
+    /// changes, and its next frame acquires a new drawable. Saves one window-sized
+    /// surface per background window (15 MB for a large Retina window), including
+    /// minimized or covered ones.
+    fn release_spare_drawables(&self) {
+        self.release_timer.take();
+        if self.stopped.get()
+            || self.spare_released.get()
+            || self.drawing.get()
+            || self.foreground()
+        {
+            return;
+        }
+        let Some(last) = self.last_drawable_frame.get() else {
+            return;
+        };
+        let now = Instant::now();
+        let due = last + BACKGROUND_RELEASE;
+        if now < due || self.drawable_pool.get().deadline().is_some() {
+            self.arm_release_timer(
+                due.saturating_duration_since(now)
+                    .max(BACKGROUND_RELEASE / 4),
+            );
+            return;
+        }
+        if self.flush_free_drawables() {
+            drawable_log(|| "background: released the spare drawables".into());
+            self.spare_released.set(true);
+        }
+    }
+    /// Drops the free drawables of the layer's pool and keeps the one on screen: a
+    /// different drawable size flushes the pool, and restoring the size at once leaves
+    /// the displayed drawable in place, which the layer keeps showing exactly as during
+    /// a live resize (runner: the window's pixels were identical before and after).
+    fn flush_free_drawables(&self) -> bool {
+        let Some(layer) = self.layer() else {
+            return false;
+        };
+        let size = layer.drawableSize();
+        if size.width < 1. || size.height < 1. {
+            return false;
+        }
+        layer.setDrawableSize(objc2_core_foundation::CGSize::new(
+            size.width,
+            size.height + 1.,
+        ));
+        layer.setDrawableSize(size);
+        true
+    }
     fn settle_drawable_pool(&self) {
         self.drawable_timer.take();
         if self.stopped.get() {
@@ -1077,15 +1190,27 @@ impl Host {
         let now = Instant::now();
         let mut pool = self.drawable_pool.get();
         let old = pool.limit();
-        if self.drawing.get() {
+        let trimmed = if self.drawing.get() {
             // A nested AppKit run loop must not trim during a draw.
             pool.frame(now);
+            false
         } else {
-            pool.timer(now);
-        }
+            pool.timer(now)
+        };
         self.drawable_pool.set(pool);
         if pool.limit() != old {
             self.set_drawable_limit(pool.limit());
+        }
+        if trimmed && self.visible.get() && self.flush_free_drawables() {
+            // Lowering the cap does not free an allocated drawable, and later frames at
+            // the lower cap released it only sometimes (runner, 2026-11-28). Flush the
+            // free drawables instead and draw the unchanged scene once: that frame
+            // allocates the one spare drawable the next input will use, so the window
+            // settles at exactly two. A covered window is handled by the background
+            // release below.
+            drawable_log(|| "trim: flushed the pool, refill frame".into());
+            self.dirty.set(true);
+            self.pace();
         }
         self.arm_drawable_timer(pool, now);
     }
@@ -1564,6 +1689,10 @@ define_class!(
         fn settle_drawable_pool(&self, _timer: &NSTimer) {
             if let Some(h) = self.ivars().host.upgrade() { h.settle_drawable_pool(); }
         }
+        #[unsafe(method(releaseSpareDrawables:))]
+        fn release_spare_drawables(&self, _timer: &NSTimer) {
+            if let Some(h) = self.ivars().host.upgrade() { h.release_spare_drawables(); }
+        }
         #[unsafe(method(showDeferredContextMenu:))]
         fn show_deferred_context_menu(&self, _sender: Option<&AnyObject>) {
             if let Some(h) = self.ivars().host.upgrade() { h.show_context_menu(); }
@@ -1971,6 +2100,7 @@ define_class!(
             drag_image::hide(true);
             for host in lifecycle::live_hosts() {
                 host.dispatch(Event::PointerCancel);
+                host.arm_release_timer(BACKGROUND_RELEASE);
             }
         }
 
@@ -2204,6 +2334,8 @@ define_class!(
             h.visible.set(visible);
             if visible {
                 h.dirty.set(true);
+            } else {
+                h.arm_release_timer(BACKGROUND_RELEASE);
             }
             h.pace();
             lifecycle::update_idle_timer();
@@ -3140,6 +3272,9 @@ fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHand
         timer: Cell::new(None),
         drawable_pool: Cell::new(DrawablePool::default()),
         drawable_timer: Cell::new(None),
+        release_timer: Cell::new(None),
+        last_drawable_frame: Cell::new(None),
+        spare_released: Cell::new(false),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
         title: RefCell::new(WindowTitle::new(options.title.clone())),

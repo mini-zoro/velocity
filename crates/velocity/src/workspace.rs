@@ -2192,11 +2192,20 @@ impl Workspace {
     /// preference as this one, no document watcher and no window overrides. Built only
     /// when the window opens and dropped with it.
     pub(crate) fn for_settings_window(&self) -> Result<Self, String> {
-        let mut workspace = Self::new_configured(
+        // It shares this window's syntax assets too: the legacy copy would stay
+        // loaded for the rest of the process after the Settings window closed.
+        let mut workspace = Self::new_with_configuration(
             None,
             self.data_dir.clone(),
             None,
-            false,
+            (
+                false,
+                if self.packed_syntaxes {
+                    ConfigKind::InteractiveReload
+                } else {
+                    ConfigKind::Eager
+                },
+            ),
             Some(Default::default()),
             self.preferred_languages,
             &mut Default::default(),
@@ -2253,11 +2262,21 @@ impl Workspace {
         preferred_languages: crate::ui_language::PreferredLanguages,
         phases: &mut crate::report::StartupPhases,
     ) -> Result<Self, String> {
+        // Another interactive window shares the syntax set and preference metadata the
+        // first one decoded from the binary (the same corpus as the legacy loader),
+        // with their compiled contexts, regex machines and caches. Loading the legacy
+        // copy instead cost each later window's process a second syntax set (4.6 MB)
+        // and a second set of caches (2026-11-28 runner call trees).
+        let kind = if watch && crate::language::Assets::packed_ready() {
+            ConfigKind::InteractiveReload
+        } else {
+            ConfigKind::Eager
+        };
         Self::new_with_configuration(
             text,
             data_dir,
             project,
-            (watch, ConfigKind::Eager),
+            (watch, kind),
             window_overrides,
             preferred_languages,
             phases,

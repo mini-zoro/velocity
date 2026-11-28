@@ -14,10 +14,10 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "auto = probe then every supported scenario; probe only; scenarios only; startup or tab drag scenario only"
+        description: "auto = probe then every supported scenario; probe only; scenarios only; startup or tab drag scenario only; memory gate only"
         type: choice
         default: auto
-        options: [auto, probe, scenarios, startup, tabdrag]
+        options: [auto, probe, scenarios, startup, tabdrag, memory]
       startup_cases:
         description: "startup scenario: comma-separated cases to run (empty = all)"
         type: string
@@ -38,6 +38,14 @@ on:
         description: "tabdrag: rounds per build (each round is three measured drags plus a merge and a tear-off)"
         type: string
         default: "2"
+      memory_compare_ref:
+        description: "memory scenario: also build this ref (e.g. main) and run both builds interleaved on this runner"
+        type: string
+        default: ""
+      memory_diagnostics:
+        description: "memory scenario: drawable states, footprint/vmmap/heap dumps and a MallocStackLogging session"
+        type: boolean
+        default: false
 
 concurrency:
   group: gui-e2e-${{ github.workflow }}-${{ github.ref }}
@@ -55,6 +63,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           # The harness reads no package data; the product build needs no submodule.
+          # The memory gate fetches the syntax packages itself, after the other scenarios.
           submodules: false
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -81,12 +90,12 @@ jobs:
       # Step 1: capability table (csrutil, GUI session, TCC, HID keyboard/pointer,
       # Pinyin selection, screencapture). Also decides which scenarios run below.
       - name: Probe runner capabilities
-        if: inputs.suite != 'scenarios' && inputs.suite != 'startup' && inputs.suite != 'tabdrag'
+        if: inputs.suite != 'scenarios' && inputs.suite != 'startup' && inputs.suite != 'tabdrag' && inputs.suite != 'memory'
         continue-on-error: true
         run: scripts/e2e/run.sh probe
 
       - name: Scenarios (probe-gated)
-        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'startup' && inputs.suite != 'tabdrag')
+        if: github.event_name == 'pull_request' || (inputs.suite != 'probe' && inputs.suite != 'startup' && inputs.suite != 'tabdrag' && inputs.suite != 'memory')
         continue-on-error: true
         run: scripts/e2e/run.sh scenarios
 
@@ -130,6 +139,38 @@ jobs:
         env:
           E2E_TABDRAG_ROUNDS: ${{ inputs.tabdrag_rounds }}
         run: scripts/e2e/run.sh scenario tabdrag
+
+      # Memory gate: a highlighted project, as people use it, so it needs the bundled syntax
+      # packages. The scenarios above are calibrated for a build without them (the startup
+      # scenario's flash check failed with the packages present), so this step runs last,
+      # fetches the packages and rebuilds. With memory_compare_ref
+      # it also builds that ref in this checkout (resource paths are compiled in, so both
+      # binaries read the same packages) and runs both builds interleaved.
+      - name: Memory gate
+        if: inputs.suite != 'probe' && inputs.suite != 'startup' && inputs.suite != 'tabdrag'
+        continue-on-error: true
+        env:
+          COMPARE_REF: ${{ inputs.memory_compare_ref }}
+          E2E_MEMORY_DIAG: ${{ inputs.memory_diagnostics && '1' || '' }}
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 third_party/sublime-packages \
+            || git submodule update --init third_party/sublime-packages
+          cargo build --release --locked -p velocity
+          if [ -n "${COMPARE_REF:-}" ]; then
+            ab="$RUNNER_TEMP/memory-ab"
+            mkdir -p "$ab/before" "$ab/after"
+            cp target/release/velocity "$ab/after/velocity"
+            git fetch --no-tags --depth=1 origin "$COMPARE_REF"
+            git checkout FETCH_HEAD -- crates Cargo.toml Cargo.lock
+            cargo build --release --locked -p velocity
+            cp target/release/velocity "$ab/before/velocity"
+            git checkout HEAD -- crates Cargo.toml Cargo.lock
+            git status --short
+            echo "before: $(git rev-parse FETCH_HEAD)  after: $(git rev-parse HEAD)"
+            export E2E_MEMORY_LAUNCHERS="before=$ab/before/velocity,after=$ab/after/velocity"
+          fi
+          scripts/e2e/run.sh scenario memory
 
       - name: Summarise
         if: always()

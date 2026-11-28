@@ -221,3 +221,35 @@ fn headless_poll_and_scene_finish_startup_without_a_native_present() {
         assert!(!app.ensure_startup_services(), "only publish once");
     }
 }
+
+#[test]
+fn a_later_interactive_window_shares_the_first_windows_syntax_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Workspace::new_for_startup(
+        Text::new(),
+        Some(dir.path().to_owned()),
+        None,
+        true,
+        &mut Default::default(),
+    )
+    .unwrap();
+    if !crate::language::Assets::packed_ready() {
+        return; // A source archive built without the syntax packages has no pack.
+    }
+    // One syntax set and one preference set per process: the compiled contexts,
+    // regex machines and metadata caches are shared, not built again per window.
+    let second = Workspace::new_window(Some(dir.path().to_owned()), true).unwrap();
+    assert!(Arc::ptr_eq(&first.assets.syntaxes, &second.assets.syntaxes));
+    assert!(Arc::ptr_eq(&first.assets.metadata, &second.assets.metadata));
+    let settings = first.for_settings_window().unwrap();
+    assert!(Arc::ptr_eq(
+        &first.assets.syntaxes,
+        &settings.assets.syntaxes
+    ));
+    // Headless and test workspaces keep the eager loader.
+    let unwatched = Workspace::new_window(Some(dir.path().to_owned()), false).unwrap();
+    assert!(!Arc::ptr_eq(
+        &first.assets.syntaxes,
+        &unwatched.assets.syntaxes
+    ));
+}

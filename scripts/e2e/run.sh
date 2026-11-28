@@ -7,6 +7,7 @@
 #   scripts/e2e/run.sh scenarios       # probe first, then every scenario the runner supports
 #   scripts/e2e/run.sh scenario ime
 #   scripts/e2e/run.sh scenario tabdrag  # E2E_TABDRAG_LAUNCHERS=before=…,after=… compares two builds
+#   scripts/e2e/run.sh scenario memory # needs a build with the syntax packages (see gui-e2e.yml)
 #   scripts/e2e/run.sh summary         # nonzero unless every recorded scenario passed
 #
 # Environment:
@@ -24,6 +25,7 @@ E2E_ARTIFACTS=${E2E_ARTIFACTS:-"${RUNNER_TEMP:-/tmp}/e2e/artifacts"}
 E2E_RESULTS=${E2E_RESULTS:-"$E2E_WORK/results"}
 export E2E_VELOCITY=${E2E_VELOCITY:-"$VELOCITY_ROOT/target/release/velocity"}
 export E2E_ARTIFACTS E2E_WORK E2E_RESULTS
+export E2E_ROOT=${E2E_ROOT:-"$VELOCITY_ROOT"}
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/null}
 
 usage() {
@@ -37,7 +39,7 @@ build() {
     swiftc --version 2>&1 | head -1
     swiftc -O -wmo -o "$E2E_BIN/e2e" \
         "$VELOCITY_E2E/main.swift" "$VELOCITY_E2E/ax-support.swift" "$VELOCITY_E2E/scenarios.swift" \
-        "$VELOCITY_E2E/tabdrag.swift" "$VELOCITY_E2E/startup.swift"
+        "$VELOCITY_E2E/tabdrag.swift" "$VELOCITY_E2E/startup.swift" "$VELOCITY_E2E/memory.swift"
     echo "driver: $E2E_BIN/e2e"
 }
 
@@ -136,10 +138,12 @@ scenario() {
     local marker="$work/.started"
     touch "$marker"
     # The tabdrag scenario measures two builds over several rounds; the startup
-    # scenario records dozens of cold launches (twice with an A/B pair).
+    # scenario records dozens of cold launches and the memory gate runs several full
+    # editing sessions (both twice per build in an A/B run).
     local limit=480
     [ "$name" = tabdrag ] && limit=1200
     [ "$name" = startup ] && limit=1800
+    [ "$name" = memory ] && limit=1800
     E2E_SUMMARY="$E2E_RESULTS/$name.summary" \
         run_with_timeout "$limit" "$E2E_BIN/e2e" scenario "$name" "$work/data" 2>&1 | tee "$log" || status=$?
     if [ "$status" -ge 128 ]; then

@@ -1,6 +1,8 @@
 struct Screen { size: vec2<f32>, padding: vec2<f32> }
+// Glyph coverage (R8) and color glyph/image (RGBA) pages; primitive.w selects one.
 @group(0) @binding(0) var atlas: texture_2d_array<f32>;
 @group(0) @binding(1) var atlas_sampler: sampler;
+@group(0) @binding(2) var color_atlas: texture_2d_array<f32>;
 @group(1) @binding(0) var<uniform> screen: Screen;
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -42,9 +44,17 @@ fn corner_distance(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
     let radius = select(select(radii.z,radii.w,left),select(radii.y,radii.x,left),top);
     return rounded_distance(p - size * 0.5,size * 0.5,radius);
 }
-fn glow_sample(uv: vec2<f32>, page: i32, bounds: vec4<f32>) -> f32 {
+// A mask page stores coverage in .r; RGBA pages read as before. A mask texel equals
+// the old white RGBA texel (1,1,1,coverage); its transparent border reads (1,1,1,0)
+// instead of (0,0,0,0), which only matters between texel centers, where the old
+// value darkened the glyph's colour.
+fn atlas_sample(uv: vec2<f32>, page: i32, color: bool) -> vec4<f32> {
+    if color { return textureSampleLevel(color_atlas,atlas_sampler,uv,page,0.); }
+    return vec4(1.,1.,1.,textureSampleLevel(atlas,atlas_sampler,uv,page,0.).r);
+}
+fn glow_sample(uv: vec2<f32>, page: i32, bounds: vec4<f32>, color: bool) -> f32 {
     if any(uv < bounds.xy) || any(uv > bounds.zw) { return 0.; }
-    return textureSampleLevel(atlas,atlas_sampler,uv,page,0.).a;
+    return atlas_sample(uv,page,color).a;
 }
 @fragment fn fs_main(input: Out) -> @location(0) vec4<f32> {
     if input.position.x < input.clip.x || input.position.y < input.clip.y || input.position.x >= input.clip.z || input.position.y >= input.clip.w { discard; }
@@ -62,7 +72,7 @@ fn glow_sample(uv: vec2<f32>, page: i32, bounds: vec4<f32>) -> f32 {
         var alpha = 0.;
         for (var y = -2; y <= 2; y++) { for (var x = -2; x <= 2; x++) {
             let weight = exp(-f32(x*x+y*y)*0.35);
-            alpha += glow_sample(input.uv + vec2(f32(x),f32(y))*input.primitive.z,i32(input.primitive.y),input.params)*weight/8.7;
+            alpha += glow_sample(input.uv + vec2(f32(x),f32(y))*input.primitive.z,i32(input.primitive.y),input.params,input.primitive.w > 0.5)*weight/8.7;
         } }
         return vec4(input.color.rgb,input.color.a*alpha);
     }
@@ -76,7 +86,7 @@ fn glow_sample(uv: vec2<f32>, page: i32, bounds: vec4<f32>) -> f32 {
         if (input.local.y % max(input.params.x, 1.)) >= input.params.y { discard; }
         return input.color;
     }
-    if kind == 2u { return textureSampleLevel(atlas,atlas_sampler,input.uv,i32(input.primitive.y),0.) * input.color; }
+    if kind == 2u { return atlas_sample(input.uv,i32(input.primitive.y),input.primitive.w > 0.5) * input.color; }
     if kind == 4u {
         var coverage = 1. - smoothstep(-0.5,0.5,corner_distance(input.local,input.size,input.params));
         let side = u32(input.primitive.y);
