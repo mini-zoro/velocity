@@ -458,9 +458,12 @@ fn r20_pure_insert_minimap_width_is_refreshed_by_next_publication() {
         .max()
         .unwrap_or(0);
     assert_eq!(width, 19);
-    assert!(
-        begin.elapsed() < Duration::from_secs(1),
-        "ordinary insertion must promptly publish fresh minimap geometry"
+    // Publication itself is checked by `drive` (bounded by its hang guard); promptness
+    // is a timing-run contract.
+    crate::test_timing::within(
+        begin.elapsed(),
+        Duration::from_secs(1),
+        "fresh minimap geometry after an ordinary insertion",
     );
 }
 

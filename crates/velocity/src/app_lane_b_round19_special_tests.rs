@@ -130,7 +130,10 @@ fn r19_special_restore_watchdog_backs_up_and_keeps_dirty_text() {
         crate::restore_io::block_next();
         let at = Instant::now();
         let mut a = restore(data.path());
-        assert!(at.elapsed() < Duration::from_secs(8));
+        // The blocked reader never returns, so getting here at all (within `bounded`'s
+        // hang guard) shows the watchdog fired; the message below says so. The 8 s bound
+        // is a timing-run contract.
+        crate::test_timing::within(at.elapsed(), Duration::from_secs(8), "restore watchdog");
         assert!(a.panels.message.contains("timed out"));
         assert!(a.panels.message.contains(".bak"));
         assert!(

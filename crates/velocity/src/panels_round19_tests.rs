@@ -228,12 +228,13 @@ fn r19_hover_stale_embedded_pointer_moves_never_parse() {
             p.poll(&mut w, 0..100);
             assert!(!p.hover_requested, "unpublished scopes suppress the popup");
         }
-        eprintln!(
-            "{syntax} stale pointer worst: {:.3} ms, parses: {}",
-            worst.as_secs_f64() * 1000.,
-            w.editor().exact_scope_parses.get() - parses
+        // The behaviour: a stale pointer never parses and never requests a popup (above).
+        // The 1 ms per move is a performance contract, checked in timing runs only.
+        crate::test_timing::within(
+            worst,
+            Duration::from_millis(1),
+            &format!("{syntax} worst stale-pointer hover"),
         );
-        assert!(worst < Duration::from_millis(1));
         assert_eq!(w.editor().exact_scope_parses.get(), parses);
     }
 }

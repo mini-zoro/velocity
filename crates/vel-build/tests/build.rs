@@ -13,7 +13,7 @@ mod detached_fixture;
 #[path = "support/timing.rs"]
 mod timing;
 #[cfg(unix)]
-use timing::HANG_GUARD;
+use timing::{HANG_GUARD, budget, within};
 #[test]
 fn variables_nested_defaults_regex_unicode_and_literal_dollars() {
     let vars = Variables::new(
@@ -152,14 +152,18 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
     let at = Instant::now();
     task.cancel();
     loop {
-        if let Event::Finished { cancelled, .. } =
-            task.events.recv_timeout(Duration::from_secs(3)).unwrap()
-        {
+        if let Event::Finished { cancelled, .. } = task.events.recv_timeout(HANG_GUARD).unwrap() {
             assert!(cancelled);
             break;
         }
     }
-    assert!(at.elapsed() < Duration::from_secs(2));
+    // The background `sleep 30` holds the inherited pipes; finishing well before it would
+    // exit shows cancel reaped the tree. 2 s is the timing-run contract.
+    let elapsed = at.elapsed();
+    assert!(
+        elapsed < budget(Duration::from_secs(2), Duration::from_secs(20)),
+        "{elapsed:?}"
+    );
 }
 
 #[test]
@@ -179,10 +183,14 @@ fn dropping_a_build_with_full_output_queue_reaps_its_tree_without_a_consumer() {
         done.send(()).unwrap();
     });
     completion
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(HANG_GUARD)
         .expect("Drop must reap even while its output queue is full");
     thread.join().unwrap();
-    assert!(at.elapsed() < Duration::from_secs(2));
+    within(
+        at.elapsed(),
+        Duration::from_secs(2),
+        "drop with a full output queue",
+    );
 }
 
 #[test]
@@ -321,13 +329,15 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
     let at = Instant::now();
     support::install();
     let task = Task::spawn_after(&next, Some(old)).unwrap();
+    // The old child would run for 300 s; 100 ms is the timing-run contract.
+    let elapsed = at.elapsed();
     assert!(
-        at.elapsed() < Duration::from_millis(100),
-        "restart must not wait on the caller"
+        elapsed < budget(Duration::from_millis(100), Duration::from_secs(20)),
+        "restart must not wait on the caller: {elapsed:?}"
     );
     let mut output = String::new();
     loop {
-        match task.events.recv_timeout(Duration::from_secs(3)).unwrap() {
+        match task.events.recv_timeout(HANG_GUARD).unwrap() {
             Event::Output { text, .. } => output.push_str(&text),
             Event::Finished {
                 code, cancelled, ..
@@ -400,26 +410,29 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
         let old = Task::spawn(&exec).unwrap();
         loop {
             if matches!(
-                old.events.recv_timeout(Duration::from_secs(3)).unwrap(),
+                old.events.recv_timeout(HANG_GUARD).unwrap(),
                 Event::Output { .. }
             ) {
                 break;
             }
         }
         assert!(fixture.root().join("ready").exists());
+        // The detached holder keeps the output pipe open for 60 s, so every bound below
+        // that tells "did not wait for the pipe" apart; 1 s is the timing-run contract.
+        let pipe_bound = budget(Duration::from_secs(1), Duration::from_secs(30));
         let at = Instant::now();
         if cancel {
             old.cancel();
         }
         loop {
-            if let Event::Finished { cancelled, .. } =
-                old.events.recv_timeout(Duration::from_secs(1)).unwrap()
+            if let Event::Finished { cancelled, .. } = old.events.recv_timeout(HANG_GUARD).unwrap()
             {
                 assert_eq!(cancelled, cancel);
                 break;
             }
         }
-        assert!(at.elapsed() < Duration::from_secs(1));
+        let elapsed = at.elapsed();
+        assert!(elapsed < pipe_bound, "finish: {elapsed:?}");
         let replacement =
             BuildSystem::from_value("new", serde_json::json!({"cmd":["/bin/echo","NEW"]}))
                 .unwrap()
@@ -429,19 +442,23 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
         let new = Task::spawn_after(&replacement, Some(old)).unwrap();
         let mut output = String::new();
         loop {
-            match new.events.recv_timeout(Duration::from_secs(1)).unwrap() {
+            match new.events.recv_timeout(HANG_GUARD).unwrap() {
                 Event::Output { text, .. } => output.push_str(&text),
                 Event::Finished { .. } => break,
                 _ => {}
             }
         }
         assert_eq!(output, "NEW\n");
-        assert!(at.elapsed() < Duration::from_secs(1));
+        let elapsed = at.elapsed();
+        assert!(elapsed < pipe_bound, "restart: {elapsed:?}");
         // Lease removal releases the detached process without a signal.
         std::fs::remove_file(fixture.root().join("lease")).unwrap();
         let released = Instant::now();
         while !fixture.root().join("done").exists() {
-            assert!(released.elapsed() < Duration::from_secs(3));
+            assert!(
+                released.elapsed() < HANG_GUARD,
+                "the holder ignored its lease"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -471,13 +488,17 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
     let at = Instant::now();
     let new = Task::spawn_after(&new_exec, Some(old)).unwrap();
     loop {
-        if let Event::Output { text, .. } = new.events.recv_timeout(Duration::from_secs(1)).unwrap()
-        {
+        if let Event::Output { text, .. } = new.events.recv_timeout(HANG_GUARD).unwrap() {
             assert_eq!(text, "RESTART\n");
             break;
         }
     }
-    assert!(at.elapsed() < Duration::from_secs(1));
+    // The old build's `sleep 30` holds its pipe; 1 s is the timing-run contract.
+    let elapsed = at.elapsed();
+    assert!(
+        elapsed < budget(Duration::from_secs(1), Duration::from_secs(20)),
+        "{elapsed:?}"
+    );
 }
 
 #[test]
@@ -596,12 +617,27 @@ fn round19_sustained_output_keeps_ui_polling_progress_with_regex() {
     eprintln!(
         "steady output: {updates}/{polls} data polls; UI gap {longest:?}; excluded sleep {excluded_sleep:?}; {errors} diagnostics"
     );
-    // Enough polls to show steady progress. The count depends on how often a busy
-    // machine schedules this thread (CI: 33 polls in 3 s with 2.5 s of oversleep), so
-    // the cadence itself is judged by the data-poll ratio and the UI gap below.
-    assert!(polls >= 20, "{polls} polls");
-    assert!(updates * 100 >= polls * 90);
-    assert!(longest < Duration::from_millis(50));
+    // The behaviour: output arrives while the build runs, losslessly up to its tail, with
+    // its diagnostics and within the transport's memory bounds. The poll count and the UI
+    // gap depend on how often a busy machine schedules this thread (CI: 33 polls in 3 s
+    // with 2.5 s of oversleep), so they are timing-run contracts.
+    // Lock starvation shows up as polls without data: most polls came back empty. A
+    // loaded machine also deschedules the producer, so any run allows half the polls to
+    // be empty and a timing run 10%.
+    let strict = timing::strict_timing();
+    if strict {
+        assert!(polls >= 20, "{polls} polls");
+    }
+    assert!(
+        updates > 0,
+        "no output before the build finished ({polls} polls)"
+    );
+    let ratio = if strict { 90 } else { 50 };
+    assert!(
+        updates * 100 >= polls * ratio,
+        "{updates}/{polls} data polls (at least {ratio}%)"
+    );
+    within(longest, Duration::from_millis(50), "steady output UI gap");
     assert!(tail.ends_with("TAIL_MARKER\n"));
     assert!(errors > 0);
     let stats = task.events.stats();

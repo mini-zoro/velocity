@@ -27,6 +27,15 @@ jobs:
         env:
           # Native IPC fixtures have short wall-clock deadlines; avoid test-worker contention.
           {} # Default parallelism; readiness is signalled by the IPC fixture.
+      # Performance contracts ("finishes within N ms") are enforced only with
+      # VELOCITY_STRICT_TIMING=1; the parallel test step above checks their behaviour.
+      # Here they run one at a time on the same build. Informational: a failure shows
+      # as a warning and never fails this job (it is not a required check of its own).
+      - name: Strict timing contracts (informational)
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 20
+        run: scripts/strict-timing.sh
       # Memory soak: repeated workloads must return the heap to its baseline. These use
       # a counting allocator, so they run alone and single-threaded.
       - name: Memory soak

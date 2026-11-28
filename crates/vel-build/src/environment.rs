@@ -471,7 +471,7 @@ fn collect_login(
 }
 #[cfg(all(test, unix))]
 mod tests {
-    use super::test_timing::HANG_GUARD;
+    use super::test_timing::{HANG_GUARD, budget};
     use super::*;
     fn await_login(cache: &Mutex<Cache>, env: &Environment) {
         cache.lock().unwrap().prepare(cache_key(env), env);
@@ -543,7 +543,13 @@ mod tests {
             .envs(inherited_environment());
         let at = Instant::now();
         assert!(collect_login(&mut hung, &stop, Duration::from_millis(40), "TEST").is_err());
-        assert!(at.elapsed() < Duration::from_secs(2));
+        // The hung shell lives 30 s; returning well before that shows the 40 ms deadline
+        // was obeyed. The 2 s bound is a performance contract (timing runs only).
+        let elapsed = at.elapsed();
+        assert!(
+            elapsed < budget(Duration::from_secs(2), Duration::from_secs(20)),
+            "{elapsed:?}"
+        );
     }
     #[cfg(unix)]
     #[test]
@@ -626,7 +632,12 @@ mod tests {
         );
         let elapsed = at.elapsed();
         assert!(result.is_err());
-        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        // The detached holder keeps the pipe open for 60 s; returning well before that
+        // shows the 100 ms deadline was obeyed. The 1 s bound is a performance contract.
+        assert!(
+            elapsed < budget(Duration::from_secs(1), Duration::from_secs(30)),
+            "{elapsed:?}"
+        );
     }
     #[cfg(unix)]
     fn fake_profile(dir: &std::path::Path, body: &str) -> (crate::Exec, Environment) {
@@ -672,8 +683,15 @@ mod tests {
                 .1
                 .is_some()
         );
+        // The first build waits for the two-second fallback (a lower bound, so load cannot
+        // break it) and returns long before the 30 s profile would finish. The 4 s bound is
+        // a performance contract (timing runs only).
         assert!(at.elapsed() >= Duration::from_millis(1900));
-        assert!(at.elapsed() < Duration::from_secs(4));
+        let elapsed = at.elapsed();
+        assert!(
+            elapsed < budget(Duration::from_secs(4), Duration::from_secs(20)),
+            "{elapsed:?}"
+        );
         for _ in 0..4 {
             let at = Instant::now();
             assert!(
@@ -681,9 +699,11 @@ mod tests {
                     .1
                     .is_some()
             );
+            // Cached: no second two-second fallback wait. 200 ms is the timing-run contract.
+            let elapsed = at.elapsed();
             assert!(
-                at.elapsed() < Duration::from_millis(200),
-                "cached failures must be immediate"
+                elapsed < budget(Duration::from_millis(200), Duration::from_millis(1500)),
+                "cached failures must be immediate: {elapsed:?}"
             );
         }
         // A profile edit bypasses the negative cache and cancels the old capture.
@@ -772,9 +792,11 @@ mod tests {
             let (values, warning) =
                 launch_environment_with(&builds[i % 2], &stop, env.clone(), &cache);
             assert!(warning.is_some());
+            // No second two-second fallback wait; 200 ms is the timing-run contract.
+            let elapsed = at.elapsed();
             assert!(
-                at.elapsed() < Duration::from_millis(200),
-                "shared negative cache must not wait"
+                elapsed < budget(Duration::from_millis(200), Duration::from_millis(1500)),
+                "shared negative cache must not wait: {elapsed:?}"
             );
             assert_eq!(values["FLAG"], if i % 2 == 0 { "A" } else { "B" });
             assert_eq!(

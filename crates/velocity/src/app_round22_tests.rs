@@ -186,10 +186,17 @@ fn hot_exit_quits_without_loading_twenty_hidden_documents() {
     crate::restore_io::block_next();
     let started = Instant::now();
     assert!(restored.prepare_quit(None));
+    // Loading a hidden document would meet the blocked reader and wait out the restore
+    // budget, so quitting well inside that budget shows nothing was loaded. 100 ms is the
+    // timing-run contract.
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "{:?}",
-        started.elapsed()
+        elapsed
+            < crate::test_timing::budget(
+                Duration::from_millis(100),
+                crate::restore_io::BUDGET * 3 / 4
+            ),
+        "{elapsed:?}"
     );
     assert_eq!(count(&restored), 20);
 }

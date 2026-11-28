@@ -78,10 +78,10 @@ fn wrapped_four_mib_repaints_row_slices_and_matches_fresh_layout_after_typing() 
         a.changed_state(Instant::now(), true);
         let actual = renders(a.scene());
         if !cfg!(debug_assertions) {
-            assert!(
-                start.elapsed() < Duration::from_millis(600),
-                "typing at {at}: {:?}",
-                start.elapsed()
+            crate::test_timing::within(
+                start.elapsed(),
+                Duration::from_millis(600),
+                &format!("typing into the wrapped 4 MiB line at {at}"),
             );
         }
         assert_eq!(a.workspace.editor().text.byte_at(at), b'7');

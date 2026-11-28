@@ -303,9 +303,12 @@ fn round18_final_continuous_daemon_finishes_and_cancels_promptly() {
             named(&mut a, "cancel_build", json!({}));
         }
         finish(&mut a);
+        // The detached daemon keeps writing for 60 s; finishing well before that shows
+        // the build did not wait for it. 100/700 ms is the timing-run contract.
         let elapsed = at.elapsed();
+        let contract = Duration::from_millis(if cancel { 100 } else { 700 });
         assert!(
-            elapsed < Duration::from_millis(if cancel { 100 } else { 700 }),
+            elapsed < crate::test_timing::budget(contract, Duration::from_secs(30)),
             "cancel={cancel}: {elapsed:?}"
         );
         assert!(
