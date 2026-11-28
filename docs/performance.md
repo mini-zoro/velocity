@@ -1551,3 +1551,92 @@ any remaining tail to acquire or presentation. Also compare
 `typing-sqlite-1`, check settled C highlighting and the caret/minimap
 geometry, and verify one Undo restores the text and 1,000 selections.
 The headless times above are not native present-return results.
+
+## Memory: toward 100 MB for one window (2026-11-28)
+
+Goal agreed with the user: one window, a normal project, everyday editing, steady
+physical footprint (Activity Monitor's "Memory") at most 100 MB; each further window
+adds at most 20–30 MB; a CI gate stops regressions. Large files, many image previews
+and several large windows are outside that bound but must not get worse.
+
+### Where the footprint went
+
+A user's `footprint` of 0.1.4 (macOS 26, one large Retina window, 17 h): 123 MB =
+IOSurface 44.4 (three 14.8 MB drawables) + graphics ≈ 14 + MALLOC_SMALL 37 +
+MALLOC_LARGE 15.3 + other ≈ 9. The 12.6 MB MALLOC_LARGE block is the
+13,227,080-byte PingFang SC face copied out of the MobileAsset `PingFang.ttc`
+(macOS 26 resolves Chinese text in the default cascade to it).
+
+The runner's memory scenario (below) on `main`, 1000×680-point window at 1x:
+122–127 MiB = malloc 94 (SMALL 36.5, TINY 28.5, NANO 17, MEDIUM 12–15) + graphics
+11.6 + IOSurface 7.7 (three 1000×672 drawables) + other ≈ 9. A
+MallocStackLogging call tree attributed the heap: project index analysis 55 MB, of
+which 31.9 MB was the merged tmPreferences cache (one deep copy of the merged plist
+settings per distinct scope stack) and about 20 MB regex machines and contexts the
+index parse compiled; index data 9.5 MB; the highlighter 6 MB; and each later window
+loaded a second copy of the syntax set (4.6 MB) with its own caches. Minimizing,
+hiding or covering a window released no IOSurface, and a window kept its third
+drawable for as long as it stayed idle.
+
+### Changes
+
+| Change | Measured | Cost |
+| --- | --- | --- |
+| Merged tmPreferences metadata shared per matching rule sequence; bounded cache | Counting allocator, index analysis of this repository's files: 12 files +50.8 → +25.4 MiB, 18 files +68.3 → +22.8 MiB | One extra hash lookup on a cache miss |
+| MobileAsset and user fonts mapped from a private APFS clone (`clonefile`, unlinked after `mmap`) | `font_footprint` (3 runs): PingFang SC 15.47 → 2.29 MB; default Menlo cascade with Chinese 18.24 → 5.16 MB | One clone/open/unlink per collection |
+| Glyph coverage in an R8 page array, color glyphs and images in an RGBA array | Runner graphics 11.6 → 8.6 MiB; test page 4 → 1 MiB of atlas | One more binding, a branch per glyph fragment |
+| Idle window settles at two drawables (pool flushed and refilled once when the cap drops) | Runner one-window IOSurface 7.7 → 5.1 MiB in all three sessions of the last run (two trim frames alone left 7.7 in one of three) | One drawable allocation 350 ms after a burst |
+| Background window keeps one drawable (covered, minimized, not key, or app inactive; 3 s after its last frame) | Runner: three windows 10.2 → 7.7 MiB with another app in front; content pixels unchanged | One allocation in the first frame back |
+| Later windows and the Settings window share the first window's syntax assets | Counting allocator, second window: +10.4 → +6.0 MiB created, +20.9 → +11.3 MiB after highlighting a Rust file | None |
+
+All 206 offscreen render scenes (1x and 2x, dark and light) stayed byte-identical,
+except `find_results_tab` and `phantom_selections`, which also differ between two
+runs of the unchanged build. Paired with `main`, five alternating runs, isolated
+home: retired instructions features +0.01%, 1,000 carets +0.11%, smoke −0.27%
+(medians; spread about 2%); headless replay of `app.rs` typing p95 −2.6%, scroll p95
++1.7%, highlight first/warm +0.4/+0.8%, startup first scene −0.4%: all within run-to-run
+noise. The drawable pool keeps three drawables while frames arrive in bursts, so the
+scrolling and typing frame pacing is unchanged; native frame timing on a Retina Mac
+was not re-measured here.
+
+Not changed: the preview pixel budget (128 MiB) and the HTML image LRU (32 MiB) only
+fill while images are shown and hold nothing in everyday editing; the regex machine
+budget (32 MiB; about 19 MB in the three-window scenario's call tree) trades directly against
+highlight and index CPU; window-sized drawables of the key window stay at two (one is
+on screen, CAMetalLayer allows no fewer).
+
+### Memory gate
+
+`scripts/e2e/memory.swift`, run on every pull request by `gui-e2e.yml` and on demand
+with `suite=memory` (optionally `memory_compare_ref` and `memory_diagnostics`). It
+copies twelve of this repository's files into a Git project, starts Velocity with an
+isolated `--data-dir` and drives it only through the CLI: ten tabs, paging, typing,
+find, Goto Anything, tab switching, saving, closing five tabs; then a second and a
+third window with a smaller session each. After every step it waits until
+`ri_phys_footprint` stays within 512 KiB for three seconds. It fails above 95 MiB for
+one window or 12 MiB for each further window (median of the sessions).
+
+Runner results (macOS 15.8, 1024×768 at 1x), median of three sessions per build, run
+`46139346602`:
+
+| | `main` | branch |
+| --- | ---: | ---: |
+| One window | 122.1 MiB | 85.8 MiB |
+| Second window | +13.9 MiB | +6.5 MiB |
+| Third window | +14.4 MiB | +8.5 MiB |
+| One window: malloc / graphics / IOSurface | 92–97 / 11.6 / 5.1–7.7 | 60–64 / 8.6 / 5.1 |
+
+The limits sit about 7% and 2 MiB above the branch (its sessions ranged 84.5–90.5 MiB
+and 5.9–10.5 MiB over the last two runs) and far below `main`.
+
+Mapping to a Retina Mac: the runner's drawables are 2.6 MiB; a 2560×1440-pixel window
+(the user's 14.8 MB) holds two of 14.8 MB while it is the key window and one in the
+background. The same session there is about 85.8 − 5.1 + 29.6 + 1–2 (more R8 atlas
+pages at 2x) ≈ 112 MiB in front and ≈ 97 MiB with another application in front; the
+95 MiB gate corresponds to about 121 MiB there. The scenario is heavier than the
+user's own session: without its drawables `main` used about 115 MiB on the runner
+against 79 MB on the user's Mac. Applying the measured mechanisms to the user's 123 MB:
+−14.8 (third drawable), −12.6 (PingFang face), −3 to −6 (atlas), and part of the
+heap (the metadata cache scales with the indexed project), so about 75–93 MB in front
+and 60–78 MB with Activity Monitor in front. A further window of that size adds about
+15 MB for its drawable plus 4–6 MB of heap and graphics.
