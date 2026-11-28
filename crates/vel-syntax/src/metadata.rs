@@ -96,9 +96,31 @@ struct SymbolRule {
 pub struct MetadataSet {
     entries: Vec<Entry>,
     symbol_rules: Vec<SymbolRule>,
-    cache: Mutex<HashMap<Vec<Scope>, Arc<Metadata>>>,
+    cache: Mutex<EffectiveCache>,
     patterns: Mutex<HashMap<String, Regex>>,
     transforms: Mutex<HashMap<String, Result<SymbolTransformation, MetadataError>>>,
+}
+
+/// Scope stacks seen at once before the stack map starts over. A project index
+/// meets every distinct stack of every file; each costs a key and a pointer.
+const CACHE_STACKS: usize = 16_384;
+/// Distinct merge sequences kept before that map starts over.
+const CACHE_MERGES: usize = 4096;
+
+/// Effective metadata depends only on which rules match, in merge order, and many
+/// scope stacks share one such sequence. Each sequence is merged once: before this,
+/// every distinct stack held its own deep copy of the merged plist settings (31 MB
+/// of a twelve-file project index, 2026-11-28).
+#[derive(Debug, Default)]
+struct EffectiveCache {
+    stacks: HashMap<Vec<Scope>, Arc<Metadata>>,
+    merges: HashMap<Vec<usize>, Arc<Metadata>>,
+}
+impl EffectiveCache {
+    fn clear(&mut self) {
+        self.stacks.clear();
+        self.merges.clear();
+    }
 }
 impl Clone for MetadataError {
     fn clone(&self) -> Self {
@@ -328,25 +350,34 @@ impl MetadataSet {
         (*self.shared_for(scopes.as_slice())).clone()
     }
     pub(crate) fn shared_for(&self, scopes: &[Scope]) -> Arc<Metadata> {
-        if let Some(m) = self.cache.lock().unwrap().get(scopes) {
+        if let Some(m) = self.cache.lock().unwrap().stacks.get(scopes) {
             return m.clone();
         }
         let mut matches: Vec<_> = self
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(i, e)| e.selector.does_match(scopes).map(|s| (s, i, &e.metadata)))
+            .filter_map(|(i, e)| e.selector.does_match(scopes).map(|s| (s, i)))
             .collect();
-        matches.sort_by_key(|(s, i, _)| (*s, *i));
-        let mut metadata = Metadata::default();
-        for (_, _, m) in matches {
-            metadata.merge(m);
+        matches.sort_unstable();
+        let sequence: Vec<usize> = matches.into_iter().map(|(_, i)| i).collect();
+        let shared = self.cache.lock().unwrap().merges.get(&sequence).cloned();
+        let metadata = shared.unwrap_or_else(|| {
+            let mut metadata = Metadata::default();
+            for &i in &sequence {
+                metadata.merge(&self.entries[i].metadata);
+            }
+            Arc::new(metadata)
+        });
+        let mut cache = self.cache.lock().unwrap();
+        if cache.merges.len() >= CACHE_MERGES && !cache.merges.contains_key(&sequence) {
+            cache.merges.clear();
         }
-        let metadata = Arc::new(metadata);
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(scopes.to_vec(), metadata.clone());
+        cache.merges.insert(sequence, metadata.clone());
+        if cache.stacks.len() >= CACHE_STACKS {
+            cache.stacks.clear();
+        }
+        cache.stacks.insert(scopes.to_vec(), metadata.clone());
         metadata
     }
     /// Tests a cached Oniguruma indentation pattern. Empty/missing patterns do not match.
@@ -697,4 +728,117 @@ pub(crate) fn preserve_cdata(bytes: &[u8]) -> Result<Vec<u8>, MetadataError> {
     }
     out.push_str(rest);
     Ok(out.into_bytes())
+}
+
+#[cfg(test)]
+mod effective_cache_tests {
+    use super::*;
+
+    fn preferences(scope: &str, settings: &str) -> Vec<u8> {
+        format!(
+            "<plist version=\"1.0\"><dict><key>scope</key><string><![CDATA[{scope}]]></string><key>settings</key><dict>{settings}</dict></dict></plist>"
+        )
+        .into_bytes()
+    }
+
+    fn fixture() -> MetadataSet {
+        let mut set = MetadataSet::new();
+        set.add_plist(&preferences(
+            "source.fixture",
+            "<key>increaseIndentPattern</key><string>\\{$</string><key>items</key><array><string>a</string><string>b</string></array>",
+        ))
+        .unwrap();
+        set.add_plist(&preferences(
+            "source.fixture string",
+            "<key>preserveIndent</key><true/><key>increaseIndentPattern</key><string></string>",
+        ))
+        .unwrap();
+        set
+    }
+
+    fn stack(text: &str) -> ScopeStack {
+        text.parse().unwrap()
+    }
+
+    /// The pre-cache merge, for comparison.
+    fn merged(set: &MetadataSet, scopes: &[Scope]) -> Metadata {
+        let mut matches: Vec<_> = set
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.selector.does_match(scopes).map(|s| (s, i, &e.metadata)))
+            .collect();
+        matches.sort_by_key(|(s, i, _)| (*s, *i));
+        let mut metadata = Metadata::default();
+        for (_, _, m) in matches {
+            metadata.merge(m);
+        }
+        metadata
+    }
+
+    #[test]
+    fn stacks_matching_the_same_rules_share_one_merged_value() {
+        let set = fixture();
+        let block = stack("source.fixture meta.block.fixture");
+        let other = stack("source.fixture meta.function.fixture punctuation.fixture");
+        let string = stack("source.fixture string.quoted.fixture");
+        let a = set.shared_for(block.as_slice());
+        let b = set.shared_for(other.as_slice());
+        let c = set.shared_for(string.as_slice());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &c));
+        for (stack, value) in [(&block, &a), (&other, &b), (&string, &c)] {
+            let expected = merged(&set, stack.as_slice());
+            assert_eq!(value.settings, expected.settings);
+            assert_eq!(value.shell_variables, expected.shell_variables);
+        }
+        assert_eq!(c.string("increaseIndentPattern"), Some(""));
+        assert_eq!(a.string("increaseIndentPattern"), Some("\\{$"));
+        let cache = set.cache.lock().unwrap();
+        assert_eq!(cache.stacks.len(), 3);
+        assert_eq!(cache.merges.len(), 2);
+    }
+
+    #[test]
+    fn a_project_full_of_distinct_stacks_keeps_the_cache_bounded() {
+        let set = fixture();
+        let atoms: Vec<Scope> = [
+            "meta.block.fixture",
+            "meta.function.fixture",
+            "string.quoted.fixture",
+            "comment.line.fixture",
+            "keyword.control.fixture",
+            "entity.name.fixture",
+            "variable.other.fixture",
+            "punctuation.fixture",
+        ]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+        let root: Scope = "source.fixture".parse().unwrap();
+        let mut seen = 0;
+        'outer: for a in &atoms {
+            for b in &atoms {
+                for c in &atoms {
+                    for d in &atoms {
+                        for e in &atoms {
+                            let scopes = [root, *a, *b, *c, *d, *e];
+                            let value = set.shared_for(&scopes);
+                            if seen % 997 == 0 {
+                                assert_eq!(value.settings, merged(&set, &scopes).settings);
+                            }
+                            seen += 1;
+                            if seen > CACHE_STACKS + 100 {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let cache = set.cache.lock().unwrap();
+        assert!(cache.stacks.len() <= CACHE_STACKS);
+        // Every one of those stacks matches one of two rule sequences.
+        assert_eq!(cache.merges.len(), 2);
+    }
 }
